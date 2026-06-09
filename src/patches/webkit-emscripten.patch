@@ -67,6 +67,18 @@ index ea9ea17802..0d82fa3865 100644
      COMMAND ${CMAKE_COMMAND} -E touch_nocreate ${JavaScriptCore_DERIVED_SOURCES_DIR}/${LLIntOutput}
      WORKING_DIRECTORY ${JavaScriptCore_DERIVED_SOURCES_DIR}
      VERBATIM)
+diff --git a/Source/JavaScriptCore/PlatformEmscripten.cmake b/Source/JavaScriptCore/PlatformEmscripten.cmake
+new file mode 100644
+index 0000000000..0e550c8e67
+--- /dev/null
++++ b/Source/JavaScriptCore/PlatformEmscripten.cmake
+@@ -0,0 +1,6 @@
++# JavaScriptCore platform file for PORT=Emscripten.
++# ENABLE_REMOTE_INSPECTOR defaults OFF for this port; if it is ever enabled,
++# use the socket-based remote inspector like JSCOnly/PlayStation (no GLib).
++if (ENABLE_REMOTE_INSPECTOR)
++    include(inspector/remote/Socket.cmake)
++endif ()
 diff --git a/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp b/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
 index 26e825ace4..fbb5c47baf 100644
 --- a/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
@@ -161,6 +173,45 @@ index fd0e22ccea..b3675206db 100644
  #include <sys/types.h>
  #endif
  
+diff --git a/Source/WTF/wtf/PlatformEmscripten.cmake b/Source/WTF/wtf/PlatformEmscripten.cmake
+new file mode 100644
+index 0000000000..3362ec0b21
+--- /dev/null
++++ b/Source/WTF/wtf/PlatformEmscripten.cmake
+@@ -0,0 +1,33 @@
++# WTF platform sources for PORT=Emscripten. This is exactly the set the
++# Phase 1 JSCOnly wasm build compiled (PlatformJSCOnly.cmake, unix branch,
++# generic event loop, CMAKE_SYSTEM_NAME=Emscripten -> generic memory paths),
++# plus the generic RunLoop/WorkQueue pair the PlayStation port uses.
++
++list(APPEND WTF_SOURCES
++    generic/MainThreadGeneric.cpp
++    generic/MemoryFootprintGeneric.cpp
++    generic/MemoryPressureHandlerGeneric.cpp
++    generic/RunLoopGeneric.cpp
++    generic/WorkQueueGeneric.cpp
++
++    posix/CPUTimePOSIX.cpp
++    posix/FileHandlePOSIX.cpp
++    posix/FileSystemPOSIX.cpp
++    posix/MappedFileDataPOSIX.cpp
++    posix/OSAllocatorPOSIX.cpp
++    posix/ThreadingPOSIX.cpp
++
++    text/unix/TextBreakIteratorInternalICUUnix.cpp
++
++    unix/LanguageUnix.cpp
++    unix/LoggingUnix.cpp
++    unix/UniStdExtrasUnix.cpp
++)
++
++list(APPEND WTF_PUBLIC_HEADERS
++    unix/UnixFileDescriptor.h
++)
++
++list(APPEND WTF_LIBRARIES
++    Threads::Threads
++)
 diff --git a/Source/WTF/wtf/RawHex.h b/Source/WTF/wtf/RawHex.h
 index 2e375967e2..0c67eb0154 100644
 --- a/Source/WTF/wtf/RawHex.h
@@ -215,3 +266,207 @@ index a3e0d45073..492395e879 100644
  #if OS(DARWIN)
      kern_return_t result = thread_suspend(m_platformThread);
      if (result != KERN_SUCCESS)
+diff --git a/Source/WebCore/PAL/pal/PlatformEmscripten.cmake b/Source/WebCore/PAL/pal/PlatformEmscripten.cmake
+new file mode 100644
+index 0000000000..0fc6a680f4
+--- /dev/null
++++ b/Source/WebCore/PAL/pal/PlatformEmscripten.cmake
+@@ -0,0 +1,12 @@
++# PAL platform file for PORT=Emscripten. Mirrors PlatformPlayStation.cmake:
++# OpenSSL-backed crypto digest, generic clock, stub sound, generic kill ring.
++list(APPEND PAL_SOURCES
++    crypto/openssl/CryptoDigestOpenSSL.cpp
++
++    system/ClockGeneric.cpp
++    system/Sound.cpp
++
++    text/KillRing.cpp
++)
++
++list(APPEND PAL_LIBRARIES OpenSSL::Crypto)
+diff --git a/Source/WebCore/PlatformEmscripten.cmake b/Source/WebCore/PlatformEmscripten.cmake
+new file mode 100644
+index 0000000000..9d1d5a2557
+--- /dev/null
++++ b/Source/WebCore/PlatformEmscripten.cmake
+@@ -0,0 +1,34 @@
++# WebCore platform file for PORT=Emscripten.
++# Structure cribbed from PlatformPlayStation.cmake / PlatformWin.cmake:
++# curl networking + ImageDecoders + OpenSSL crypto, Skia for graphics.
++# No EGL/libwpe/TextureMapper — Phase 2 renders via Skia CPU raster into a
++# memory buffer that the embedder blits to the host <canvas>.
++
++include(platform/Curl.cmake)
++include(platform/ImageDecoders.cmake)
++include(platform/OpenSSL.cmake)
++
++if (USE_SKIA)
++    include(platform/Skia.cmake)
++endif ()
++
++list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
++    ${WEBCORE_DIR}/platform
++    ${WEBCORE_DIR}/platform/generic
++    ${WEBCORE_DIR}/platform/mediacapabilities
++)
++
++list(APPEND WebCore_SOURCES
++    platform/generic/KeyedDecoderGeneric.cpp
++    platform/generic/KeyedEncoderGeneric.cpp
++
++    platform/text/Hyphenation.cpp
++    platform/text/LocaleICU.cpp
++
++    platform/unix/LoggingUnix.cpp
++    platform/unix/SharedMemoryUnix.cpp
++)
++
++# Emscripten-specific port sources (theme, platform screen, user agent,
++# pasteboard, system font database stubs) land here in Phase 3 alongside the
++# embedder; configure does not need them.
+diff --git a/Source/cmake/OptionsEmscripten.cmake b/Source/cmake/OptionsEmscripten.cmake
+new file mode 100644
+index 0000000000..9130b34d1c
+--- /dev/null
++++ b/Source/cmake/OptionsEmscripten.cmake
+@@ -0,0 +1,128 @@
++# PORT=Emscripten: WebCore + JavaScriptCore compiled to WebAssembly with
++# Emscripten. Single-process WebKit1-style embedder; no WebKit2, no tools.
++#
++# Modeled on OptionsJSCOnly.cmake (proven by the Phase 1 wasm JSCOnly build),
++# with the WebCore dependency surface borrowed from OptionsWin.cmake and
++# OptionsPlayStation.cmake (curl networking, Skia CPU raster).
++
++find_package(Threads REQUIRED)
++
++set(CMAKE_C_VISIBILITY_PRESET hidden)
++set(CMAKE_CXX_VISIBILITY_PRESET hidden)
++set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
++
++add_definitions(-DBUILDING_EMSCRIPTEN__)
++
++set(PROJECT_VERSION_MAJOR 1)
++set(PROJECT_VERSION_MINOR 0)
++set(PROJECT_VERSION_MICRO 0)
++set(PROJECT_VERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_MICRO})
++
++# Single-process embedder: WebCore is the top of our stack. No WebKit2
++# (multiprocess/IPC), no legacy API layer, no inspector UI, no Tools
++# (MiniBrowser, TestWebKitAPI, DumpRenderTree).
++set(ENABLE_WEBKIT OFF)
++set(ENABLE_WEBKIT_LEGACY OFF)
++set(ENABLE_WEBINSPECTORUI OFF)
++set(ENABLE_TOOLS OFF)
++set(ENABLE_WEBGPU OFF)
++
++WEBKIT_OPTION_BEGIN()
++
++WEBKIT_OPTION_DEFINE(ENABLE_STATIC_JSC "Whether to build JavaScriptCore as a static library." PUBLIC ON)
++
++# JavaScriptCore: CLoop interpreter only — wasm cannot self-JIT.
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_JIT PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_FTL_JIT PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_DFG_JIT PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_C_LOOP PRIVATE ON)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBASSEMBLY PRIVATE OFF)
++
++# HARD CONSTRAINT: Thread::suspend() traps under wasm — never enable.
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SAMPLING_PROFILER PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_REMOTE_INSPECTOR PRIVATE OFF)
++
++# Allocator: emmalloc/dlmalloc via USE_SYSTEM_MALLOC. bmalloc's virtual
++# memory reservation tricks do not fit wasm32 linear memory.
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_SYSTEM_MALLOC PRIVATE ON)
++
++# Graphics: Skia CPU raster (vendored Source/ThirdParty/skia) into a plain
++# memory buffer; the embedder blits pixels to the host <canvas>. cairo is
++# dead in WebKit >= 2.46. The GPU path (Skia -> WebGL2) is a later phase.
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_SKIA PRIVATE ON)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_SKIA_ENCODERS PRIVATE OFF)
++
++# Optional web features: everything OFF for first bring-up.
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_VIDEO PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEB_AUDIO PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBGL PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_SOURCE PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_STREAM PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEB_RTC PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_ENCRYPTED_MEDIA PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_GAMEPAD PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SPEECH_SYNTHESIS PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_NOTIFICATIONS PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_GEOLOCATION PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_FULLSCREEN_API PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBXR PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_XSLT PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MATHML PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBDRIVER PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MINIBROWSER PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_API_TESTS PRIVATE OFF)
++
++# Image formats beyond the sysroot tier (jpeg/png/webp) stay off.
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_AVIF PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_JPEGXL PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_LCMS PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_WOFF2 PRIVATE OFF)
++
++WEBKIT_OPTION_END()
++
++# wasm builds are fully static; a SHARED JavaScriptCore is not supported.
++if (NOT ENABLE_STATIC_JSC)
++    message(FATAL_ERROR "PORT=Emscripten requires ENABLE_STATIC_JSC=ON (wasm builds are fully static)")
++endif ()
++
++# Event loop: generic RunLoop (RunLoopGeneric.cpp). Emscripten has no GLib.
++SET_AND_EXPOSE_TO_BUILD(USE_GENERIC_EVENT_LOOP 1)
++SET_AND_EXPOSE_TO_BUILD(WTF_DEFAULT_EVENT_LOOP 0)
++
++# Platform options (PlayStation idiom): socket-backed remote inspector when
++# enabled (OFF by default here), unix-domain-socket SharedMemory handles —
++# platform/unix/SharedMemoryUnix.cpp is gated on USE(UNIX_DOMAIN_SOCKETS).
++SET_AND_EXPOSE_TO_BUILD(USE_INSPECTOR_SOCKET_SERVER ${ENABLE_REMOTE_INSPECTOR})
++SET_AND_EXPOSE_TO_BUILD(USE_UNIX_DOMAIN_SOCKETS ON)
++
++find_package(ICU 70.1 REQUIRED COMPONENTS data i18n uc)
++
++if (ENABLE_WEBCORE)
++    # Networking: WebKit curl backend (platform/Curl.cmake), Win-port glue.
++    SET_AND_EXPOSE_TO_BUILD(USE_CURL ON)
++    SET_AND_EXPOSE_TO_BUILD(USE_OPENSSL ON)
++
++    if (USE_SKIA)
++        find_package(HarfBuzz 1.4.2 REQUIRED COMPONENTS ICU)
++        SET_AND_EXPOSE_TO_BUILD(USE_HARFBUZZ ON)
++    endif ()
++
++    # Provided by third_party/wasm-sysroot (found via CMAKE_FIND_ROOT_PATH).
++    find_package(Freetype 2.9.0 REQUIRED)
++    find_package(JPEG REQUIRED)
++    find_package(LibXml2 2.9.7 REQUIRED)
++    find_package(PNG REQUIRED)
++    find_package(SQLite3 REQUIRED)
++    find_package(WebP REQUIRED COMPONENTS demux)
++    find_package(ZLIB REQUIRED)
++
++    # KNOWN GAPS — kept LAST so the configure probe surfaces everything above
++    # first. curl is the expected Phase 2 configure failure (handoff/research-02):
++    # curl 8.x + mbedTLS + nghttp2 + brotli are not built into the sysroot yet.
++    # OpenSSL and LibPSL ride with the curl backend (platform/Curl.cmake links
++    # CURL::libcurl, OpenSSL::SSL, LibPSL::LibPSL). The vendored Skia also
++    # REQUIREs Fontconfig on non-Win/non-PlayStation (ThirdParty/skia line 6).
++    find_package(CURL 7.85.0 REQUIRED)
++    find_package(OpenSSL REQUIRED)
++    find_package(LibPSL 0.20.2 REQUIRED)
++endif ()
+diff --git a/Source/cmake/WebKitCommon.cmake b/Source/cmake/WebKitCommon.cmake
+index 639b7e5d1e..cda5331506 100644
+--- a/Source/cmake/WebKitCommon.cmake
++++ b/Source/cmake/WebKitCommon.cmake
+@@ -43,6 +43,7 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
+     # Determine which port will be built
+     # -----------------------------------------------------------------------------
+     set(ALL_PORTS
++        Emscripten
+         GTK
+         JSCOnly
+         Mac

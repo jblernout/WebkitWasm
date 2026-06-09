@@ -25,17 +25,28 @@ Then: `emcmake cmake -DPORT=Emscripten` probe (extend tools/build-jsc.sh
 pattern → tools/build-webcore.sh), iterate on the collision surface exactly
 like Phase 1 (batch errors, ninja -k 50, export patches after every fix).
 
-## Known gaps to expect at the probe
-- **curl not built yet** — configure will fail at find_package(CURL).
-  Build curl 8.x + mbedTLS + nghttp2 + brotli into the sysroot (lift
-  ading2210/libcurl.js tools/*.sh recipes; see research-02). WebCore needs
-  curl headers to COMPILE even though networking is Phase 4.
-- **Skia**: vendored at Source/ThirdParty/skia — check how Win/WPE build it
-  (research-03 §6) and whether its CMake builds standalone under emcmake.
-- Scout flagged "graphics backend bridge" as the hard part — partially
-  overstated: our Phase 2 plan is Skia CPU raster into a plain memory
-  buffer (no device needed), embedder copies pixels to canvas
-  (putImageData/ImageBitmap). The WebGL fast path is Phase 6, not now.
+## STATUS UPDATE 2026-06-09 (skeleton DONE — agent run, committed)
+PORT=Emscripten exists and configures: ALL_PORTS edit +
+OptionsEmscripten.cmake + Platform files for WTF/JSC/WebCore/PAL +
+tools/build-webcore.sh. Configure resolves ALL nine sysroot deps and stops
+exactly at `Could NOT find CURL` (expected). Patch ledger now 472 lines /
+14 diffs (exporter now uses --intent-to-add so new files are captured).
+Probe-confirmed queue behind curl: OpenSSL → LibPSL → Fontconfig (vendored
+skia/CMakeLists.txt:6 REQUIREs it on non-Win/non-PlayStation).
+
+## DECISIONS NEEDED NEXT SESSION (before building the curl tier)
+1. **TLS stack: OpenSSL, not mbedTLS** (amends decision-002!): WebCore's
+   curl backend hardwires the OpenSSL API (OpenSSLHelper.cpp,
+   CryptoDigestOpenSSL, links OpenSSL::SSL + LibPSL). The libcurl.js
+   mbedTLS recipe applies to the SOCKFS/Wisp shim pattern, NOT the TLS
+   choice. Build OpenSSL (or BoringSSL) for wasm + curl against it +
+   libpsl. High confidence per agent's Codex-checked probe.
+2. **Fontconfig**: build into sysroot vs patch vendored Skia's fontmgr
+   selection — undecided.
+3. **TextureMapper/compositing**: currently OFF; medium confidence
+   Skia-CPU-raster-only compiles without it — verify at compile stage.
+
+## Next concrete task (original spec below, partially superseded)
 
 ## Standing constraints (do not violate)
 - One mutator thread per VM (Thread::suspend traps under wasm).
