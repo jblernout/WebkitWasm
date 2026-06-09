@@ -1,0 +1,202 @@
+diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
+index ea9ea17802..0d82fa3865 100644
+--- a/Source/JavaScriptCore/CMakeLists.txt
++++ b/Source/JavaScriptCore/CMakeLists.txt
+@@ -312,11 +312,19 @@ add_custom_command(
+     COMMAND ${Ruby_EXECUTABLE} ${JAVASCRIPTCORE_DIR}/offlineasm/generate_settings_extractor.rb -I${JavaScriptCore_DERIVED_SOURCES_DIR}/ ${JAVASCRIPTCORE_DIR}/llint/LowLevelInterpreter.asm ${JavaScriptCore_DERIVED_SOURCES_DIR}/LLIntDesiredSettings.h ${OFFLINE_ASM_BACKEND}
+     VERBATIM)
+ 
++# Under Emscripten, $<TARGET_FILE> is the .js loader stub; the byte-scannable
++# binary (where offlineasm's magic values live) is the companion .wasm file.
++if (EMSCRIPTEN)
++    set(LLINT_SETTINGS_BINARY $<TARGET_FILE_DIR:LLIntSettingsExtractor>/LLIntSettingsExtractor.wasm)
++else ()
++    set(LLINT_SETTINGS_BINARY $<TARGET_FILE:LLIntSettingsExtractor>)
++endif ()
++
+ add_custom_command(
+     OUTPUT ${JavaScriptCore_DERIVED_SOURCES_DIR}/LLIntDesiredOffsets.h
+     MAIN_DEPENDENCY ${JAVASCRIPTCORE_DIR}/offlineasm/generate_offset_extractor.rb
+     DEPENDS LLIntSettingsExtractor ${LLINT_ASM} ${OFFLINE_ASM} ${JavaScriptCore_DERIVED_SOURCES_DIR}/InitBytecodes.asm ${JavaScriptCore_DERIVED_SOURCES_DIR}/AirOpcode.h ${JavaScriptCore_DERIVED_SOURCES_DIR}/WasmOps.h
+-    COMMAND ${Ruby_EXECUTABLE} ${JAVASCRIPTCORE_DIR}/offlineasm/generate_offset_extractor.rb -I${JavaScriptCore_DERIVED_SOURCES_DIR}/ ${JAVASCRIPTCORE_DIR}/llint/LowLevelInterpreter.asm $<TARGET_FILE:LLIntSettingsExtractor> ${JavaScriptCore_DERIVED_SOURCES_DIR}/LLIntDesiredOffsets.h ${OFFLINE_ASM_BACKEND} ${BUILD_VARIANTS}
++    COMMAND ${Ruby_EXECUTABLE} ${JAVASCRIPTCORE_DIR}/offlineasm/generate_offset_extractor.rb -I${JavaScriptCore_DERIVED_SOURCES_DIR}/ ${JAVASCRIPTCORE_DIR}/llint/LowLevelInterpreter.asm ${LLINT_SETTINGS_BINARY} ${JavaScriptCore_DERIVED_SOURCES_DIR}/LLIntDesiredOffsets.h ${OFFLINE_ASM_BACKEND} ${BUILD_VARIANTS}
+     VERBATIM)
+ 
+ # JSCBuiltins
+@@ -417,6 +425,12 @@ if (NOT USE_SYSTEM_MALLOC)
+     list(APPEND LLIntSettingsExtractor_DEPENDENCIES bmalloc_CopyHeaders)
+ endif ()
+ WEBKIT_EXECUTABLE(LLIntSettingsExtractor)
++if (EMSCRIPTEN)
++    # Link at -O0: Binaryen's memory-packing pass (wasm-opt, run at -O1+)
++    # splits data segments around zero runs, which truncates the
++    # magic-value tables that offlineasm byte-scans in the .wasm binary.
++    target_link_options(LLIntSettingsExtractor PRIVATE "-O0")
++endif ()
+ 
+ # LLIntSettingsExtractor target needs to have a direct or indirect
+ # dependency to Bytecodes target for CMake Visual Studio generator to
+@@ -446,6 +460,10 @@ if (NOT USE_SYSTEM_MALLOC)
+     list(APPEND LLIntOffsetsExtractor_DEPENDENCIES bmalloc_CopyHeaders)
+ endif ()
+ WEBKIT_EXECUTABLE(LLIntOffsetsExtractor)
++if (EMSCRIPTEN)
++    # Same memory-packing issue as LLIntSettingsExtractor above.
++    target_link_options(LLIntOffsetsExtractor PRIVATE "-O0")
++endif ()
+ 
+ # The build system will execute asm.rb every time LLIntOffsetsExtractor's mtime is newer than
+ # LLIntAssembly.h's mtime. The problem we have here is: asm.rb has some built-in optimization
+@@ -463,11 +481,18 @@ if (MSVC AND NOT ENABLE_C_LOOP)
+     set(OFFLINE_ASM_ARGS --platform=Windows)
+ endif ()
+ 
++# Same .js-stub vs .wasm-binary distinction as LLIntSettingsExtractor above.
++if (EMSCRIPTEN)
++    set(LLINT_OFFSETS_BINARY $<TARGET_FILE_DIR:LLIntOffsetsExtractor>/LLIntOffsetsExtractor.wasm)
++else ()
++    set(LLINT_OFFSETS_BINARY $<TARGET_FILE:LLIntOffsetsExtractor>)
++endif ()
++
+ add_custom_command(
+     OUTPUT ${JavaScriptCore_DERIVED_SOURCES_DIR}/${LLIntOutput}
+     MAIN_DEPENDENCY ${JAVASCRIPTCORE_DIR}/offlineasm/asm.rb
+     DEPENDS LLIntOffsetsExtractor ${LLINT_ASM} ${OFFLINE_ASM} ${JavaScriptCore_DERIVED_SOURCES_DIR}/InitBytecodes.asm
+-    COMMAND ${CMAKE_COMMAND} -E env CMAKE_CXX_COMPILER_ID=${CMAKE_CXX_COMPILER_ID} GCC_OFFLINEASM_SOURCE_MAP=${GCC_OFFLINEASM_SOURCE_MAP} ${Ruby_EXECUTABLE} ${JAVASCRIPTCORE_DIR}/offlineasm/asm.rb -I${JavaScriptCore_DERIVED_SOURCES_DIR}/ ${JAVASCRIPTCORE_DIR}/llint/LowLevelInterpreter.asm $<TARGET_FILE:LLIntOffsetsExtractor> ${JavaScriptCore_DERIVED_SOURCES_DIR}/${LLIntOutput} ${BUILD_VARIANTS} ${OFFLINE_ASM_ARGS}
++    COMMAND ${CMAKE_COMMAND} -E env CMAKE_CXX_COMPILER_ID=${CMAKE_CXX_COMPILER_ID} GCC_OFFLINEASM_SOURCE_MAP=${GCC_OFFLINEASM_SOURCE_MAP} ${Ruby_EXECUTABLE} ${JAVASCRIPTCORE_DIR}/offlineasm/asm.rb -I${JavaScriptCore_DERIVED_SOURCES_DIR}/ ${JAVASCRIPTCORE_DIR}/llint/LowLevelInterpreter.asm ${LLINT_OFFSETS_BINARY} ${JavaScriptCore_DERIVED_SOURCES_DIR}/${LLIntOutput} ${BUILD_VARIANTS} ${OFFLINE_ASM_ARGS}
+     COMMAND ${CMAKE_COMMAND} -E touch_nocreate ${JavaScriptCore_DERIVED_SOURCES_DIR}/${LLIntOutput}
+     WORKING_DIRECTORY ${JavaScriptCore_DERIVED_SOURCES_DIR}
+     VERBATIM)
+diff --git a/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp b/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
+index 26e825ace4..fbb5c47baf 100644
+--- a/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
++++ b/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
+@@ -68,7 +68,7 @@ uint32_t computeJSCBytecodeCacheVersion()
+         }
+         cacheVersion.construct(0);
+         dataLogLnIf(JSCBytecodeCacheVersionInternal::verbose, "Failed to get UUID for JavaScriptCore framework");
+-#elif OS(UNIX) && !PLATFORM(PLAYSTATION) && !OS(HAIKU) && !OS(QNX)
++#elif OS(UNIX) && !PLATFORM(PLAYSTATION) && !OS(HAIKU) && !OS(QNX) && !defined(__EMSCRIPTEN__)
+         auto result = ([&] -> std::optional<uint32_t> {
+             Dl_info info { };
+             if (!dladdr(jsFunctionAddr, &info))
+diff --git a/Source/JavaScriptCore/runtime/MathCommon.cpp b/Source/JavaScriptCore/runtime/MathCommon.cpp
+index 71b9262c4f..c5f8543491 100644
+--- a/Source/JavaScriptCore/runtime/MathCommon.cpp
++++ b/Source/JavaScriptCore/runtime/MathCommon.cpp
+@@ -604,7 +604,7 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(f64_nearest, double, (double operand))
+     return std::nearbyint(operand);
+ }
+ 
+-#if (OS(LINUX) && !defined(__GLIBC__)) || OS(HAIKU)
++#if (OS(LINUX) && !defined(__GLIBC__)) || OS(HAIKU) || defined(__EMSCRIPTEN__)
+ static inline float roundevenf(float operand)
+ {
+     float rounded = roundf(operand);
+diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
+index 964e9a4d81..3f77fd785d 100644
+--- a/Source/JavaScriptCore/runtime/Options.cpp
++++ b/Source/JavaScriptCore/runtime/Options.cpp
+@@ -233,7 +233,9 @@ std::optional<OptionsStorage::Unsigned> parse(const char* string)
+     return std::nullopt;
+ }
+ 
+-#if CPU(ADDRESS64) || OS(DARWIN) || OS(HAIKU)
++#if CPU(ADDRESS64) || OS(DARWIN) || OS(HAIKU) || defined(__EMSCRIPTEN__)
++// Like Darwin, Emscripten/wasm32 has size_t = unsigned long, distinct from
++// unsigned int, so the OptionsStorage::Size specialization is required.
+ template<>
+ std::optional<OptionsStorage::Size> parse(const char* string)
+ {
+@@ -242,7 +244,7 @@ std::optional<OptionsStorage::Size> parse(const char* string)
+         return value;
+     return std::nullopt;
+ }
+-#endif // CPU(ADDRESS64) || OS(DARWIN) || OS(HAIKU)
++#endif // CPU(ADDRESS64) || OS(DARWIN) || OS(HAIKU) || defined(__EMSCRIPTEN__)
+ 
+ template<>
+ std::optional<OptionsStorage::Double> parse(const char* string)
+diff --git a/Source/JavaScriptCore/shell/CMakeLists.txt b/Source/JavaScriptCore/shell/CMakeLists.txt
+index 3b1c4e8f3c..d19b4de4f8 100644
+--- a/Source/JavaScriptCore/shell/CMakeLists.txt
++++ b/Source/JavaScriptCore/shell/CMakeLists.txt
+@@ -123,6 +123,26 @@ WEBKIT_INCLUDE_CONFIG_FILES_IF_EXISTS()
+ 
+ WEBKIT_EXECUTABLE(jsc)
+ 
++if (EMSCRIPTEN)
++    # Emscripten defaults are a 64KB C stack and a fixed 16MB heap. JSC's
++    # stack reserve zones alone exceed 64KB, making every operation throw
++    # StackOverflowError immediately. Give the engine a real stack and a
++    # growable heap.
++    target_link_options(jsc PRIVATE
++        "SHELL:-sSTACK_SIZE=8MB"
++        "SHELL:-sDEFAULT_PTHREAD_STACK_SIZE=2MB"
++        "SHELL:-sINITIAL_MEMORY=128MB"
++        "SHELL:-sALLOW_MEMORY_GROWTH=1"
++        "SHELL:-sMAXIMUM_MEMORY=4GB")
++endif ()
++
++if (EMSCRIPTEN AND JSC_EMBED_ICU_DATA_FILE)
++    # Embed the ICU data archive into the wasm FS at the same absolute path
++    # ICU compiled in as its default data directory, so udata finds it with
++    # no environment configuration in both node and browser environments.
++    target_link_options(jsc PRIVATE "SHELL:--embed-file ${JSC_EMBED_ICU_DATA_FILE}@${JSC_EMBED_ICU_DATA_FILE}")
++endif ()
++
+ if (SHOULD_INSTALL_JS_SHELL)
+     install(TARGETS jsc DESTINATION "${LIBEXEC_INSTALL_DIR}")
+ endif ()
+diff --git a/Source/WTF/wtf/FileHandle.h b/Source/WTF/wtf/FileHandle.h
+index fd0e22ccea..b3675206db 100644
+--- a/Source/WTF/wtf/FileHandle.h
++++ b/Source/WTF/wtf/FileHandle.h
+@@ -33,7 +33,7 @@
+ 
+ #if OS(WINDOWS)
+ #include <wtf/win/Win32Handle.h>
+-#elif OS(LINUX)
++#elif OS(UNIX)
+ #include <sys/types.h>
+ #endif
+ 
+diff --git a/Source/WTF/wtf/RawHex.h b/Source/WTF/wtf/RawHex.h
+index 2e375967e2..0c67eb0154 100644
+--- a/Source/WTF/wtf/RawHex.h
++++ b/Source/WTF/wtf/RawHex.h
+@@ -52,9 +52,11 @@ public:
+         : RawHex(static_cast<uintptr_t>(value))
+     { }
+ 
+-#if CPU(ADDRESS64) || OS(DARWIN) || OS(HAIKU)
++#if CPU(ADDRESS64) || OS(DARWIN) || OS(HAIKU) || defined(__EMSCRIPTEN__)
+     // These causes build errors for CPU(ADDRESS32) on some ports because int32_t
+     // is already handled by intptr_t, and uint32_t is handled by uintptr_t.
++    // Like Darwin, Emscripten/wasm32 needs these: int32_t is int while intptr_t
++    // is long, so int32_t/uint32_t match no other constructor unambiguously.
+     explicit RawHex(int32_t value)
+         : RawHex(static_cast<uint32_t>(value))
+     { }
+diff --git a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
+index a3e0d45073..503763609d 100644
+--- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
++++ b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
+@@ -163,10 +163,17 @@ void Thread::signalHandlerSuspendResume(int, siginfo_t*, void* ucontext)
+ 
+     // Reaching here, sigThreadSuspendResume is blocked in this handler (this is configured by sigaction's sa_mask).
+     // So before calling sigsuspend, sigThreadSuspendResume to this thread is deferred. This ensures that the handler is not executed recursively.
++#if defined(__EMSCRIPTEN__)
++    // Emscripten has no sigsuspend; signal-based thread suspension cannot
++    // work under wasm. Nothing must ever suspend a thread in this build —
++    // trap loudly if something tries.
++    RELEASE_ASSERT_NOT_REACHED();
++#else
+     sigset_t blockedSignalSet;
+     sigfillset(&blockedSignalSet);
+     sigdelset(&blockedSignalSet, g_wtfConfig.sigThreadSuspendResume);
+     sigsuspend(&blockedSignalSet);
++#endif
+ 
+     thread->m_platformRegisters = nullptr;
+ 

@@ -65,6 +65,14 @@ Key properties:
     WebCore::Page) moves to Phase 2's kill-gate.
 - [ ] **Phase 1 — JSC proof-of-life**
   - Build JavaScriptCore (CLoop, JSCOnly port) to wasm; run JS in the page.
+  - [x] 2026-06-09: jsc.wasm builds (45 MB with embedded ICU data) and RUNS
+        JS under node: `print(6*7)` → 42, exit 0. Nine WebKit patches total
+        (src/patches/webkit-emscripten.patch). Key link flags: STACK_SIZE=8MB
+        (64KB default = instant empty-message StackOverflowError),
+        INITIAL_MEMORY=128MB, ALLOW_MEMORY_GROWTH, embed icudt77l.dat at
+        ICU's compiled-in default path.
+  - [ ] Browser half: same artifact evaluating JS in a real tab via the
+        COOP/COEP dev server.
   - First-of-its-kind: zero Bugzilla precedent for emcmake builds of the
     current tree; JSC.js (2021) bypassed WebKit's CMake with custom GN.
   - PROBE RESULT 2026-06-09: `emcmake cmake -DPORT=JSCOnly -DENABLE_JIT=OFF`
