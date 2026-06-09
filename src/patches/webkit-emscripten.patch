@@ -286,10 +286,10 @@ index 0000000000..0fc6a680f4
 +list(APPEND PAL_LIBRARIES OpenSSL::Crypto)
 diff --git a/Source/WebCore/PlatformEmscripten.cmake b/Source/WebCore/PlatformEmscripten.cmake
 new file mode 100644
-index 0000000000..9d1d5a2557
+index 0000000000..41a6eeb319
 --- /dev/null
 +++ b/Source/WebCore/PlatformEmscripten.cmake
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,40 @@
 +# WebCore platform file for PORT=Emscripten.
 +# Structure cribbed from PlatformPlayStation.cmake / PlatformWin.cmake:
 +# curl networking + ImageDecoders + OpenSSL crypto, Skia for graphics.
@@ -302,6 +302,12 @@ index 0000000000..9d1d5a2557
 +
 +if (USE_SKIA)
 +    include(platform/Skia.cmake)
++    # GTK/WPE get fontconfig headers from the system include path; our cross
++    # sysroot is not a default include dir, so wire the imported target into
++    # WebCore explicitly — FontCacheSkia.cpp and SkiaSystemFallbackFontCache.cpp
++    # call fontconfig directly on the non-Android/non-Win path.
++    find_package(Fontconfig 2.13.0 REQUIRED)
++    list(APPEND WebCore_LIBRARIES Fontconfig::Fontconfig)
 +endif ()
 +
 +list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
@@ -326,10 +332,10 @@ index 0000000000..9d1d5a2557
 +# embedder; configure does not need them.
 diff --git a/Source/cmake/OptionsEmscripten.cmake b/Source/cmake/OptionsEmscripten.cmake
 new file mode 100644
-index 0000000000..9130b34d1c
+index 0000000000..4e6a420ff5
 --- /dev/null
 +++ b/Source/cmake/OptionsEmscripten.cmake
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,127 @@
 +# PORT=Emscripten: WebCore + JavaScriptCore compiled to WebAssembly with
 +# Emscripten. Single-process WebKit1-style embedder; no WebKit2, no tools.
 +#
@@ -448,12 +454,11 @@ index 0000000000..9130b34d1c
 +    find_package(WebP REQUIRED COMPONENTS demux)
 +    find_package(ZLIB REQUIRED)
 +
-+    # KNOWN GAPS — kept LAST so the configure probe surfaces everything above
-+    # first. curl is the expected Phase 2 configure failure (handoff/research-02):
-+    # curl 8.x + mbedTLS + nghttp2 + brotli are not built into the sysroot yet.
-+    # OpenSSL and LibPSL ride with the curl backend (platform/Curl.cmake links
-+    # CURL::libcurl, OpenSSL::SSL, LibPSL::LibPSL). The vendored Skia also
-+    # REQUIREs Fontconfig on non-Win/non-PlayStation (ThirdParty/skia line 6).
++    # Curl tier — built into the sysroot by tools/build-deps/curl-tier.sh
++    # (decision-003): curl 8.x + OpenSSL 3.5 + nghttp2 + brotli + libpsl.
++    # platform/Curl.cmake links CURL::libcurl, OpenSSL::SSL, LibPSL::LibPSL.
++    # The vendored Skia also REQUIREs Fontconfig on non-Win/non-PlayStation
++    # (ThirdParty/skia/CMakeLists.txt:6) — fontconfig rides in the same tier.
 +    find_package(CURL 7.85.0 REQUIRED)
 +    find_package(OpenSSL REQUIRED)
 +    find_package(LibPSL 0.20.2 REQUIRED)

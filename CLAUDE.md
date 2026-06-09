@@ -23,9 +23,12 @@ renderer. All networking leaves the tab over the **Wisp protocol**
 - **Rendering**: Skia CPU raster (vendored `Source/ThirdParty/skia`) → blit
   to canvas. cairo is dead in WebKit ≥2.46 — do not invest in it. GPU path
   (Skia → WebGL2, CanvasKit-style) is a later phase.
-- **Networking**: WebKit curl backend → curl 8.17 + mbedTLS + nghttp2 →
+- **Networking**: WebKit curl backend → curl 8.17 + OpenSSL 3.5 + nghttp2 →
   Emscripten SOCKFS with wisp-js `WispWebSocket` swapped in (libcurl.js
   pattern — pure JS shim, no C-level Wisp code). TLS terminates in-engine.
+  OpenSSL not mbedTLS/BoringSSL — WebCore's curl backend hardwires the
+  OpenSSL API (decision-003). Fontconfig is built for wasm, not patched out
+  (WebCore's FontCacheSkia calls fontconfig directly).
 - **Threads**: Emscripten pthreads, `-sPROXY_TO_PTHREAD`, pre-sized pool →
   SharedArrayBuffer → host page MUST be served with COOP/COEP headers.
   No Asyncify; JSPI only as a later optimization.

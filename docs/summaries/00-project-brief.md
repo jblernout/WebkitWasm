@@ -28,7 +28,7 @@ interactable `<canvas>`, and does all networking over the Wisp protocol.
 │  ┌─────────────────────────────────────────────────▼──────────────┐  │
 │  │  WebKit.wasm  (Emscripten, pthreads, no JIT)                   │  │
 │  │  JSC (CLoop) · WebCore · WTF · FreeType/HarfBuzz · ICU ·       │  │
-│  │  Skia CPU raster (vendored) · libcurl+mbedTLS (SOCKFS→Wisp)    │  │
+│  │  Skia CPU raster (vendored) · libcurl+OpenSSL (SOCKFS→Wisp)    │  │
 │  └───────────────────────────────────┬────────────────────────────┘  │
 │                                      │ Wisp client (mux'd streams)   │
 └──────────────────────────────────────┼───────────────────────────────┘
@@ -161,7 +161,8 @@ RunLoop with no glib; the PlayStation-port pattern avoids glib entirely.
 - WebKit hash: `aec9d2ad958e716ab4bca4bf03007e6edac7323f` (2026-06-09)
 - emsdk: **6.0.0** (2026-06-04; fall back to latest 5.x if it misbehaves)
 - wisp server: **wisp-js 0.4.1** (dev); epoxy-server later for perf
-- network stack: **curl 8.17 + mbedTLS + nghttp2 + zlib + brotli**
-  (libcurl.js recipe)
+- network stack: **curl 8.17 + OpenSSL 3.5 + nghttp2 + zlib + brotli + libpsl**
+  (decision-003 — WebCore's curl backend hardwires the OpenSSL API; mbedTLS
+  pin was libcurl.js-specific and is superseded)
 - raster: **vendored Skia** (`Source/ThirdParty/skia`), CPU raster
 - threading: `-pthread -sPROXY_TO_PTHREAD`, pre-sized pool; no Asyncify
