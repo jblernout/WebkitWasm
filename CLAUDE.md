@@ -5,7 +5,7 @@ A fully modern browser engine running INSIDE a browser tab. No VM, no x86
 emulation: WebKit (WebCore + JavaScriptCore) is compiled to WASM with
 Emscripten. The page hosts an interactable `<canvas>` that is the engine's
 renderer. All networking leaves the tab over the **Wisp protocol**
-(wisp-js / wisp-server-python on the server side).
+(wisp-js server side; wisp-server-python rejected — Wisp v1-only).
 
 ## Architecture decisions (see docs/summaries/decision-001-architecture.md)
 - **Engine**: WebKit (WebCore + JSC). Chosen for portability — it is the only
@@ -14,13 +14,21 @@ renderer. All networking leaves the tab over the **Wisp protocol**
 - **JS execution**: JSC **CLoop interpreter** (JIT-less). WASM cannot self-JIT
   conventionally; CLoop is WebKit's supported no-JIT mode.
 - **Process model**: single process, WebKit1-style thin embedder. We do NOT
-  port the WebKit2 multiprocess/IPC layer.
-- **Rendering**: software raster first (cairo or Skia CPU) → blit to canvas.
-  GPU path (Skia → WebGL2, CanvasKit-style) is a later phase.
-- **Networking**: WebKit curl backend → libcurl built on a Wisp socket shim
-  (prior art: Mercury Workshop libcurl.js). TLS terminates inside the engine.
-- **Threads**: Emscripten pthreads → SharedArrayBuffer → host page MUST be
-  served with COOP/COEP headers.
+  port the WebKit2 multiprocess/IPC layer. NOTE: no supported single-process
+  embedding API exists outside Cocoa — we embed WebCore::Page + client
+  interfaces against internal headers, modeled on the PlayStation port.
+- **Port strategy**: Phase 1 builds JSCOnly; then a custom `PORT=Emscripten`
+  (3-file pattern: `ALL_PORTS` + `OptionsEmscripten.cmake` +
+  `PlatformEmscripten.cmake`), borrowing the Win port's curl glue.
+- **Rendering**: Skia CPU raster (vendored `Source/ThirdParty/skia`) → blit
+  to canvas. cairo is dead in WebKit ≥2.46 — do not invest in it. GPU path
+  (Skia → WebGL2, CanvasKit-style) is a later phase.
+- **Networking**: WebKit curl backend → curl 8.17 + mbedTLS + nghttp2 →
+  Emscripten SOCKFS with wisp-js `WispWebSocket` swapped in (libcurl.js
+  pattern — pure JS shim, no C-level Wisp code). TLS terminates in-engine.
+- **Threads**: Emscripten pthreads, `-sPROXY_TO_PTHREAD`, pre-sized pool →
+  SharedArrayBuffer → host page MUST be served with COOP/COEP headers.
+  No Asyncify; JSPI only as a later optimization.
 
 ## Repo layout
 - `src/` — our code: embedder shell, platform glue, Wisp bridge, host page.
@@ -33,7 +41,8 @@ renderer. All networking leaves the tab over the **Wisp protocol**
 ## Hard constraints
 - Local git only. Never publish without explicit permission.
 - No JIT in the guest engine — JS-heavy sites will be slow; that's accepted.
-- wasm32 4 GB memory ceiling unless we adopt Memory64 (decide in Phase 0).
+- wasm32 4 GB memory ceiling — Memory64 REJECTED (10–100% perf penalty, no
+  Safari). Stay wasm32; trim features instead.
 - Dev server must send COOP `same-origin` + COEP `require-corp`.
 
 ## Workflow
