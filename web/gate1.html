@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Gate 1 — WebKit JSC.wasm in a browser tab</title>
+</head>
+<body>
+  <h1>Gate 1: WebKit JSC.wasm evaluating JavaScript in this tab</h1>
+  <p>crossOriginIsolated: <b id="coi"></b></p>
+  <pre id="log"></pre>
+  <script>
+    document.getElementById("coi").textContent = String(globalThis.crossOriginIsolated);
+    const logEl = document.getElementById("log");
+    function log(line) {
+      logEl.textContent += line + "\n";
+      console.log("[gate1] " + line);
+    }
+    // Classic (non-modularized) Emscripten output picks this up because in
+    // global scope `var Module` re-declares without clobbering the value.
+    window.Module = {
+      arguments: ["-e", 'print("JSC-in-tab: " + 6*7); print("agent: " + (typeof navigator === "undefined" ? "no navigator (guest engine)" : "?"))'],
+      print: (s) => log("out: " + s),
+      printErr: (s) => log("err: " + s),
+      onAbort: (r) => log("abort: " + r),
+    };
+  </script>
+  <script src="jsc/jsc.js"></script>
+</body>
+</html>

@@ -10,5 +10,8 @@
   },
   "dependencies": {
     "@mercuryworkshop/wisp-js": "0.4.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0"
   }
 }

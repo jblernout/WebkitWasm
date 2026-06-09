@@ -71,8 +71,11 @@ Key properties:
         (64KB default = instant empty-message StackOverflowError),
         INITIAL_MEMORY=128MB, ALLOW_MEMORY_GROWTH, embed icudt77l.dat at
         ICU's compiled-in default path.
-  - [ ] Browser half: same artifact evaluating JS in a real tab via the
-        COOP/COEP dev server.
+  - [x] Browser half PASSED 2026-06-09: headless Chromium, COOP/COEP
+        served, crossOriginIsolated=true, `JSC-in-tab: 42` (web/gate1.html
+        + tools/gate1-browser-test.mjs).
+  - GATE: **PASSED 2026-06-09** — WebKit's JS engine runs JS in a tab.
+    Phase 2 (First paint: WebCore + Skia + canvas) is next.
   - First-of-its-kind: zero Bugzilla precedent for emcmake builds of the
     current tree; JSC.js (2021) bypassed WebKit's CMake with custom GN.
   - PROBE RESULT 2026-06-09: `emcmake cmake -DPORT=JSCOnly -DENABLE_JIT=OFF`
