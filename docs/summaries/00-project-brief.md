@@ -87,8 +87,15 @@ Key properties:
   - GATE: JSC runs scripts in-tab. Kills the project early if the WebKit
     build system fundamentally fights Emscripten.
 - [ ] **Phase 2 — First paint**
-  - Minimal WebCore config; render a fixed HTML string offscreen; blit to
-    canvas. No network, no events. Requires embedding WebCore::Page +
+  - [x] 2026-06-09: full dependency tier built to wasm-sysroot in one run
+        (tools/build-deps/webcore-deps.sh): zlib, libpng, libjpeg-turbo,
+        libwebp, freetype, harfbuzz(+icu), libxml2, sqlite3 — all static,
+        all -pthread.
+  - [ ] PORT=Emscripten skeleton: OptionsEmscripten.cmake +
+        PlatformEmscripten.cmake modeled on PlayStation port; then WebCore
+        configure probe to map the collision surface.
+  - [ ] Minimal WebCore config; render a fixed HTML string offscreen; blit
+    to canvas. No network, no events. Requires embedding WebCore::Page +
     client interfaces directly against internal headers — there is NO
     supported single-process embedding API outside Cocoa. Model on the
     PlayStation port (curl + generic RunLoop + Skia + static embedding).

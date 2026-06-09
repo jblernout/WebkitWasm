@@ -37,7 +37,7 @@ cmake_build() { # cmake_build <srcdir> <builddir> [extra cmake args...]
 
 echo "=== zlib ==="
 if [ ! -f "$SYSROOT/lib/libz.a" ]; then
-  fetch https://zlib.net/zlib-1.3.1.tar.gz zlib.tar.gz
+  fetch https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz zlib.tar.gz
   unpack zlib.tar.gz zlib
   cmake_build zlib zlib-build -DZLIB_BUILD_EXAMPLES=OFF
   rm -f "$SYSROOT"/lib/libz.so* 2>/dev/null || true
