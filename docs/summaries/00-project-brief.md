@@ -58,8 +58,8 @@ Key properties:
   - [x] WebKit pinned + cloned: `webkitglib/2.52` @ `aec9d2ad9` (7.5 GB;
         verified present: OptionsJSCOnly/PlayStation/Win.cmake,
         platform/network/curl, ThirdParty/skia)
-  - [ ] host prereq: **ruby missing** — required by JSC's offlineasm (it
-        generates the CLoop interpreter). Needs `sudo apt install -y ruby`.
+  - [x] host prereq: ruby 3.3.7 installed (required by JSC's offlineasm,
+        which generates the CLoop interpreter)
   - GATE: **PASSED 2026-06-09** — no hard blocker in the port surface.
     The one novel, unproven piece (single-process embedding of
     WebCore::Page) moves to Phase 2's kill-gate.
@@ -67,6 +67,12 @@ Key properties:
   - Build JavaScriptCore (CLoop, JSCOnly port) to wasm; run JS in the page.
   - First-of-its-kind: zero Bugzilla precedent for emcmake builds of the
     current tree; JSC.js (2021) bypassed WebKit's CMake with custom GN.
+  - PROBE RESULT 2026-06-09: `emcmake cmake -DPORT=JSCOnly -DENABLE_JIT=OFF`
+    runs deep — ALL compiler/platform checks pass under emcc 6.0.0; first
+    blocker is exactly as predicted: ICU ≥70.1 (OptionsJSCOnly.cmake:117).
+    The build system is not hostile to emcmake. ICU wasm build underway
+    (tools/build-deps/icu.sh, ICU 77.1, static data packaging — fallback
+    to archive packaging if pkgdata can't emit wasm-compatible objects).
   - GATE: JSC runs scripts in-tab. Kills the project early if the WebKit
     build system fundamentally fights Emscripten.
 - [ ] **Phase 2 — First paint**
