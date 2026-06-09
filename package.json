@@ -1,0 +1,14 @@
+{
+  "name": "browserinbrowser",
+  "version": "0.0.1",
+  "private": true,
+  "description": "WebKit compiled to WebAssembly: a full browser engine running inside a browser tab, rendering to canvas, networking over Wisp.",
+  "type": "module",
+  "scripts": {
+    "dev": "node tools/dev-server.mjs",
+    "wisp": "wisp-js-server --host 127.0.0.1 --port 5001 --logging INFO"
+  },
+  "dependencies": {
+    "@mercuryworkshop/wisp-js": "0.4.1"
+  }
+}

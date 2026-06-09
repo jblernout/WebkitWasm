@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>BrowserInBrowser — host shell</title>
+</head>
+<body>
+  <h1>BrowserInBrowser host shell</h1>
+  <p>Phase 0 smoke test — these must all be true/positive for Emscripten pthreads:</p>
+  <ul>
+    <li>crossOriginIsolated: <b id="coi"></b></li>
+    <li>SharedArrayBuffer: <b id="sab"></b></li>
+    <li>hardwareConcurrency: <b id="hc"></b></li>
+  </ul>
+  <script>
+    document.getElementById("coi").textContent = String(globalThis.crossOriginIsolated);
+    document.getElementById("sab").textContent = String(typeof SharedArrayBuffer !== "undefined");
+    document.getElementById("hc").textContent = String(navigator.hardwareConcurrency);
+  </script>
+</body>
+</html>

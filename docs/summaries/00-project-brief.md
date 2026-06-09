@@ -51,8 +51,11 @@ Key properties:
   - [x] Research: WebKit port surface → research-01-webkit-port-surface.md
   - [x] Research: prior art / Wisp / Emscripten →
         research-02-prior-art-wisp-emscripten.md
-  - [ ] emsdk installed; COOP/COEP dev server; wisp server running locally
-  - [ ] WebKit checkout pinned (exact hash recorded here)
+  - [x] COOP/COEP dev server (tools/dev-server.mjs) — headers + traversal
+        guard verified; smoke page at web/index.html
+  - [x] wisp-js relay verified listening (npm run wisp → 127.0.0.1:5001)
+  - [ ] emsdk installed (downloading)
+  - [ ] WebKit checkout pinned (exact hash recorded here) (downloading)
   - GATE: **PASSED 2026-06-09** — no hard blocker in the port surface.
     The one novel, unproven piece (single-process embedding of
     WebCore::Page) moves to Phase 2's kill-gate.
