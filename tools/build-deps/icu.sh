@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Build ICU for wasm32-emscripten (static libs, static data packaging).
+# Build ICU for wasm32-emscripten (static libs, ARCHIVE data packaging —
+# static packaging is impossible: genccode needs ELF objects to emit
+# matching assembly, and wasm objects are not ELF. The icudt*.dat archive
+# gets preloaded into the Emscripten FS at runtime instead).
 # ICU cross-builds need host tools first; this does host pass then wasm pass.
 # Idempotent: completed stages are skipped on rerun.
 set -euo pipefail
@@ -24,6 +27,10 @@ fi
 if [ ! -d icu ]; then
   mkdir icu && tar xzf "$ICU_TGZ" -C icu --strip-components=1
 fi
+# ICU has no real platform fragment for wasm32-emscripten; it ships
+# mh-unknown as a stub whose recipe just errors out. mh-linux works as-is
+# under emconfigure/emmake, so force-overwrite the stub.
+cp -f icu/source/config/mh-linux icu/source/config/mh-unknown
 
 echo "=== stage: host build (tools for cross-compile) ==="
 mkdir -p icu-host
@@ -47,7 +54,7 @@ if [ ! -f Makefile ]; then
     --enable-static --disable-shared \
     --disable-tests --disable-samples --disable-extras --disable-tools \
     --disable-dyload \
-    --with-data-packaging=static \
+    --with-data-packaging=archive \
     --prefix="$SYSROOT" > configure-wasm.log 2>&1
 fi
 emmake make -j"$(nproc)" > make-wasm.log 2>&1
