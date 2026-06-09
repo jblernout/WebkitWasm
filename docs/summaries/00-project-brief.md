@@ -54,8 +54,12 @@ Key properties:
   - [x] COOP/COEP dev server (tools/dev-server.mjs) — headers + traversal
         guard verified; smoke page at web/index.html
   - [x] wisp-js relay verified listening (npm run wisp → 127.0.0.1:5001)
-  - [ ] emsdk installed (downloading)
-  - [ ] WebKit checkout pinned (exact hash recorded here) (downloading)
+  - [x] emsdk 6.0.0 installed + verified (`emcc 6.0.0` runs; 1.6 GB)
+  - [x] WebKit pinned + cloned: `webkitglib/2.52` @ `aec9d2ad9` (7.5 GB;
+        verified present: OptionsJSCOnly/PlayStation/Win.cmake,
+        platform/network/curl, ThirdParty/skia)
+  - [ ] host prereq: **ruby missing** — required by JSC's offlineasm (it
+        generates the CLoop interpreter). Needs `sudo apt install -y ruby`.
   - GATE: **PASSED 2026-06-09** — no hard blocker in the port surface.
     The one novel, unproven piece (single-process embedding of
     WebCore::Page) moves to Phase 2's kill-gate.
@@ -129,7 +133,7 @@ RunLoop with no glib; the PlayStation-port pattern avoids glib entirely.
   2026-06-08) — full git checkout, exact hash recorded here at clone time.
   Do NOT use webkitgtk release tarballs: GTK/WPE-filtered, likely missing
   Win/PlayStation/curl files.
-- WebKit hash: _TBD at clone_
+- WebKit hash: `aec9d2ad958e716ab4bca4bf03007e6edac7323f` (2026-06-09)
 - emsdk: **6.0.0** (2026-06-04; fall back to latest 5.x if it misbehaves)
 - wisp server: **wisp-js 0.4.1** (dev); epoxy-server later for perf
 - network stack: **curl 8.17 + mbedTLS + nghttp2 + zlib + brotli**

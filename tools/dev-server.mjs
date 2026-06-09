@@ -4,10 +4,11 @@
 //   node tools/dev-server.mjs [root-dir]   (default root: web/, port: $PORT or 8080)
 
 import { createServer } from "node:http";
-import { stat, readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { stat, realpath } from "node:fs/promises";
 import { join, sep, extname, resolve } from "node:path";
 
-const ROOT = resolve(process.argv[2] ?? "web");
+const ROOT = await realpath(resolve(process.argv[2] ?? "web"));
 const PORT = Number(process.env.PORT ?? 8080);
 
 const MIME = {
@@ -26,6 +27,8 @@ const MIME = {
   ".woff2": "font/woff2",
 };
 
+const inRoot = (p) => p === ROOT || p.startsWith(ROOT + sep);
+
 const server = createServer(async (req, res) => {
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
@@ -33,21 +36,45 @@ const server = createServer(async (req, res) => {
 
   try {
     const url = new URL(req.url, "http://localhost");
-    let file = resolve(join(ROOT, decodeURIComponent(url.pathname)));
-    if (file !== ROOT && !file.startsWith(ROOT + sep)) {
+    const candidate = resolve(join(ROOT, decodeURIComponent(url.pathname)));
+    if (!inRoot(candidate)) {
       res.writeHead(403).end("403");
       return;
     }
-    const s = await stat(file).catch(() => null);
-    if (s?.isDirectory()) file = join(file, "index.html");
-    const body = await readFile(file);
+
+    // realpath resolves symlinks, so a link placed inside the root can't
+    // serve files from outside it
+    let file = await realpath(candidate);
+    let s = await stat(file);
+    if (s.isDirectory()) {
+      file = await realpath(join(file, "index.html"));
+      s = await stat(file);
+    }
+    if (!inRoot(file)) {
+      res.writeHead(403).end("403");
+      return;
+    }
+
+    // stream instead of buffering: .wasm/.data artifacts can be huge
     res.writeHead(200, {
       "Content-Type": MIME[extname(file)] ?? "application/octet-stream",
+      "Content-Length": s.size,
     });
-    res.end(body);
+    const stream = createReadStream(file);
+    stream.on("error", () => res.destroy());
+    stream.pipe(res);
   } catch {
     res.writeHead(404, { "Content-Type": "text/plain" }).end("404");
   }
+});
+
+server.on("error", (err) => {
+  console.error(
+    err.code === "EADDRINUSE"
+      ? `dev server: port ${PORT} is already in use`
+      : `dev server: ${err.message}`
+  );
+  process.exit(1);
 });
 
 server.listen(PORT, "127.0.0.1", () => {
