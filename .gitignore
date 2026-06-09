@@ -1,0 +1,29 @@
+# Vendored / huge trees — pinned by hash in docs, never committed
+third_party/
+emsdk/
+WebKit/
+
+# Build output
+build/
+dist/
+*.o
+*.a
+*.wasm
+*.wasm.map
+
+# Node / web tooling
+node_modules/
+*.log
+
+# Python
+__pycache__/
+.venv/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local search index
+.grepai/
