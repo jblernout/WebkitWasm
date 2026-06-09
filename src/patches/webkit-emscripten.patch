@@ -179,7 +179,7 @@ index 2e375967e2..0c67eb0154 100644
          : RawHex(static_cast<uint32_t>(value))
      { }
 diff --git a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
-index a3e0d45073..503763609d 100644
+index a3e0d45073..492395e879 100644
 --- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
 +++ b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
 @@ -163,10 +163,17 @@ void Thread::signalHandlerSuspendResume(int, siginfo_t*, void* ucontext)
@@ -200,3 +200,18 @@ index a3e0d45073..503763609d 100644
  
      thread->m_platformRegisters = nullptr;
  
+@@ -457,6 +464,14 @@ bool Thread::signal(int signalNumber)
+ auto Thread::suspend(const ThreadSuspendLocker&) -> Expected<void, PlatformSuspendError>
+ {
+     RELEASE_ASSERT_WITH_MESSAGE(this != &Thread::currentSingleton(), "We do not support suspending the current thread itself.");
++#if defined(__EMSCRIPTEN__)
++    // Signal-based thread suspension cannot work under wasm: pthread_kill
++    // may not deliver, and the semaphore wait below would deadlock instead
++    // of failing. This build supports exactly one mutator thread per VM
++    // (conservative GC then never scans other threads). Trap deterministically
++    // at the entry point rather than deadlocking or trapping in the handler.
++    RELEASE_ASSERT_WITH_MESSAGE(false, "Thread::suspend is unsupported under Emscripten (one mutator thread per VM)");
++#endif
+ #if OS(DARWIN)
+     kern_return_t result = thread_suspend(m_platformThread);
+     if (result != KERN_SUCCESS)

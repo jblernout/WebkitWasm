@@ -113,6 +113,7 @@ Key properties:
 | Dependency drift: emscripten-ports ICU is 68.2 (< WebKit's hard floor 70.1), harfbuzz 3.2.0 (2021) | MED | Self-build + pin all ~12 deps (lift libcurl.js tools/*.sh recipes); ICU data filter (default ~30 MB → trim) |
 | No JS JIT → slow JS-heavy sites | MED | Accepted; CLoop is supported + CI-tested config (fixes through 2026-04) |
 | wasm32 4 GB ceiling | MED | Minimal feature flags + trimming; Memory64 rejected (perf, no Safari) |
+| ONE MUTATOR THREAD PER VM (Codex review 2026-06-09): Thread::suspend is impossible under wasm; conservative GC scanning a second registered VM thread would trap. Web Workers are safe (own VM per thread); JSC API clients sharing a VM across threads are NOT | MED | Deterministic RELEASE_ASSERT at suspend() entry with explicit message; ENABLE_SAMPLING_PROFILER stays OFF; revisit only if a shared-VM design ever appears |
 | Total payload size | LOW | Envelope from precedent: 30–60 MB wasm, 15–25 MB brotli initial (JSC.js ≈4 MB, CanvasKit ≈1.5 MB compressed); lazy ICU/fonts |
 | Upstream churn vs pinned tree | LOW | Pin one branch (webkitglib/2.52) for entire project |
 
