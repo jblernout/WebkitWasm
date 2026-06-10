@@ -62,16 +62,21 @@ static bool writePPM(const char* path, const SkPixmap& pixmap)
     FILE* f = fopen(path, "wb");
     if (!f)
         return false;
-    fprintf(f, "P6\n%d %d\n255\n", pixmap.width(), pixmap.height());
-    for (int y = 0; y < pixmap.height(); ++y) {
+    bool ok = fprintf(f, "P6\n%d %d\n255\n", pixmap.width(), pixmap.height()) > 0;
+    for (int y = 0; ok && y < pixmap.height(); ++y) {
         const uint8_t* row = static_cast<const uint8_t*>(pixmap.addr(0, y));
         for (int x = 0; x < pixmap.width(); ++x) {
             // kRGBA_8888 byte order is R,G,B,A regardless of endianness.
-            fwrite(row + x * 4, 1, 3, f);
+            if (fwrite(row + x * 4, 1, 3, f) != 3) {
+                ok = false;
+                break;
+            }
         }
     }
-    fclose(f);
-    return true;
+    ok = ok && !ferror(f);
+    if (fclose(f) != 0)
+        ok = false;
+    return ok;
 }
 
 int main()
@@ -149,16 +154,33 @@ int main()
         return 1;
     }
 
-    // Cheap signal for the runner: count pixels that are not pure white.
+    // Gate assertions are region-specific so a fontconfig/glyph regression
+    // cannot hide behind the div: the blue box and the red heading must BOTH
+    // be present, independently (Codex review 2026-06-09).
     int nonWhite = 0;
+    int exactBlue = 0; // #0066CC <div>, expected exactly 200x100
+    int redGlyph = 0; // antialiased #CC0000 "hello" glyphs in the h1 band
     for (int y = 0; y < kHeight; ++y) {
-        const uint32_t* row = static_cast<const uint32_t*>(pixmap.addr(0, y));
+        const uint8_t* row = static_cast<const uint8_t*>(pixmap.addr(0, y));
         for (int x = 0; x < kWidth; ++x) {
-            if ((row[x] & 0x00FFFFFF) != 0x00FFFFFF)
+            const uint8_t r = row[x * 4], g = row[x * 4 + 1], b = row[x * 4 + 2];
+            if (!(r == 0xFF && g == 0xFF && b == 0xFF))
                 ++nonWhite;
+            if (r == 0x00 && g == 0x66 && b == 0xCC)
+                ++exactBlue;
+            if (y < 76 && r > 0x90 && g < 0x60 && b < 0x60)
+                ++redGlyph;
         }
     }
-    printf("EMBEDDER: nonWhitePixels=%d\n", nonWhite);
+    printf("EMBEDDER: nonWhitePixels=%d exactBlue=%d redGlyph=%d\n", nonWhite, exactBlue, redGlyph);
+    if (exactBlue != 200 * 100) {
+        printf("EMBEDDER: FAIL blue div wrong size (%d != 20000)\n", exactBlue);
+        return 1;
+    }
+    if (redGlyph < 200) {
+        printf("EMBEDDER: FAIL heading glyphs missing (fonts broken?)\n");
+        return 1;
+    }
     printf("EMBEDDER: DONE\n");
     return 0;
 }

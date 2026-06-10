@@ -668,10 +668,10 @@ index bc608e04f7..4abc58def6 100644
      WebCore::CertificateInfo::CertificateChain certificateChain;
 diff --git a/Source/WebCore/platform/emscripten/MIMETypeRegistryEmscripten.cpp b/Source/WebCore/platform/emscripten/MIMETypeRegistryEmscripten.cpp
 new file mode 100644
-index 0000000000..678f480e6c
+index 0000000000..632053bdff
 --- /dev/null
 +++ b/Source/WebCore/platform/emscripten/MIMETypeRegistryEmscripten.cpp
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,71 @@
 +/*
 + * PORT=Emscripten MIME type table, cribbed from
 + * platform/playstation/MIMETypeRegistryPlayStation.cpp.
@@ -732,10 +732,14 @@ index 0000000000..678f480e6c
 +    return emptyString();
 +}
 +
-+Vector<String> MIMETypeRegistry::extensionsForMIMEType(const String&)
++Vector<String> MIMETypeRegistry::extensionsForMIMEType(const String& mimeType)
 +{
-+    ASSERT_NOT_IMPLEMENTED_YET();
-+    return { };
++    Vector<String> extensions;
++    for (auto& entry : platformMediaTypes()) {
++        if (equalIgnoringASCIICase(mimeType, entry.type))
++            extensions.append(entry.extension);
++    }
++    return extensions;
 +}
 +
 +} // namespace WebCore

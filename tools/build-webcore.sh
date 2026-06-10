@@ -17,7 +17,13 @@ cd "$ROOT"
 # are broken on the host, and emcc's file packager dereferences symlinks —
 # stage a clean tree of REAL files for --embed-file.
 FSROOT="$ROOT/build/embedder-fs"
-if [ ! -f "$FSROOT/fonts/DejaVuSans.ttf" ]; then
+# Guard checks ALL artifacts, not just the TTF — a partial staging (TTF
+# present, configs missing) must re-stage, and staging that produces an
+# empty conf.d must FAIL, not print OK (Codex review).
+if [ ! -f "$FSROOT/fonts/DejaVuSans.ttf" ] \
+   || [ ! -f "$FSROOT/etc-fonts/fonts.conf" ] \
+   || [ -z "$(ls "$FSROOT/etc-fonts/conf.d" 2>/dev/null)" ]; then
+  rm -rf "$FSROOT"
   mkdir -p "$FSROOT/etc-fonts/conf.d" "$FSROOT/fonts"
   cp -f "$SYSROOT/etc/fonts/fonts.conf" "$FSROOT/etc-fonts/"
   for link in "$SYSROOT/etc/fonts/conf.d/"*.conf; do
@@ -25,7 +31,12 @@ if [ ! -f "$FSROOT/fonts/DejaVuSans.ttf" ]; then
       "$FSROOT/etc-fonts/conf.d/" 2>/dev/null || true
   done
   cp -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf "$FSROOT/fonts/"
-  echo "FONT STAGING: OK ($(ls "$FSROOT/etc-fonts/conf.d" | wc -l) conf.d files)"
+  CONFD_COUNT=$(ls "$FSROOT/etc-fonts/conf.d" | wc -l)
+  if [ "$CONFD_COUNT" -lt 1 ]; then
+    echo "FONT STAGING FAILED: conf.d is empty (sysroot fontconfig broken?)"
+    exit 1
+  fi
+  echo "FONT STAGING: OK ($CONFD_COUNT conf.d files)"
 fi
 
 EMBEDDER_FLAGS=(
@@ -48,12 +59,26 @@ if [ ! -f "$BUILD/build.ninja" ]; then
     "${EMBEDDER_FLAGS[@]}" \
     > "$ROOT/build/webcore-configure.log" 2>&1
   echo "CONFIGURE: OK"
-elif ! rg -q "EMSCRIPTEN_EMBEDDER_CMAKE" "$BUILD/CMakeCache.txt"; then
-  # Existing build dir from before the embedder existed: add the cache
-  # entries without reconfiguring from scratch (NEVER rm -rf this dir).
-  cmake -S "$TP/WebKit" -B "$BUILD" "${EMBEDDER_FLAGS[@]}" \
-    > "$ROOT/build/webcore-reconfigure.log" 2>&1
-  echo "RECONFIGURE (embedder vars): OK"
+else
+  # Re-sync the embedder cache vars whenever any cached VALUE differs from
+  # what this script would pass — a stale path must not survive in the
+  # cache just because the variable exists (Codex review).
+  NEED_RECONFIG=0
+  for flag in "${EMBEDDER_FLAGS[@]}"; do
+    entry="${flag#-D}" # NAME=VALUE
+    name="${entry%%=*}"
+    want="${entry#*=}"
+    have=$(rg -m1 "^${name}:" "$BUILD/CMakeCache.txt" 2>/dev/null | sed 's/^[^=]*=//')
+    if [ "$have" != "$want" ]; then
+      NEED_RECONFIG=1
+      break
+    fi
+  done
+  if [ "$NEED_RECONFIG" = 1 ]; then
+    cmake -S "$TP/WebKit" -B "$BUILD" "${EMBEDDER_FLAGS[@]}" \
+      > "$ROOT/build/webcore-reconfigure.log" 2>&1
+    echo "RECONFIGURE (embedder vars): OK"
+  fi
 fi
 
 # -k 50: keep building past failures so each run surfaces a BATCH of
