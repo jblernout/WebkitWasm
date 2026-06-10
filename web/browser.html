@@ -55,6 +55,56 @@
     const canvas = document.getElementById("screen");
     const ctx = canvas.getContext("2d");
 
+    // --- Event-driven engine pump (perf) --------------------------------
+    // The engine pokes Module.bibWakeUp on every RunLoop wake-up (dispatch,
+    // timer start) and Module.bibArmTimer(ms) for its earliest pending
+    // timer. Engine work then runs at event-loop rate instead of once per
+    // rAF frame (which quantized every async hop to ~16.7ms — measured
+    // 13.9ms/setTimeout(0) hop before this). MessageChannel posts are
+    // macrotasks: they NEVER run while the engine is on the stack (bibWakeUp
+    // fires under the engine's RunLoop lock — scheduling only, no sync
+    // call-back), and unlike setTimeout they aren't throttled in background
+    // tabs, so loads keep progressing when the tab is hidden.
+    const pumpChannel = new MessageChannel();
+    let pumpScheduled = false;
+    pumpChannel.port1.onmessage = () => {
+      pumpScheduled = false;
+      if (Module._bib_pump) Module._bib_pump();
+    };
+    const schedulePump = () => {
+      if (pumpScheduled) return;
+      pumpScheduled = true;
+      pumpChannel.port2.postMessage(0);
+    };
+    // Single host setTimeout for the engine's earliest timer deadline.
+    // Later (larger) requests while a sooner one is armed are dropped —
+    // the end-of-cycle hook in the engine re-arms whatever remains.
+    const pumpTimer = { id: 0, at: Infinity };
+    const armPumpTimer = (ms) => {
+      const at = performance.now() + ms;
+      if (at >= pumpTimer.at - 0.25) return;
+      clearTimeout(pumpTimer.id);
+      pumpTimer.at = at;
+      pumpTimer.id = setTimeout(() => {
+        pumpTimer.at = Infinity;
+        if (Module._bib_pump) Module._bib_pump();
+      }, Math.max(0, ms));
+    };
+    // Socket-data poke: wisp stream bytes arrived; SOCKFS only buffers them,
+    // curl needs a multi pass to consume. Dedupe via its own channel so a
+    // burst of messages drains fully before one combined pump runs.
+    const netPumpChannel = new MessageChannel();
+    let netPumpScheduled = false;
+    netPumpChannel.port1.onmessage = () => {
+      netPumpScheduled = false;
+      if (Module._bib_pump_network) Module._bib_pump_network();
+    };
+    const scheduleNetPump = () => {
+      if (netPumpScheduled) return;
+      netPumpScheduled = true;
+      netPumpChannel.port2.postMessage(0);
+    };
+
     // A live engine instance is huge (256 MB wasm heap + compiled code for
     // an ~89 MB module). NEVER let this page enter the back/forward cache:
     // a bfcached page retains the whole instance, so every same-URL
@@ -111,6 +161,10 @@
           const name = Object.keys(names).find((k) => names[k] === e.code) ?? "?";
           log(`wisp: stream CLOSED ${m[1]}:${m[2]} reason=${e.code} (${name})`);
         });
+        // Data arrived for an engine socket — give curl a pass promptly
+        // instead of waiting out the pump's polling re-arm.
+        ws.addEventListener("message", scheduleNetPump);
+        ws.addEventListener("open", scheduleNetPump);
         return ws;
       }
       return new NativeWebSocket(url, protocols);
@@ -211,7 +265,19 @@
       log(`gate: ${bib.verdict} exactBlue=${exactBlue} redGlyph=${redGlyph}`);
     }
 
+    // Mousemove coalescing: forwarding every host mousemove (can be
+    // hundreds/sec) synchronously enters the engine's hit-test path. Keep
+    // only the latest; flush once per frame — and before any button/wheel
+    // event so the engine sees positions in order.
+    let pendingMove = null;
+    function flushPendingMove() {
+      if (!pendingMove) return;
+      Module._bib_mouse_move(pendingMove[0], pendingMove[1], pendingMove[2]);
+      pendingMove = null;
+    }
+
     function blitLoop() {
+      flushPendingMove();
       Module._bib_tick();
       // force only the very first frame; afterwards the engine returns null
       // for clean frames and we skip the blit entirely.
@@ -228,7 +294,8 @@
         blitsEl.textContent = bib.frames;
       }
       bib.ticks++;
-      ticksEl.textContent = bib.ticks;
+      // A DOM write per frame is pointless churn; the counter is cosmetic.
+      if (!(bib.ticks % 30)) ticksEl.textContent = bib.ticks;
       requestAnimationFrame(blitLoop);
     }
 
@@ -238,20 +305,23 @@
 
     function wireInput() {
       canvas.addEventListener("mousemove", (e) => {
-        Module._bib_mouse_move(e.offsetX, e.offsetY, mods(e));
+        pendingMove = [e.offsetX, e.offsetY, mods(e)];
       });
       canvas.addEventListener("mousedown", (e) => {
         canvas.focus();
         e.preventDefault();
+        flushPendingMove();
         Module._bib_mouse_button(1, e.button, e.offsetX, e.offsetY, e.detail || 1, mods(e));
       });
       canvas.addEventListener("mouseup", (e) => {
         e.preventDefault();
+        flushPendingMove();
         Module._bib_mouse_button(0, e.button, e.offsetX, e.offsetY, e.detail || 1, mods(e));
       });
       canvas.addEventListener("contextmenu", (e) => e.preventDefault());
       canvas.addEventListener("wheel", (e) => {
         e.preventDefault();
+        flushPendingMove();
         Module._bib_wheel(e.offsetX, e.offsetY, e.deltaX, e.deltaY, mods(e));
       }, { passive: false });
 
@@ -330,6 +400,9 @@
       // ?curldebug=1 -> libcurl verbose tracing via printErr. Read from C
       // in main() via setenv — Module.ENV-based getenv proved unreliable.
       bibCurlDebug: !!params.get("curldebug"),
+      // Event-driven pump hooks (see plumbing above the wisp section).
+      bibWakeUp: schedulePump,
+      bibArmTimer: armPumpTimer,
       preRun: [function () {
         // fontconfig's compiled-in cache dir must exist in MEMFS.
         Module.FS.mkdirTree("/var/cache/fontconfig");

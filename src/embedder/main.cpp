@@ -22,6 +22,7 @@
 #include "CommonAtomStrings.h"
 #include "CookieJar.h"
 #include "CurlContext.h"
+#include "CurlRequestScheduler.h" // bib_pump_network -> scheduler().hostPump()
 #include "Document.h"
 #include "DocumentLoader.h"
 #include "DocumentView.h" // inline LocalFrame::view() lives here, not in LocalFrame.h
@@ -36,6 +37,7 @@
 #include "LocalFrame.h"
 #include "LocalFrameInlines.h"
 #include "LocalFrameView.h"
+#include "MemoryCache.h"
 #include "Page.h"
 #include "PageConfiguration.h"
 #include "PlatformKeyboardEvent.h"
@@ -67,6 +69,7 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 
 #include <cstdio>
 #include <cstdlib>
+#include <utility> // std::exchange
 
 namespace BIB {
 void installEmbedderStrategies(); // EmbedderStrategies.cpp
@@ -178,13 +181,34 @@ EMSCRIPTEN_KEEPALIVE void bib_tick()
     // silently stalled everything rAF-shaped: CSS/JS animations,
     // IntersectionObserver delivery, and rAF-deferred commits (react-helmet
     // batches <script> head insertions through rAF — 2captcha's reCAPTCHA
-    // loader died exactly there). The host page calls bib_tick from its own
-    // rAF loop, so this runs once per display frame; updateRendering is
-    // cheap when no steps are scheduled.
-    if (g_engine) {
+    // loader died exactly there). Gated on WebCore actually requesting an
+    // update (BibChromeClient::scheduleRenderingUpdate sets the flag and
+    // returns true, which also suppresses RenderingUpdateScheduler's
+    // fallback timer): one pass per request, max one per host frame, zero
+    // on idle pages.
+    if (g_engine && std::exchange(BIB::g_renderingUpdateRequested, false)) {
         g_engine->page->updateRendering();
         g_engine->page->finalizeRenderingUpdate({ });
     }
+}
+
+// One engine-RunLoop iteration WITHOUT the rendering-update steps. The
+// host's wake-up plumbing (Module.bibWakeUp -> macrotask, Module.bibArmTimer
+// -> setTimeout) calls this, so engine work runs at event-loop rate while
+// rendering stays on bib_tick's rAF cadence.
+EMSCRIPTEN_KEEPALIVE void bib_pump()
+{
+    WTF::RunLoop::cycle();
+}
+
+// Socket-data poke: one curl multi pass right now (the wisp shim calls this
+// when WebSocket bytes arrive — SOCKFS can't signal curl), then a RunLoop
+// cycle so completions dispatched via callOnMainThread run immediately
+// instead of waiting for the next wake-up.
+EMSCRIPTEN_KEEPALIVE void bib_pump_network()
+{
+    WebCore::CurlContext::singleton().scheduler().hostPump();
+    WTF::RunLoop::cycle();
 }
 
 // Returns the RGBA frame buffer (kWidth*kHeight*4) after repainting, or 0.
@@ -357,6 +381,18 @@ int main()
     WebCore::initializeCommonAtomStrings();
     BIB::installEmbedderStrategies();
 
+    // Event-driven pump: every main-RunLoop wake-up (dispatch, timer start)
+    // pokes the host page, which schedules a macrotask calling bib_pump().
+    // Without this the engine only made progress once per host display
+    // frame (rAF -> bib_tick), quantizing EVERY async hop — curl passes,
+    // callOnMainThread chains, setTimeout(0) — to ~16.7ms each (measured:
+    // 13.9ms per setTimeout(0) hop, 93ms for a warm same-origin fetch).
+    // The callback fires while the RunLoop lock is held: bibWakeUp must
+    // only schedule, never call back into the engine synchronously.
+    WTF::RunLoop::setWakeUpCallback([] {
+        EM_ASM({ if (Module.bibWakeUp) Module.bibWakeUp(); });
+    });
+
     const bool interactive = EM_ASM_INT({ return Module.bibInteractive ? 1 : 0; });
 
     printf("EMBEDDER: init OK\n");
@@ -418,6 +454,10 @@ int main()
     // Lazy-hydration/scheduler libraries feature-detect it; a missing
     // global silently strands their deferred work.
     page->settings().setRequestIdleCallbackEnabled(true);
+    // Raw-WebCore MemoryCache default is 8MB total — one modern page evicts
+    // everything, so every in-engine navigation refetched all subresources
+    // over wisp. Still in-memory; sized like a small browser profile.
+    WebCore::MemoryCache::singleton().setCapacities(0, 16 * 1024 * 1024, 64 * 1024 * 1024);
 
     RefPtr localMainFrame = page->localMainFrame();
     if (!localMainFrame) {

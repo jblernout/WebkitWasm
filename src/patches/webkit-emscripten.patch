@@ -270,6 +270,48 @@ index 887b24ccca..8ec375212c 100644
      class ThreadPool {
      public:
          ThreadPool()
+diff --git a/Source/WTF/wtf/generic/RunLoopGeneric.cpp b/Source/WTF/wtf/generic/RunLoopGeneric.cpp
+index 203d38335a..a98b0bad49 100644
+--- a/Source/WTF/wtf/generic/RunLoopGeneric.cpp
++++ b/Source/WTF/wtf/generic/RunLoopGeneric.cpp
+@@ -32,6 +32,10 @@
+ #include <wtf/ProcessID.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
++#if defined(__EMSCRIPTEN__)
++#include <emscripten.h>
++#endif
++
+ namespace WTF {
+ 
+ static constexpr bool report = false;
+@@ -213,8 +217,25 @@ void RunLoop::runImpl(RunMode runMode)
+ 
+     Deque<Ref<TimerBase::ScheduledTask>> firedTimers;
+     while (true) {
+-        if (!populateTasks(runMode, statusOfThisLoop, firedTimers))
++        if (!populateTasks(runMode, statusOfThisLoop, firedTimers)) {
++#if defined(__EMSCRIPTEN__)
++            // BIB: single-threaded port — cycles are driven externally (rAF
++            // + the embedder's wake-up macrotask), so nothing sleeps until
++            // the earliest timer deadline. Arm a host setTimeout for it as
++            // each Iterate cycle ends; this point also sees timers that
++            // repeating tasks rescheduled mid-cycle (which skip wakeUp()).
++            // Without this, every WebCore timer is quantized to the next
++            // external cycle (~one display frame).
++            if (runMode == RunMode::Iterate) {
++                Locker locker { m_loopLock };
++                if (!m_schedules.isEmpty()) {
++                    double delayMs = (m_schedules.first()->scheduledTimePoint() - MonotonicTime::now()).milliseconds();
++                    EM_ASM({ if (Module.bibArmTimer) Module.bibArmTimer($0); }, delayMs < 0 ? 0 : delayMs);
++                }
++            }
++#endif
+             return;
++        }
+ 
+         // Dispatch scheduled timers.
+         while (!firedTimers.isEmpty()) {
 diff --git a/Source/WTF/wtf/generic/WorkQueueGeneric.cpp b/Source/WTF/wtf/generic/WorkQueueGeneric.cpp
 index 97c8e9dd2e..fe6f954fa4 100644
 --- a/Source/WTF/wtf/generic/WorkQueueGeneric.cpp
@@ -1671,7 +1713,7 @@ index 0000000000..4a0bd1177b
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlContext.cpp b/Source/WebCore/platform/network/curl/CurlContext.cpp
-index 145c3e2b04..53096f7d68 100644
+index 145c3e2b04..2183518685 100644
 --- a/Source/WebCore/platform/network/curl/CurlContext.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlContext.cpp
 @@ -134,7 +134,7 @@ CurlContext::CurlContext()
@@ -1692,7 +1734,21 @@ index 145c3e2b04..53096f7d68 100644
      if (m_logFile)
          fclose(m_logFile);
  #endif
-@@ -308,7 +308,7 @@ CurlHandle::CurlHandle()
+@@ -289,6 +289,13 @@ CURLMsg* CurlMultiHandle::readInfo(int& messagesInQueue)
+     return curl_multi_info_read(m_multiHandle, &messagesInQueue);
+ }
+ 
++#if defined(__EMSCRIPTEN__)
++CURLMcode CurlMultiHandle::getTimeout(long& timeoutMs)
++{
++    return curl_multi_timeout(m_multiHandle, &timeoutMs);
++}
++#endif
++
+ // CurlHandle -------------------------------------------------
+ 
+ CurlHandle::CurlHandle()
+@@ -308,7 +315,7 @@ CurlHandle::CurlHandle()
  
      enableProxyIfExists();
  
@@ -1701,7 +1757,7 @@ index 145c3e2b04..53096f7d68 100644
      enableVerboseIfUsed();
      enableStdErrIfUsed();
  #endif
-@@ -935,7 +935,7 @@ std::optional<CertificateInfo> CurlHandle::certificateInfo() const
+@@ -935,7 +942,7 @@ std::optional<CertificateInfo> CurlHandle::certificateInfo() const
      return std::nullopt;
  }
  
@@ -1711,7 +1767,7 @@ index 145c3e2b04..53096f7d68 100644
  void CurlHandle::enableVerboseIfUsed()
  {
 diff --git a/Source/WebCore/platform/network/curl/CurlContext.h b/Source/WebCore/platform/network/curl/CurlContext.h
-index e673140e1d..c7b1961f55 100644
+index e673140e1d..26a38daa3e 100644
 --- a/Source/WebCore/platform/network/curl/CurlContext.h
 +++ b/Source/WebCore/platform/network/curl/CurlContext.h
 @@ -132,7 +132,7 @@ public:
@@ -1732,7 +1788,20 @@ index e673140e1d..c7b1961f55 100644
      FILE* m_logFile { nullptr };
      bool m_verbose { false };
  #endif
-@@ -316,7 +316,7 @@ public:
+@@ -183,6 +183,12 @@ public:
+     CURLMcode wakeUp();
+     CURLMcode perform(int&);
+     CURLMsg* readInfo(int&);
++#if defined(__EMSCRIPTEN__)
++    // BIB: curl_multi_timeout — how soon libcurl wants another perform()
++    // pass (0 = immediately, -1 = only waiting on socket activity). The
++    // single-threaded main-RunLoop pump uses this to pick its re-arm delay.
++    CURLMcode getTimeout(long&);
++#endif
+ 
+ private:
+     CURLM* m_multiHandle { nullptr };
+@@ -316,7 +322,7 @@ public:
      CURLcode send(const uint8_t*, size_t, size_t&);
      CURLcode receive(uint8_t*, size_t, size_t&);
  
@@ -1782,7 +1851,7 @@ index d867e52909..ef71bd5e2e 100644
          String requestHeader(data);
          auto headerFields = requestHeader.split("\r\n"_s);
 diff --git a/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp b/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
-index 43dce2f2ad..55bd14604b 100644
+index 43dce2f2ad..66082e9031 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
 @@ -33,6 +33,10 @@
@@ -1840,19 +1909,26 @@ index 43dce2f2ad..55bd14604b 100644
      {
          Locker locker { m_mutex };
          if (m_runThread) {
-@@ -100,7 +134,41 @@ void CurlRequestScheduler::startOrWakeUpThread()
+@@ -100,8 +134,83 @@ void CurlRequestScheduler::startOrWakeUpThread()
      m_thread = Thread::create("curlThread"_s, [this] {
          workerThread();
      }, ThreadType::Network);
 +#endif
-+}
-+
+ }
+ 
 +#if defined(__EMSCRIPTEN__)
 +void CurlRequestScheduler::pumpMainThread()
 +{
 +    ASSERT(isMainThread());
 +
 +    m_pumpScheduled = false;
++
++    // hostPump() can poke before any transfer ever created the handle.
++    {
++        Locker locker { m_multiHandleMutex };
++        if (!m_curlMultiHandle)
++            return;
++    }
 +
 +    executeTasks();
 +
@@ -1875,14 +1951,49 @@ index 43dce2f2ad..55bd14604b 100644
 +        Locker locker { m_mutex };
 +        moreWork = m_activeJobs.size() || m_taskQueue.size() || activeCount;
 +    }
-+    if (moreWork)
++    if (!moreWork)
++        return;
++
++    // Adaptive re-arm. curl_multi_timeout says how soon libcurl wants the
++    // next pass: 0 = it has immediate work (re-dispatch now — with the
++    // embedder's RunLoop wake-up hook this runs at macrotask rate, not
++    // once per display frame); -1 = it is only waiting on socket activity,
++    // which SOCKFS cannot signal into curl, so poll. The poll delay is
++    // capped at 8ms; the host page additionally pokes hostPump() when
++    // WebSocket data actually arrives, so the cap is a fallback, not the
++    // expected read latency.
++    long timeoutMs = -1;
++    m_curlMultiHandle->getTimeout(timeoutMs);
++
++    // Cycle-breaker (Codex 2026-06-10, high): if libcurl keeps answering
++    // "perform again now", chaining immediate dispatches would saturate the
++    // host event loop at macrotask rate with no code-level guarantee of a
++    // yield. Allow a short immediate burst, then force one pass through a
++    // 1ms timer before the next burst.
++    static constexpr int maxImmediatePumpBurst = 16;
++    if (!timeoutMs && ++m_immediatePumpBurst <= maxImmediatePumpBurst) {
 +        startOrWakeUpThread();
- }
++        return;
++    }
++    m_immediatePumpBurst = 0;
++
++    if (m_pumpTimerArmed || m_pumpScheduled)
++        return;
++
++    static constexpr long maxPollDelayMs = 8;
++    long delayMs = timeoutMs < 0 ? maxPollDelayMs : std::min(std::max(timeoutMs, 1L), maxPollDelayMs);
++    m_pumpTimerArmed = true;
++    RunLoop::mainSingleton().dispatchAfter(Seconds::fromMilliseconds(delayMs), [this] {
++        m_pumpTimerArmed = false;
++        pumpMainThread();
++    });
++}
 +#endif
- 
++
  void CurlRequestScheduler::wakeUpThreadIfPossible()
  {
-@@ -138,7 +206,9 @@ void CurlRequestScheduler::stopThread()
+     Locker locker { m_multiHandleMutex };
+@@ -138,7 +247,9 @@ void CurlRequestScheduler::stopThread()
  
  void CurlRequestScheduler::executeTasks()
  {
@@ -1893,10 +2004,24 @@ index 43dce2f2ad..55bd14604b 100644
      Vector<Function<void()>> taskQueue;
  
 diff --git a/Source/WebCore/platform/network/curl/CurlRequestScheduler.h b/Source/WebCore/platform/network/curl/CurlRequestScheduler.h
-index fc5b225a8b..cb78582969 100644
+index fc5b225a8b..3998a7ee71 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequestScheduler.h
 +++ b/Source/WebCore/platform/network/curl/CurlRequestScheduler.h
-@@ -61,6 +61,13 @@ private:
+@@ -51,6 +51,13 @@ public:
+ 
+     void callOnWorkerThread(Function<void()>&&);
+ 
++#if defined(__EMSCRIPTEN__)
++    // BIB: host-page poke. The wisp WebSocket shim calls this (through the
++    // embedder's bib_pump_network export) the moment socket data arrives,
++    // so reads don't have to wait out the polling re-arm delay below.
++    void hostPump() { pumpMainThread(); }
++#endif
++
+ private:
+     void startOrWakeUpThread();
+     void wakeUpThreadIfPossible();
+@@ -61,6 +68,13 @@ private:
  
      void workerThread();
  
@@ -1910,12 +2035,19 @@ index fc5b225a8b..cb78582969 100644
      void startTransfer(CurlRequestSchedulerClient*);
      void completeTransfer(CurlRequestSchedulerClient*, CURLcode);
      void cancelTransfer(CurlRequestSchedulerClient*);
-@@ -77,6 +84,10 @@ private:
+@@ -77,6 +91,17 @@ private:
      Lock m_multiHandleMutex;
      std::optional<CurlMultiHandle> m_curlMultiHandle;
  
 +#if defined(__EMSCRIPTEN__)
 +    bool m_pumpScheduled { false };
++    // BIB: a delayed re-arm (dispatchAfter) is pending. Kept separate from
++    // m_pumpScheduled so a new request can still schedule an immediate pass
++    // while a poll timer is in flight; the spare pass is idempotent.
++    bool m_pumpTimerArmed { false };
++    // BIB: consecutive curl_multi_timeout==0 immediate re-arms; reset when
++    // a pass goes through the timer path (cycle-breaker, see .cpp).
++    int m_immediatePumpBurst { 0 };
 +#endif
 +
      long m_maxConnects;

@@ -51,6 +51,11 @@ namespace BIB {
 // Set by BibChromeClient on any damage report; cleared by paintFrame().
 inline bool g_frameDirty = true;
 
+// Set by BibChromeClient::scheduleRenderingUpdate (WebCore requested the
+// "update the rendering" steps); consumed once per host display frame by
+// bib_tick. Starts true so the boot page gets its first update pass.
+inline bool g_renderingUpdateRequested = true;
+
 class BibChromeClient final : public WebCore::EmptyChromeClient {
 public:
     BibChromeClient() = default;
@@ -60,6 +65,18 @@ private:
     void invalidateContentsAndRootView(const WebCore::IntRect&) final { g_frameDirty = true; }
     void invalidateContentsForSlowScroll(const WebCore::IntRect&) final { g_frameDirty = true; }
     void scroll(const WebCore::IntSize&, const WebCore::IntRect&, const WebCore::IntRect&) final { g_frameDirty = true; }
+
+    // Returning true takes ownership of driving Page::updateRendering():
+    // bib_tick runs it on the next host display frame iff this flag is set.
+    // This suppresses RenderingUpdateScheduler's fallback timer — which
+    // otherwise DOUBLE-drove update passes (its timer plus bib_tick's old
+    // unconditional call) — and stops idle pages from paying a full
+    // rendering-update walk on every frame.
+    bool scheduleRenderingUpdate() final
+    {
+        g_renderingUpdateRequested = true;
+        return true;
+    }
 
     // Guest-page console + uncaught JS exceptions -> engine stderr
     // (printErr -> "[bib] err:" in the host console). EmptyChromeClient
