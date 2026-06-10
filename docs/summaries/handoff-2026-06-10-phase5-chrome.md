@@ -1,26 +1,80 @@
 # Handoff — Phase 5: browser chrome + Phase 4 leftovers (the ONE active handoff)
 
 **Written**: 2026-06-10 ~04:55 EDT, right after Phase 4 core completed.
-**Updated**: 2026-06-10 ~14:00 EDT after the cookies session. Day's
+**Updated**: 2026-06-10 ~14:50 EDT after the site-support session. Day's
 commits: 95fe79c → ed77c77 → fdadeff → 8b46572 (memory/no-leak +
 dev-server 304s) → 2ea0200 (abort fixes + images + URL bar) → c3c6052
-(Codex round-2 fixes) → aa5cda7 (cookies; gate6 4/4).
+(Codex round-2 fixes) → aa5cda7 (cookies; gate6 4/4) → 7edbe2f →
+9c9e8ef (site support: thread aborts, guest console, web storage,
+iframes; suite 8/8).
 **Supersedes**: handoff-2026-06-10-phase4-networking.md (→ docs/archive/).
 
-## ⟶ NEXT SESSION STARTS HERE: Phase 5 chrome
-Cookies are DONE (see "Cookies session" below — google.com renders its
-REAL homepage now). Next up, in priority order:
-1. Title/URL/progress callbacks: BibFrameLoaderClient overrides
-   (dispatchDidReceiveTitle/DidStartProvisionalLoad/DidFinishLoad…) →
-   EM_ASM → host-page events; wire the URL bar to reflect engine state.
-   Most dispatch* on EmptyFrameLoaderClient are final — relax as needed
-   (established pattern, .patch ledger).
-2. Back/forward history: EmptyBackForwardClient has capacity 0 (next
-   likely SILENT gate) — needs a real in-memory BackForwardList; then
-   bib_back/bib_forward/bib_stop/bib_reload exports + host buttons.
-3. Cookie persistence (OPFS) — optional; in-memory survives in-engine
-   navigation, dies with the host page. Decide if it's worth it before
-   auth work.
+## ⟶ NEXT SESSION STARTS HERE: discord IDB + login polish + perf
+1. Root cause #13 (discord.com/login still blank): guest JS touching
+   window.indexedDB hits EmptyDatabaseProvider::
+   idbConnectionToServerForSession → RELEASE_ASSERT_NOT_REACHED
+   ("unreachable" trap unwinds through CLoop, page script dies). Fix:
+   real DatabaseProvider on PageConfiguration returning an
+   InProcessIDBServer connection (WebKitLegacy's WebDatabaseProvider is
+   the recipe; sqlite backing can be MEMFS/in-memory). The
+   IDBBindingUtilities serialization thread is ALREADY inlined for
+   single-thread (9c9e8ef) — the server side should ride the existing
+   WorkQueue→main-RunLoop mapping. Note discord will STILL not fully
+   work (needs WebAssembly-in-JSC + Web Workers — both out of scope);
+   goal is "page renders", not "discord works".
+2. Google login leftover bug: Material floating label never floats —
+   stays inline, shrinks the editable area, typed email shows only its
+   tail ("e.com") + label overlaps text. Repro:
+   tools/google-login-repro.mjs 600 133 (screenshots in build/).
+   Suspect CSS transform/transition/:class-toggle gap — needs DOM-state
+   dump (the post-Enter flow WORKS now: real "Couldn't find your
+   Google Account" response renders — iframe fix unblocked the
+   CheckConnection dance).
+3. curl=35 "SSL connect error" pattern (ogads-pa.clients6.google.com,
+   static.cloudflareinsights.com, router.parklogic.com,
+   api.consentjs.datagrail.io) + curl=92 H2 framing (rinici.de) —
+   subresource TLS failures across many sites; investigate TLS feature
+   gap (DEBUG_CURL=1 env exists for verbose curl traces).
+4. Performance (user item 3): input latency + slow loads. Untouched so
+   far. Profile pump/raster/network. WebGL is intentionally null
+   (velzie.rip's gl.viewport error is the site not null-checking).
+5. Phase 5 chrome (was the previous top priority, still pending):
+   title/URL/progress callbacks; back/forward history
+   (EmptyBackForwardClient capacity 0 = next silent gate); optional
+   OPFS persistence for cookies AND the new in-memory web storage.
+
+## Site-support session (2026-06-10 ~14:00–14:50) — commit 9c9e8ef
+Diagnosis loop: --profiling-funcs (name section, +12MB wasm; abort
+stacks now symbolized) + BibChromeClient::addMessageToConsole →
+WTFLogAlways → "[bib] err: BIB: console …" (relaxed final, ledger).
+tools/site-diagnose.mjs groups guest-console lines.
+- fal.ai/grants ABORT root cause: blob teardown →  ~AsyncFileStream →
+  callOnFileThread → std::call_once → Thread::create → RELEASE_ASSERT.
+  Fixed in-tree under __EMSCRIPTEN__: main-RunLoop dispatch (FIFO
+  preserved). Same sweep fixed callOnIDBSerializationThreadAndWait
+  (inline + static NeverDestroyed context — would abort THEN deadlock).
+  Thread::create audit: GC-controller path is debug-only; audio/video/
+  webrtc compiled out; workers already guarded; WebSQL+SW default off.
+- Root cause #11 (storage): LocalStorageEnabled/SessionStorageEnabled
+  default FALSE at the WebCore layer (IDL-gated → ReferenceError, fatal
+  to site bootstraps) AND EmptyStorageNamespaceProvider discards writes.
+  src/embedder/BibStorage.h: StorageMap-backed areas, per-origin, 5MB;
+  settings flipped in main.cpp. In-memory lifetime (= cookies policy).
+- Root cause #12 (subframes): EmptyFrameLoaderClient::createFrame
+  nullptr → iframe contentWindow null (killed discord bootstrap, hung
+  google's CheckConnection). BibFrameLoaderClient::createFrame per the
+  WebKitLegacy recipe (createSubframe + setSpecifiedName + init +
+  page-null recheck) + transitionToCommittedForNewPage per the WebKit2
+  recipe (view replaced EVERY commit; size + canHaveScrollbars carried
+  over). main.cpp: Engine no longer caches LocalFrameView —
+  mainFrameView() lookup each use (a cached view goes stale/blank after
+  first navigation); boot re-fetches after init() and writer-load.
+- VERIFIED: suite 8/8 (offscreen gate byte-identical exactBlue=20000
+  redGlyph=1541), fal.ai renders w/o abort, google login Enter →
+  real account-validation response, HN smoke 4/4. Codex: 0 high/med.
+- Memleak note: user's reboot mid-session — likely the wasm link
+  pipeline (metadce/wasm-opt spike multi-GB with -g). ALL builds and
+  browser runs now under systemd-run scopes (12G build / 8G browser).
 
 ## Cookies session (2026-06-10 afternoon) — DONE, gate6 3/3
 Root cause was the empty-clients family AGAIN (#10):
