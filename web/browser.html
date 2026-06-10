@@ -104,6 +104,9 @@
         const ptr = Module._bib_render(1);
         if (!ptr) return null;
         const w = Module._bib_frame_width();
+        const h = Module._bib_frame_height();
+        x |= 0; y |= 0;
+        if (x < 0 || y < 0 || x >= w || y >= h) return null;
         const i = ptr + (y * w + x) * 4;
         const heap = Module.HEAPU8;
         return [heap[i], heap[i + 1], heap[i + 2]];
@@ -178,8 +181,12 @@
           ["number", "string", "string", "string", "number", "number", "number"],
           [type, e.key, e.code, text, e.keyCode | 0, e.repeat ? 1 : 0, mods(e)]);
       canvas.addEventListener("keydown", (e) => {
-        // Let host-page shortcuts (devtools, reload) through; consume the rest.
-        if (!e.ctrlKey && !e.metaKey) e.preventDefault();
+        // Ctrl/Cmd combos belong to the HOST browser (devtools, reload) —
+        // don't preventDefault AND don't forward, or Ctrl+A would both
+        // select-all in the host and insert "a" into a focused engine
+        // field (Codex review 2026-06-10).
+        if (e.ctrlKey || e.metaKey) return;
+        e.preventDefault();
         sendKey(0, e, "");
         // The Char half of the RawKeyDown/Char split for printable keys
         // (Enter/Tab included, matching WM_CHAR-style ports).
@@ -187,7 +194,10 @@
         else if (e.key === "Enter") sendKey(2, e, "\r");
         else if (e.key === "Tab") sendKey(2, e, "\t");
       });
-      canvas.addEventListener("keyup", (e) => sendKey(1, e, ""));
+      canvas.addEventListener("keyup", (e) => {
+        if (e.ctrlKey || e.metaKey) return;
+        sendKey(1, e, "");
+      });
     }
 
     // Classic (non-modularized) Emscripten output picks this up: in browser

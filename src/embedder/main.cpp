@@ -337,7 +337,10 @@ int main()
     int hostHTMLBytes = EM_ASM_INT({ return Module.bibHTML ? lengthBytesUTF8(Module.bibHTML) + 1 : 0; });
     if (hostHTMLBytes > 0) {
         hostHTML = static_cast<char*>(malloc(hostHTMLBytes));
-        EM_ASM({ stringToUTF8(Module.bibHTML, $0, $1); }, hostHTML, hostHTMLBytes);
+        if (hostHTML)
+            EM_ASM({ stringToUTF8(Module.bibHTML, $0, $1); }, hostHTML, hostHTMLBytes);
+        else
+            printf("EMBEDDER: bibHTML allocation failed (%d bytes) — using built-in page\n", hostHTMLBytes);
     }
     const char* html = hostHTML ? hostHTML : kTestHTML;
 
