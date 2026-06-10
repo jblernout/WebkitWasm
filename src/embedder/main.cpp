@@ -17,6 +17,7 @@
 #include "config.h"
 
 #include "BibPageClients.h"
+#include "BibStorage.h"
 #include "CommonAtomStrings.h"
 #include "CookieJar.h"
 #include "Document.h"
@@ -87,10 +88,18 @@ static const char* kTestHTML =
 struct Engine {
     RefPtr<WebCore::Page> page;
     RefPtr<WebCore::LocalFrame> mainFrame;
-    RefPtr<WebCore::LocalFrameView> frameView;
     sk_sp<SkSurface> surface;
 };
 static Engine* g_engine;
+
+// The main frame's CURRENT view. Never cache a LocalFrameView: every
+// committed navigation replaces it (BibFrameLoaderClient::
+// transitionToCommittedForNewPage), so a stored pointer would be the boot
+// view forever — painting a detached view renders nothing.
+static WebCore::LocalFrameView* mainFrameView()
+{
+    return g_engine ? g_engine->mainFrame->view() : nullptr;
+}
 
 // bib_render() hands this buffer to JS. Unpremultiplied RGBA as ImageData
 // expects; for this engine's output (opaque pixels) conversion is identity.
@@ -124,10 +133,13 @@ static bool writePPM(const char* path, const SkPixmap& pixmap)
 // dirty flag BibChromeClient maintains.
 static bool paintFrame()
 {
+    RefPtr view = mainFrameView();
+    if (!view)
+        return false;
     g_engine->mainFrame->protectedDocument()->updateLayoutIgnorePendingStylesheets();
     g_engine->surface->getCanvas()->clear(SK_ColorWHITE);
     WebCore::GraphicsContextSkia context(*g_engine->surface->getCanvas(), WebCore::RenderingMode::Unaccelerated, WebCore::RenderingPurpose::Unspecified);
-    g_engine->frameView->paint(context, WebCore::IntRect(0, 0, kWidth, kHeight));
+    view->paint(context, WebCore::IntRect(0, 0, kWidth, kHeight));
     BIB::g_frameDirty = false;
     return true;
 }
@@ -239,13 +251,15 @@ EMSCRIPTEN_KEEPALIVE void bib_diag()
     printf("DIAG: canExecuteScripts=%d\n", frame.script().canExecuteScripts(WebCore::ReasonForCallingCanExecuteScripts::NotAboutToExecuteScript));
     printf("DIAG: sandboxedScripts=%d\n", doc && doc->isSandboxed(WebCore::SandboxFlag::Scripts));
     printf("DIAG: docURL=%s\n", doc ? doc->url().string().utf8().data() : "(null)");
-    auto contents = g_engine->frameView->contentsSize();
-    printf("DIAG: contentsSize=%dx%d scrollY=%d\n", contents.width(), contents.height(), g_engine->frameView->scrollPosition().y());
-    printf("DIAG: isScrollableOrRubberbandable=%d canHaveScrollbars=%d vScrollbar=%d scrollAnimatorEnabled=%d\n",
-        g_engine->frameView->isScrollableOrRubberbandable(),
-        g_engine->frameView->canHaveScrollbars(),
-        !!g_engine->frameView->verticalScrollbar(),
-        frame.settings().scrollAnimatorEnabled());
+    if (RefPtr view = mainFrameView()) {
+        auto contents = view->contentsSize();
+        printf("DIAG: contentsSize=%dx%d scrollY=%d\n", contents.width(), contents.height(), view->scrollPosition().y());
+        printf("DIAG: isScrollableOrRubberbandable=%d canHaveScrollbars=%d vScrollbar=%d scrollAnimatorEnabled=%d\n",
+            view->isScrollableOrRubberbandable(),
+            view->canHaveScrollbars(),
+            !!view->verticalScrollbar(),
+            frame.settings().scrollAnimatorEnabled());
+    }
     auto result = frame.script().executeScriptIgnoringException("6*7"_s, JSC::SourceTaintedOrigin::Untainted);
     printf("DIAG: executeScript(6*7) isNumber=%d value=%d\n", result && result.isNumber(), result && result.isNumber() ? (int)result.asNumber() : -1);
 }
@@ -255,7 +269,8 @@ EMSCRIPTEN_KEEPALIVE void bib_scroll_to(int y)
 {
     if (!g_engine)
         return;
-    g_engine->frameView->setScrollPosition(WebCore::ScrollPosition(0, y));
+    if (RefPtr view = mainFrameView())
+        view->setScrollPosition(WebCore::ScrollPosition(0, y));
 }
 
 // Phase 4: real navigation. Drives FrameLoader::load -> DocumentLoader ->
@@ -311,6 +326,12 @@ int main()
     // session): document.cookie writes vanish, reads return "" — Google
     // serves its "Cookies are disabled" interstitial on exactly that.
     pageConfiguration.cookieJar = WebCore::CookieJar::create(BIB::createEmbedderStorageSessionProvider());
+    // Real in-memory localStorage/sessionStorage (root cause #11): the
+    // empty-clients provider discards writes, and the WebCore-layer
+    // defaults leave both window properties OFF entirely (settings flipped
+    // below) — `window.localStorage` was a ReferenceError that modern site
+    // bootstraps treat as fatal.
+    pageConfiguration.storageNamespaceProvider = BIB::BibStorageNamespaceProvider::create();
 
     // pageConfigurationWithEmptyClients hardcodes SandboxFlags::all() on the
     // main frame (it exists for SVGImage, which must never run script) —
@@ -338,6 +359,11 @@ int main()
     // image load: no request, no error event, blank <img> (root cause #8,
     // empty-defaults family).
     page->settings().setLoadsImagesAutomatically(true);
+    // Raw-WebCore defaults again: LocalStorageEnabled/SessionStorageEnabled
+    // are FALSE at this layer (the WebKit wrappers flip them on; we must
+    // too). The window properties are IDL-gated behind these settings.
+    page->settings().setLocalStorageEnabled(true);
+    page->settings().setSessionStorageEnabled(true);
 
     RefPtr localMainFrame = page->localMainFrame();
     if (!localMainFrame) {
@@ -348,6 +374,8 @@ int main()
     localMainFrame->setView(WebCore::LocalFrameView::create(*localMainFrame, WebCore::IntSize(kWidth, kHeight)));
     localMainFrame->init();
 
+    // Re-fetched after init(): the initial-empty-document commit already
+    // ran transitionToCommittedForNewPage, which replaced the view above.
     RefPtr frameView = localMainFrame->view();
     frameView->setCanHaveScrollbars(interactive);
 
@@ -386,6 +414,8 @@ int main()
 
     printf("EMBEDDER: HTML loaded\n");
 
+    // Re-fetch: the writer-driven load above may have replaced the view too.
+    frameView = localMainFrame->view();
     frameView->resize(kWidth, kHeight);
     localMainFrame->protectedDocument()->updateLayoutIgnorePendingStylesheets();
 
@@ -403,7 +433,7 @@ int main()
         return 1;
     }
 
-    g_engine = new Engine { WTF::move(page), WTF::move(localMainFrame), WTF::move(frameView), WTF::move(surface) };
+    g_engine = new Engine { WTF::move(page), WTF::move(localMainFrame), WTF::move(surface) };
 
     if (!paintFrame()) {
         printf("EMBEDDER: FAIL paint\n");

@@ -51,6 +51,10 @@ target_link_options(BibEmbedder PRIVATE
     # Surface the COMPLETE undefined-symbol list per link attempt instead of
     # wasm-ld's default 20-error cutoff — each stub iteration costs minutes.
     "SHELL:-Wl,--error-limit=0"
+    # Keep the wasm name section: abort/crash stacks in the browser show
+    # real function names instead of wasm-function[N]. Costs binary size
+    # only (no codegen change) — load-bearing for site-abort diagnosis.
+    "SHELL:--profiling-funcs"
 )
 
 # ICU data archive at the same absolute path ICU compiled in as its default

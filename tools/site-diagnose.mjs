@@ -92,14 +92,26 @@ for (const target of sites) {
       : `paint: PROBE FAILED (engine dead) wispStreams=${streams}`
   );
   const loadFails = errLines.filter((l) => l.includes("BIB: load failed"));
-  const other = errLines.filter((l) => !l.includes("BIB: load failed"));
+  const guestConsole = errLines.filter((l) => l.includes("BIB: console"));
+  const other = errLines.filter(
+    (l) => !l.includes("BIB: load failed") && !l.includes("BIB: console")
+  );
   if (loadFails.length) {
     console.log(`load failures (${loadFails.length}):`);
     for (const l of loadFails.slice(0, 10)) console.log("  " + l);
   }
+  if (guestConsole.length) {
+    // The guest page's own console.log/warn/error + uncaught exceptions —
+    // errors first (they explain blank pages), then the rest.
+    const errs = guestConsole.filter((l) => l.includes("BIB: console error"));
+    console.log(`guest console (${guestConsole.length}, ${errs.length} errors):`);
+    for (const l of errs.slice(0, 12)) console.log("  " + l);
+    for (const l of guestConsole.filter((l) => !errs.includes(l)).slice(0, 8))
+      console.log("  " + l);
+  }
   if (other.length) {
     console.log(`other stderr/page errors (${other.length}):`);
-    for (const l of other.slice(0, 15)) console.log("  " + l);
+    for (const l of other.slice(0, 25)) console.log("  " + l);
   }
   console.log(`screenshot: build/diagnose-${slug}.png`);
   await page.close();

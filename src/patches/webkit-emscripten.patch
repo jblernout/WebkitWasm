@@ -583,6 +583,38 @@ index 0000000000..928271f2db
 +}
 +
 +} // namespace WebCore
+diff --git a/Source/WebCore/bindings/js/IDBBindingUtilities.cpp b/Source/WebCore/bindings/js/IDBBindingUtilities.cpp
+index c6998bf5ce..b93e7857f6 100644
+--- a/Source/WebCore/bindings/js/IDBBindingUtilities.cpp
++++ b/Source/WebCore/bindings/js/IDBBindingUtilities.cpp
+@@ -585,6 +585,19 @@ private:
+ 
+ void callOnIDBSerializationThreadAndWait(Function<void(JSC::JSGlobalObject&)>&& function)
+ {
++#if defined(__EMSCRIPTEN__)
++    // PORT=Emscripten is single-threaded: Thread::create RELEASE_ASSERTs
++    // (pthread_create returns ENOTSUP), and even if the thread existed the
++    // BinarySemaphore handshake below could never be signalled from the
++    // only thread — abort, then deadlock. Run the serialization work
++    // inline against a lazily-created context instead; it owns the same
++    // small dedicated VM the thread would have owned, created on first
++    // IndexedDB use. The thread-UID ASSERTs in IDBSerializationContext
++    // hold: every call happens on the main thread.
++    static NeverDestroyed<IDBSerializationContext> serializationContext;
++    AutodrainedPool pool;
++    function(serializationContext->globalObject());
++#else
+     static NeverDestroyed<MessageQueue<Function<void(JSC::JSGlobalObject&)>>> queue;
+     static std::once_flag createThread;
+ 
+@@ -605,6 +618,7 @@ void callOnIDBSerializationThreadAndWait(Function<void(JSC::JSGlobalObject&)>&&
+     };
+     queue->append(makeUnique<Function<void(JSC::JSGlobalObject&)>>(WTF::move(newFuntion)));
+     semaphore.wait();
++#endif
+ }
+ 
+ } // namespace WebCore
 diff --git a/Source/WebCore/crypto/emscripten/CryptoStubsEmscripten.cpp b/Source/WebCore/crypto/emscripten/CryptoStubsEmscripten.cpp
 new file mode 100644
 index 0000000000..a448e8a75e
@@ -720,6 +752,46 @@ index 0000000000..731d4ca29b
 +}
 +
 +} // namespace WebCore
+diff --git a/Source/WebCore/fileapi/AsyncFileStream.cpp b/Source/WebCore/fileapi/AsyncFileStream.cpp
+index b9df166312..cd09004fb6 100644
+--- a/Source/WebCore/fileapi/AsyncFileStream.cpp
++++ b/Source/WebCore/fileapi/AsyncFileStream.cpp
+@@ -40,6 +40,7 @@
+ #include <wtf/MainThread.h>
+ #include <wtf/MessageQueue.h>
+ #include <wtf/NeverDestroyed.h>
++#include <wtf/RunLoop.h>
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/Threading.h>
+ #include <wtf/URL.h>
+@@ -70,6 +71,19 @@ static void callOnFileThread(Function<void ()>&& function)
+     ASSERT(isMainThread());
+     ASSERT(function);
+ 
++#if defined(__EMSCRIPTEN__)
++    // PORT=Emscripten is single-threaded: pthread_create returns ENOTSUP,
++    // so Thread::create RELEASE_ASSERTs — the first blob load that touched
++    // a file stream aborted the engine right here (BlobResourceHandle dtor
++    // -> ~AsyncFileStream -> call_once -> Thread::create). Run "file
++    // thread" work as a deferred main-RunLoop task instead — the same
++    // single-threading treatment WorkQueueGeneric got. FIFO order is
++    // preserved (RunLoop dispatch is a FIFO queue), the nested
++    // callOnMainThread() in perform()/~AsyncFileStream just queues another
++    // main-loop task, and FileStream I/O is synchronous MEMFS — instant
++    // and safe on the main thread.
++    RunLoop::mainSingleton().dispatch(WTF::move(function));
++#else
+     static NeverDestroyed<MessageQueue<Function<void ()>>> queue;
+ 
+     static std::once_flag createFileThreadOnce;
+@@ -92,6 +106,7 @@ static void callOnFileThread(Function<void ()>&& function)
+     });
+ 
+     queue.get().append(makeUnique<Function<void ()>>(WTF::move(function)));
++#endif
+ }
+ 
+ AsyncFileStream::AsyncFileStream(FileStreamClient& client)
 diff --git a/Source/WebCore/loader/DocumentLoader.cpp b/Source/WebCore/loader/DocumentLoader.cpp
 index 2c9b359bdf..9e44b75c10 100644
 --- a/Source/WebCore/loader/DocumentLoader.cpp
@@ -733,9 +805,18 @@ index 2c9b359bdf..9e44b75c10 100644
  #include "ExtensionStyleSheets.h"
  #include "FormSubmission.h"
 diff --git a/Source/WebCore/loader/EmptyClients.h b/Source/WebCore/loader/EmptyClients.h
-index 09a23e649b..d1e434fd88 100644
+index 09a23e649b..b196b347dd 100644
 --- a/Source/WebCore/loader/EmptyClients.h
 +++ b/Source/WebCore/loader/EmptyClients.h
+@@ -88,7 +88,7 @@ class EmptyChromeClient : public ChromeClient {
+ 
+     void setResizable(bool) final { }
+ 
+-    void addMessageToConsole(JSC::MessageSource, JSC::MessageLevel, const String&, unsigned, unsigned, const String&) final { }
++    void addMessageToConsole(JSC::MessageSource, JSC::MessageLevel, const String&, unsigned, unsigned, const String&) override { }
+ 
+     bool canRunBeforeUnloadConfirmPanel() final { return false; }
+     bool runBeforeUnloadConfirmPanel(String&&, LocalFrame&) final { return true; }
 @@ -115,10 +115,12 @@ class EmptyChromeClient : public ChromeClient {
      std::optional<PointerCharacteristics> pointerCharacteristicsOfPrimaryPointingDevice() const final { return std::nullopt; };
      OptionSet<PointerCharacteristics> pointerCharacteristicsOfAllAvailablePointingDevices() const final { return { }; }
@@ -753,7 +834,7 @@ index 09a23e649b..d1e434fd88 100644
      IntPoint screenToRootView(const IntPoint& p) const final { return p; }
      IntPoint rootViewToScreen(const IntPoint& p) const final { return p; }
 diff --git a/Source/WebCore/loader/EmptyFrameLoaderClient.h b/Source/WebCore/loader/EmptyFrameLoaderClient.h
-index 5ebee25c41..4048658d09 100644
+index 5ebee25c41..83440872e6 100644
 --- a/Source/WebCore/loader/EmptyFrameLoaderClient.h
 +++ b/Source/WebCore/loader/EmptyFrameLoaderClient.h
 @@ -99,9 +99,14 @@ private:
@@ -793,6 +874,24 @@ index 5ebee25c41..4048658d09 100644
      bool canShowMIMETypeAsHTML(const String&) const final;
      bool representationExistsForURLScheme(StringView) const final;
      String generatedMIMETypeForURLScheme(StringView) const final;
+@@ -154,7 +159,7 @@ private:
+ #if PLATFORM(IOS_FAMILY)
+     void didRestoreFrameHierarchyForCachedFrame() final;
+ #endif
+-    void transitionToCommittedForNewPage(InitializingIframe) final;
++    void transitionToCommittedForNewPage(InitializingIframe) override;
+ 
+     void didRestoreFromBackForwardCache() final;
+ 
+@@ -166,7 +171,7 @@ private:
+ 
+     void saveViewStateToItem(HistoryItem&) final;
+     bool canCachePage() const final;
+-    RefPtr<LocalFrame> createFrame(const AtomString&, HTMLFrameOwnerElement&) final;
++    RefPtr<LocalFrame> createFrame(const AtomString&, HTMLFrameOwnerElement&) override;
+     RefPtr<Widget> createPlugin(HTMLPlugInElement&, const URL&, const Vector<AtomString>&, const Vector<AtomString>&, const String&, bool) final;
+ 
+     ObjectContentType objectContentType(const URL&, const String&) final;
 diff --git a/Source/WebCore/platform/Pasteboard.h b/Source/WebCore/platform/Pasteboard.h
 index 11cef75ac7..07c2bf511f 100644
 --- a/Source/WebCore/platform/Pasteboard.h

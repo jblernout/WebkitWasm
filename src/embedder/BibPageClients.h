@@ -20,20 +20,30 @@
 
 #include "Document.h"
 #include "DocumentLoader.h"
+#include "DocumentPage.h" // inline Frame::page() lives here, not in Frame.h
 #include "Editor.h"
 #include "EditorClient.h"
 #include "EmptyClients.h"
 #include "EmptyFrameLoaderClient.h"
 #include "EventNames.h"
 #include "FrameDestructionObserverInlines.h" // inline FrameDestructionObserver::frame()
+#include "FrameIdentifier.h"
+#include "FrameLoader.h"
+#include "FrameTree.h"
+#include "FrameTreeSyncData.h"
+#include "HTMLFrameOwnerElement.h"
 #include "KeyboardEvent.h"
 #include "LocalFrame.h"
+#include "LocalFrameView.h"
 #include "MIMETypeRegistry.h"
+#include "Page.h"
+#include "ReferrerPolicy.h"
 #include "Node.h"
 #include "NodeDocument.h" // inline Node::document()
 #include "PlatformKeyboardEvent.h"
 #include "TextCheckerClient.h"
 #include "UserAgent.h"
+#include <wtf/UniqueRef.h>
 #include <wtf/text/WTFString.h>
 
 namespace BIB {
@@ -50,6 +60,22 @@ private:
     void invalidateContentsAndRootView(const WebCore::IntRect&) final { g_frameDirty = true; }
     void invalidateContentsForSlowScroll(const WebCore::IntRect&) final { g_frameDirty = true; }
     void scroll(const WebCore::IntSize&, const WebCore::IntRect&, const WebCore::IntRect&) final { g_frameDirty = true; }
+
+    // Guest-page console + uncaught JS exceptions -> engine stderr
+    // (printErr -> "[bib] err:" in the host console). EmptyChromeClient
+    // discards these (relaxed final->override, patch ledger), which made
+    // every script-dead site an undiagnosable blank page.
+    void addMessageToConsole(JSC::MessageSource, JSC::MessageLevel level, const String& message, unsigned lineNumber, unsigned, const String& sourceID) final
+    {
+        static constexpr const char* levels[] = { "log", "warn", "error", "debug", "info" };
+        auto levelIndex = static_cast<size_t>(level);
+        // Console spam is real (SPAs log banners); cap per-line payload.
+        auto text = message.left(512).utf8();
+        auto source = sourceID.right(96).utf8();
+        WTFLogAlways("BIB: console %s: %s (%s:%u)",
+            levelIndex < std::size(levels) ? levels[levelIndex] : "?",
+            text.data(), source.data(), lineNumber);
+    }
 };
 
 class BibEditorClient final : public WebCore::EditorClient {
@@ -230,6 +256,7 @@ class BibFrameLoaderClient final : public WebCore::EmptyFrameLoaderClient {
 public:
     explicit BibFrameLoaderClient(WebCore::FrameLoader& frameLoader)
         : WebCore::EmptyFrameLoaderClient(frameLoader)
+        , m_frameLoader(frameLoader) // base keeps its copy private
     {
     }
 
@@ -266,6 +293,61 @@ private:
     {
         return WebCore::standardUserAgent();
     }
+
+    // Subframe creation (root cause #12, empty-clients family): the empty
+    // client returns nullptr, so every <iframe> got a null contentWindow —
+    // discord.com's bootstrap dies on exactly that (relaxed final->override
+    // in EmptyFrameLoaderClient.h, patch ledger). Recipe condensed from
+    // WebKitLegacy WebFrame.mm _createFrameWithPage.
+    RefPtr<WebCore::LocalFrame> createFrame(const AtomString& name, WebCore::HTMLFrameOwnerElement& ownerElement) final
+    {
+        RefPtr ownerFrame = ownerElement.document().frame();
+        if (!ownerFrame)
+            return nullptr;
+        RefPtr page = ownerFrame->page();
+        if (!page)
+            return nullptr;
+
+        auto effectiveSandboxFlags = ownerElement.sandboxFlags();
+        effectiveSandboxFlags.add(ownerFrame->effectiveSandboxFlags());
+        auto effectiveReferrerPolicy = ownerElement.referrerPolicy();
+        if (RefPtr localTopDocument = page->localTopDocument(); effectiveReferrerPolicy == WebCore::ReferrerPolicy::EmptyString && localTopDocument)
+            effectiveReferrerPolicy = localTopDocument->referrerPolicy();
+
+        auto subframe = WebCore::LocalFrame::createSubframe(*page, [](auto&, auto& frameLoader) -> UniqueRef<WebCore::LocalFrameLoaderClient> {
+            return WTF::makeUniqueRefWithoutRefCountedCheck<BibFrameLoaderClient>(frameLoader);
+        }, WebCore::generateFrameIdentifier(), effectiveSandboxFlags, effectiveReferrerPolicy, ownerElement, WebCore::FrameTreeSyncData::create());
+        subframe->tree().setSpecifiedName(name);
+        subframe->init();
+
+        // init() runs script synchronously (initial about:blank document) —
+        // it may have removed the frame from the page already.
+        if (!subframe->page())
+            return nullptr;
+        return subframe;
+    }
+
+    // Every real port replaces the frame's view on each committed
+    // navigation (WebKit2 WebLocalFrameLoaderClient recipe); the empty
+    // client's no-op made us silently REUSE the boot-time view across
+    // in-engine navigations (stale scroll/paint state) and left subframes
+    // with no view at all (relaxed final->override, patch ledger).
+    void transitionToCommittedForNewPage(InitializingIframe) final
+    {
+        Ref frame = m_frameLoader->frame();
+        RefPtr oldView = frame->view();
+        // Main frame keeps the embedder's fixed canvas size; subframes are
+        // sized by layout (LocalFrame::createView auto-sizes non-root).
+        // canHaveScrollbars carries over so main.cpp's boot-time choice
+        // (off in gate mode — byte-stable pixel gates) survives navigation.
+        WebCore::IntSize size = oldView ? oldView->size() : WebCore::IntSize();
+        bool canHaveScrollbars = oldView ? oldView->canHaveScrollbars() : true;
+        frame->createView(size, std::nullopt, { }, false);
+        if (RefPtr view = frame->view())
+            view->setCanHaveScrollbars(canHaveScrollbars);
+    }
+
+    WeakRef<WebCore::FrameLoader> m_frameLoader;
 };
 
 } // namespace BIB
