@@ -478,10 +478,10 @@ index 9e58feb225..2b882079a9 100644
  
 diff --git a/Source/cmake/OptionsEmscripten.cmake b/Source/cmake/OptionsEmscripten.cmake
 new file mode 100644
-index 0000000000..fa1a7752aa
+index 0000000000..d6bf7a8539
 --- /dev/null
 +++ b/Source/cmake/OptionsEmscripten.cmake
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,144 @@
 +# PORT=Emscripten: WebCore + JavaScriptCore compiled to WebAssembly with
 +# Emscripten. Single-process WebKit1-style embedder; no WebKit2, no tools.
 +#
@@ -611,6 +611,10 @@ index 0000000000..fa1a7752aa
 +    find_package(CURL 7.85.0 REQUIRED)
 +    find_package(OpenSSL REQUIRED)
 +    find_package(LibPSL 0.20.2 REQUIRED)
++    # Our static libpsl is built --enable-runtime=libicu (curl-tier.sh) but
++    # libpsl.pc/FindLibPSL advertise only -lpsl; propagate the ICU dependency
++    # or the embedder link fails with undefined u_*/uidna_* symbols.
++    target_link_libraries(LibPSL::LibPSL INTERFACE ICU::uc)
 +
 +    # WebCore/CMakeLists.txt links OpenGL::GLES unconditionally on CMake ports
 +    # (ANGLE / epoxy / system GLES elsewhere). Emscripten's GLES2+EGL are emcc

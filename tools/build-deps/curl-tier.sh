@@ -10,7 +10,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TP="$ROOT/third_party"
 SYSROOT="$TP/wasm-sysroot"
 DEPS="$TP/build-deps"
-JOBS="$(nproc)"
+JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 
 source "$TP/emsdk/emsdk_env.sh" > /dev/null 2>&1
 export CFLAGS="-O2 -pthread" CXXFLAGS="-O2 -pthread"
@@ -80,6 +80,12 @@ if [ ! -f "$SYSROOT/lib/libpsl.a" ]; then
      PKG_CONFIG_LIBDIR="$SYSROOT/lib/pkgconfig" \
      > ../libpsl-configure.log 2>&1 && \
    emmake make -j"$JOBS" install > ../libpsl-build.log 2>&1)
+  # Static libpsl built with --enable-runtime=libicu carries unresolved ICU
+  # symbols, but its .pc advertises only -lpsl — record the private dep so
+  # pkg-config consumers link statically without symbol errors (Codex review).
+  if ! rg -q "^Requires.private:.*icu-uc" "$SYSROOT/lib/pkgconfig/libpsl.pc"; then
+    printf 'Requires.private: icu-uc\n' >> "$SYSROOT/lib/pkgconfig/libpsl.pc"
+  fi
 fi
 
 echo "=== curl ==="
@@ -124,8 +130,9 @@ fi
 
 echo "=== fontconfig ==="
 # Marker is the .pc (installed near the end), not the .a (installed early) —
-# a partial install must not satisfy the guard.
-if [ ! -f "$SYSROOT/lib/pkgconfig/fontconfig.pc" ]; then
+# a partial install must not satisfy the guard. Also require etc/fonts: the
+# runtime config is copied AFTER the .pc, so check both (Codex review).
+if [ ! -f "$SYSROOT/lib/pkgconfig/fontconfig.pc" ] || [ ! -f "$SYSROOT/etc/fonts/fonts.conf" ]; then
   fetch https://www.freedesktop.org/software/fontconfig/release/fontconfig-2.15.0.tar.xz fontconfig.tar.xz
   unpack fontconfig.tar.xz fontconfig
   # fontconfig 2.15 ships a config.sub too old to know 'emscripten';
