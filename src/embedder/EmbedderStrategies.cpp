@@ -139,6 +139,13 @@ private:
         }
 
         URL redirectedURL { m_response.url(), m_response.httpHeaderField(HTTPHeaderName::Location) };
+        // A remote response must never redirect into the local (MEMFS)
+        // filesystem — CurlRequest has a real file: path (Codex 2026-06-10,
+        // matches NetworkDataTaskCurl::willPerformHTTPRedirection).
+        if (redirectedURL.protocolIsFile()) {
+            didFailInternal(ResourceError(CURLE_FILE_COULDNT_READ_FILE, m_response.url()));
+            return;
+        }
         ResourceRequest request = m_loader->request();
         if (!redirectedURL.hasFragmentIdentifier() && request.url().hasFragmentIdentifier())
             redirectedURL.setFragmentIdentifier(request.url().fragmentIdentifier());
@@ -162,8 +169,18 @@ private:
 
         ResourceResponse redirectResponse { m_response };
         m_loader->willSendRequest(WTF::move(request), redirectResponse, [this, protectedThis = Ref { *this }](ResourceRequest&& newRequest) {
-            if (newRequest.isNull() || !m_loader)
+            if (newRequest.isNull() || !m_loader) {
+                // Policy/CSP cancelled the redirect. The loader tears itself
+                // down separately — but the current CurlRequest is parked
+                // waiting for completeDidReceiveResponse and must not leak
+                // (Codex 2026-06-10).
+                if (auto curlRequest = std::exchange(m_curlRequest, nullptr)) {
+                    curlRequest->cancel();
+                    curlRequest->invalidateClient();
+                }
+                notifyDone();
                 return;
+            }
             if (auto curlRequest = std::exchange(m_curlRequest, nullptr)) {
                 curlRequest->cancel();
                 curlRequest->invalidateClient();

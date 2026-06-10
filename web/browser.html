@@ -62,9 +62,16 @@
     const wispServer = params.get("wisp") ?? "ws://127.0.0.1:5001/";
     const NativeWebSocket = window.WebSocket;
     const sockfsURL = /^ws:\/\/([^:/]+):(\d+)\/$/;
+    // Discriminator: only sockets carrying the engine's marker subprotocol
+    // (Module.websocket.subprotocol below — only SOCKFS sends it) are
+    // rerouted; a stray page-level `new WebSocket("ws://x:1/")` stays
+    // native (Codex 2026-06-10). WispWebSocket ignores subprotocols.
+    const isEngineSocket = (protocols) =>
+      protocols === "bib-sockfs" ||
+      (Array.isArray(protocols) && protocols.includes("bib-sockfs"));
     window.WebSocket = function (url, protocols) {
       const m = sockfsURL.exec(url);
-      if (m) {
+      if (m && isEngineSocket(protocols)) {
         log(`wisp: stream -> ${m[1]}:${m[2]}`);
         return new wisp_client.client.WispWebSocket(`${wispServer}${m[1]}:${m[2]}`);
       }
@@ -235,8 +242,9 @@
       bibInteractive: true,
       bibHTML: demo === "hello" ? helloHTML : demo === "scripttest" ? scriptTestHTML : interactiveHTML,
       // SOCKFS websocket config: bare prefix => 'ws://<host>:<port>/',
-      // which the dispatcher above reroutes onto Wisp streams.
-      websocket: { url: "ws://", subprotocol: "binary" },
+      // which the dispatcher above reroutes onto Wisp streams. The
+      // subprotocol is the dispatcher's engine-socket marker.
+      websocket: { url: "ws://", subprotocol: "bib-sockfs" },
       preRun: [function () {
         // fontconfig's compiled-in cache dir must exist in MEMFS.
         Module.FS.mkdirTree("/var/cache/fontconfig");
