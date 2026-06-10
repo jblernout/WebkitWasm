@@ -100,14 +100,19 @@ Key properties:
         (plus libJavaScriptCore/libWTF/libPAL/libSkia in build/webcore/lib).
         Patch ledger 640 lines; Codex-reviewed (0 critical/high, 3 findings
         fixed). WebCrypto deferred (BoringSSL-flavored upstream sources).
-  - [ ] Embedder + first paint: render a fixed HTML string offscreen; blit
-    to canvas. No network, no events. Requires embedding WebCore::Page +
-    client interfaces directly against internal headers — there is NO
-    supported single-process embedding API outside Cocoa. Model on the
-    PlayStation port (curl + generic RunLoop + Skia + static embedding).
-    Start from WebCore loader/EmptyClients.h (pageConfigurationWithEmptyClients
-    — the path SVGImage uses internally for exactly this job).
-  - GATE: "hello <h1>" pixels on canvas. This is the make-or-break gate.
+  - [x] 2026-06-09 ~23:45: **GATE PASSED — first paint, offscreen half.**
+    embedder.wasm (87.6 MB; src/embedder/ + 12 WebKit-tree stub files)
+    renders `<h1>hello</h1>` + styled div 800x600 PIXEL-EXACT under node
+    (#0066CC div exactly 20000 px, antialiased DejaVu glyphs, real font
+    metrics in the render tree). Built from EmptyClients.h
+    pageConfigurationWithEmptyClients exactly as planned; 48 undefined
+    symbols → one stub iteration (playbook memory has the recipe).
+    Single-threaded (matches the lib stack: no -pthread anywhere).
+    Commits a680190 (links) → da01669 (gate). Output: build/out.png.
+  - [ ] Canvas half of the gate: blit the same pixels to an interactable
+    <canvas> in a COOP/COEP browser tab (Phase 3 entry point — the
+    offscreen pixels make this mechanical).
+  - GATE: "hello <h1>" pixels — PASSED offscreen 2026-06-09.
 - [ ] **Phase 3 — Interactivity**
   - Mouse/keyboard/scroll plumbing, text input, fonts, images (png/jpeg/
     webp), CSS at full fidelity.
