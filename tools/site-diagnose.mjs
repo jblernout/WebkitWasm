@@ -106,8 +106,15 @@ for (const target of sites) {
     const errs = guestConsole.filter((l) => l.includes("BIB: console error"));
     console.log(`guest console (${guestConsole.length}, ${errs.length} errors):`);
     for (const l of errs.slice(0, 12)) console.log("  " + l);
-    for (const l of guestConsole.filter((l) => !errs.includes(l)).slice(0, 8))
-      console.log("  " + l);
+    // Print head AND tail of the non-error lines — a head-only cap once
+    // disguised a passing probe as a hang (the verdict lines were last).
+    const rest = guestConsole.filter((l) => !errs.includes(l));
+    const head = rest.slice(0, 12);
+    const tail = rest.length > 24 ? rest.slice(-12) : rest.slice(head.length);
+    for (const l of head) console.log("  " + l);
+    if (rest.length > head.length + tail.length)
+      console.log(`  … ${rest.length - head.length - tail.length} more …`);
+    for (const l of tail) console.log("  " + l);
   }
   if (other.length) {
     console.log(`other stderr/page errors (${other.length}):`);

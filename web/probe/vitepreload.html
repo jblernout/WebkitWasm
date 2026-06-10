@@ -1,0 +1,40 @@
+<!DOCTYPE html><html><body>
+<script>
+  // Replicates Vite's __vitePreload helper stages to find where dynamic
+  // import chains die in-engine (2captcha demo: CSS deps load, JS deps
+  // never fetched, import() never runs).
+  const relList = document.createElement('link').relList;
+  console.log('VITEPRE relList: ' + (relList ? 'present' : 'MISSING'));
+  console.log('VITEPRE supports fn: ' + (relList && relList.supports ? 'present' : 'MISSING'));
+  try {
+    console.log('VITEPRE supports(modulepreload): ' + relList.supports('modulepreload'));
+    console.log('VITEPRE supports(preload): ' + relList.supports('preload'));
+  } catch (e) { console.log('VITEPRE supports threw: ' + e); }
+
+  const mk = (rel, href, asAttr) => new Promise((resolve) => {
+    const link = document.createElement('link');
+    link.rel = rel;
+    if (asAttr) link.as = asAttr;
+    link.crossOrigin = '';
+    link.href = href;
+    let done = false;
+    const finish = (msg) => { if (!done) { done = true; console.log('VITEPRE ' + msg); resolve(); } };
+    link.addEventListener('load', () => finish(rel + ' load fired for ' + href));
+    link.addEventListener('error', () => finish(rel + ' ERROR fired for ' + href));
+    setTimeout(() => finish(rel + ' TIMEOUT (no event) for ' + href), 6000);
+    document.head.appendChild(link);
+  });
+
+  (async () => {
+    await mk('modulepreload', './modules-dep.mjs');
+    await mk('preload', './modules-static.mjs', 'script');
+    await mk('stylesheet', './vitepreload-probe.css');
+    // The real thing Vite does after preload resolves:
+    try {
+      const m = await import('./modules-dep.mjs');
+      console.log('VITEPRE post-preload dynamic import: ' + m.value);
+    } catch (e) { console.log('VITEPRE post-preload import FAILED: ' + e); }
+    console.log('VITEPRE done');
+  })();
+</script>
+</body></html>
