@@ -14,14 +14,22 @@
 // data: URLs go through loader->start(), which handles them before the
 // (unreachable-on-curl) ResourceHandle path.
 //
-// Not yet implemented (documented gaps, revisit with cookies/auth work):
-// cookies, HTTP auth challenges (401 renders as the error body), sync XHR,
+// Cookies: ONE in-memory NetworkStorageSession (CookieJarDB ":memory:")
+// shared by the DOM CookieJar (installed on PageConfiguration in main.cpp)
+// and the network path here (Cookie request header + Set-Cookie response
+// storage — the NetworkDataTaskCurl recipe). Cookies survive in-engine
+// navigations but not a host-page reload; OPFS persistence is later work.
+//
+// Not yet implemented (documented gaps, revisit with auth work):
+// HTTP auth challenges (401 renders as the error body), sync XHR,
 // ping loads, preconnect.
 
 #include "config.h"
 
 #include "BlobRegistry.h"
 #include "BlobRegistryImpl.h"
+#include "CookieJar.h"
+#include "CookieJarDB.h"
 #include "CurlRequest.h"
 #include "CurlRequestClient.h"
 #include "CurlResponse.h"
@@ -30,6 +38,7 @@
 #include "MediaStrategy.h"
 #include "NetworkLoadMetrics.h"
 #include "NetworkStateNotifier.h"
+#include "NetworkStorageSession.h"
 #include "PasteboardStrategy.h"
 #include "PlatformStrategies.h"
 #include "ResourceError.h"
@@ -37,8 +46,12 @@
 #include "ResourceLoaderIdentifier.h"
 #include "ResourceRequest.h"
 #include "ResourceResponse.h"
+#include "SameSiteInfo.h"
+#include "ShouldRelaxThirdPartyCookieBlocking.h"
+#include "StorageSessionProvider.h"
 #include "SubresourceLoader.h"
 #include "UserAgent.h"
+#include <pal/SessionID.h>
 #include <wtf/HashMap.h>
 #include <wtf/NeverDestroyed.h>
 
@@ -52,9 +65,41 @@ static const String& embedderErrorDomain()
     return domain;
 }
 
+// The single cookie store for the whole embedder. Default-session semantics
+// (matches the Page's PAL::SessionID::defaultSessionID()), but the database
+// is forced to sqlite ":memory:" — the default-session path would be a MEMFS
+// file that vanishes on host-page reload anyway, so skip the FS entirely.
+NetworkStorageSession& embedderStorageSession()
+{
+    static NetworkStorageSession* session = [] {
+        auto* session = new NetworkStorageSession(PAL::SessionID::defaultSessionID());
+        session->setCookieDatabase(makeUniqueRef<CookieJarDB>(":memory:"_s));
+        return session;
+    }();
+    return *session;
+}
+
+// DOM-side bridge: main.cpp hands this to CookieJar::create() on the
+// PageConfiguration, replacing pageConfigurationWithEmptyClients'
+// EmptyStorageSessionProvider (null session = document.cookie no-ops =
+// Google's "Cookies are disabled" page).
+class EmbedderStorageSessionProvider final : public StorageSessionProvider {
+public:
+    static Ref<EmbedderStorageSessionProvider> create() { return adoptRef(*new EmbedderStorageSessionProvider); }
+
+private:
+    NetworkStorageSession* storageSession() const final { return &embedderStorageSession(); }
+};
+
+Ref<WebCore::StorageSessionProvider> createEmbedderStorageSessionProvider()
+{
+    return EmbedderStorageSessionProvider::create();
+}
+
 // Drives ONE ResourceLoader through one (or, across redirects, several)
 // CurlRequest. A stripped-down NetworkDataTaskCurl: no credential storage,
-// no cookie jar, no downloads, no auth restarts.
+// no downloads, no auth restarts. Cookies use the NetworkDataTaskCurl
+// recipe against embedderStorageSession().
 class BibResourceLoad final : public RefCounted<BibResourceLoad>, public CurlRequestClient {
 public:
     static Ref<BibResourceLoad> create(ResourceLoader& loader, Function<void(BibResourceLoad&)>&& doneCallback)
@@ -97,7 +142,36 @@ private:
         // misbehave badly with an empty one.
         if (request.httpUserAgent().isEmpty())
             request.setHTTPUserAgent(standardUserAgent());
+        appendCookieHeader(request);
         return CurlRequest::create(request, *this);
+    }
+
+    // NetworkDataTaskCurl::appendCookieHeader. Applied to the COPY handed to
+    // CurlRequest (initial load and every redirect hop both come through
+    // createCurlRequest); the ResourceLoader's own request never carries the
+    // header, so hops can't accumulate stale Cookie values.
+    void appendCookieHeader(ResourceRequest& request)
+    {
+        auto includeSecureCookies = request.url().protocolIs("https"_s) ? IncludeSecureCookies::Yes : IncludeSecureCookies::No;
+        auto cookieHeaderField = embedderStorageSession().cookieRequestHeaderFieldValue(request.firstPartyForCookies(), SameSiteInfo::create(request), request.url(), std::nullopt, std::nullopt, includeSecureCookies, ApplyTrackingPrevention::Yes, ShouldRelaxThirdPartyCookieBlocking::No, IsKnownCrossSiteTracker::No).first;
+        if (!cookieHeaderField.isEmpty())
+            request.addHTTPHeaderField(HTTPHeaderName::Cookie, cookieHeaderField);
+    }
+
+    // NetworkDataTaskCurl::handleCookieHeaders. Runs on EVERY response,
+    // including 3xx — login/consent flows set cookies on the redirect leg.
+    // Prefix match is "set-cookie:" WITHOUT the space (upstream requires
+    // "set-cookie: " and silently drops a legal space-less header; the
+    // value is trimmed instead — Codex 2026-06-10).
+    void storeResponseCookies(const ResourceRequest& request, const CurlResponse& response)
+    {
+        static constexpr auto setCookieHeader = "set-cookie:"_s;
+        for (const auto& header : response.headers) {
+            if (header.startsWithIgnoringASCIICase(setCookieHeader)) {
+                String setCookieString = header.right(header.length() - setCookieHeader.length()).trim(isASCIIWhitespace<char16_t>);
+                embedderStorageSession().setCookiesFromHTTPResponse(request.firstPartyForCookies(), response.url, setCookieString);
+            }
+        }
     }
 
     void notifyDone()
@@ -170,6 +244,13 @@ private:
         }
 
         ResourceResponse redirectResponse { m_response };
+        // First-party-for-cookies on main-frame redirects is updated INSIDE
+        // this call: SubresourceLoader -> CachedRawResource::redirectReceived
+        // -> DocumentLoader::willSendRequest does
+        // setFirstPartyForCookies(newURL) for the main frame (subframes
+        // keep the main document's first party, per spec). The cookie
+        // attach in createCurlRequest below therefore sees the updated
+        // value (Codex 2026-06-10 — verified, no fork from upstream).
         m_loader->willSendRequest(WTF::move(request), redirectResponse, [this, protectedThis = Ref { *this }](ResourceRequest&& newRequest) {
             if (newRequest.isNull() || !m_loader) {
                 // Policy/CSP cancelled the redirect. The loader tears itself
@@ -217,6 +298,8 @@ private:
             return;
 
         m_response = ResourceResponse(curlResponse);
+
+        storeResponseCookies(request.resourceRequest(), curlResponse);
 
         if (shouldRedirect()) {
             performRedirect();

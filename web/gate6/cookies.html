@@ -1,0 +1,33 @@
+<!DOCTYPE html><html><head><style>
+  body { margin:0; background:#ffffff; }
+  .sig { position:absolute; top:20px; width:64px; height:30px; background:#777777; }
+  #sigdom { left:20px; }
+  #sigenabled { left:120px; }
+  #signet { left:220px; }
+  #sigredir { left:320px; }
+</style></head><body>
+<div id=sigdom class=sig></div><div id=sigenabled class=sig></div><div id=signet class=sig></div><div id=sigredir class=sig></div>
+<script>
+  // pass -> green, fail -> red, never ran -> stays #777777
+  const sig = (id, ok) => document.getElementById(id).style.background = ok ? '#00cc00' : '#cc0000';
+  // 1. document.cookie round-trip (DOM CookieJar -> NetworkStorageSession).
+  document.cookie = 'bibdom=7; path=/';
+  sig('sigdom', document.cookie.includes('bibdom=7'));
+  // 2. navigator.cookieEnabled consults the same session.
+  sig('sigenabled', navigator.cookieEnabled === true);
+  // 3. Network round-trip: Set-Cookie from /cookie-test/set must come back
+  //    as a Cookie request header on /cookie-test/echo (BibResourceLoad
+  //    store + attach).
+  // 4. Redirect leg: /cookie-test/redirect-set 302s to /echo while setting
+  //    bibredir — the 3xx Set-Cookie must be stored AND attached (with the
+  //    earlier bibtest) on the redirected hop.
+  fetch('/cookie-test/set')
+    .then(() => fetch('/cookie-test/echo'))
+    .then(r => r.text())
+    .then(t => sig('signet', t.includes('bibtest=42')))
+    .then(() => fetch('/cookie-test/redirect-set'))
+    .then(r => r.text())
+    .then(t => sig('sigredir', t.includes('bibredir=9') && t.includes('bibtest=42')))
+    .catch(() => { sig('signet', false); sig('sigredir', false); });
+</script>
+</body></html>

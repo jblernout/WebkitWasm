@@ -1,21 +1,57 @@
 # Handoff — Phase 5: browser chrome + Phase 4 leftovers (the ONE active handoff)
 
 **Written**: 2026-06-10 ~04:55 EDT, right after Phase 4 core completed.
-**Updated**: 2026-06-10 ~13:30 EDT after the memory investigation + the
-abort-hunt session (see sections below). Day's commits: 95fe79c →
-ed77c77 → fdadeff → 8b46572 (memory/no-leak + dev-server 304s) →
-2ea0200 (abort fixes + images + URL bar) → [Codex round-2 fixes commit].
+**Updated**: 2026-06-10 ~14:00 EDT after the cookies session. Day's
+commits: 95fe79c → ed77c77 → fdadeff → 8b46572 (memory/no-leak +
+dev-server 304s) → 2ea0200 (abort fixes + images + URL bar) → c3c6052
+(Codex round-2 fixes) → 96c7d8e (cookies; gate6 4/4).
 **Supersedes**: handoff-2026-06-10-phase4-networking.md (→ docs/archive/).
 
-## ⟶ NEXT SESSION STARTS HERE: COOKIES (top priority)
-User hit it live twice: google.com renders "Cookies are disabled — try
-again" (screenshot evidence in session) and old.reddit serves its bot
-block page. CookieJarDB (sqlite) is already COMPILED+LINKED; what's
-missing is wiring: NetworkStorageSession ownership for the session +
-cookie strategy plumbing so CurlRequest attaches/stores cookies.
-Persistence (OPFS) can come later — in-memory cookies already fix
-"Cookies are disabled". Start from how WebKitLegacy/curl ports create
-NetworkStorageSession with CookieJarCurl/CookieJarDB.
+## ⟶ NEXT SESSION STARTS HERE: Phase 5 chrome
+Cookies are DONE (see "Cookies session" below — google.com renders its
+REAL homepage now). Next up, in priority order:
+1. Title/URL/progress callbacks: BibFrameLoaderClient overrides
+   (dispatchDidReceiveTitle/DidStartProvisionalLoad/DidFinishLoad…) →
+   EM_ASM → host-page events; wire the URL bar to reflect engine state.
+   Most dispatch* on EmptyFrameLoaderClient are final — relax as needed
+   (established pattern, .patch ledger).
+2. Back/forward history: EmptyBackForwardClient has capacity 0 (next
+   likely SILENT gate) — needs a real in-memory BackForwardList; then
+   bib_back/bib_forward/bib_stop/bib_reload exports + host buttons.
+3. Cookie persistence (OPFS) — optional; in-memory survives in-engine
+   navigation, dies with the host page. Decide if it's worth it before
+   auth work.
+
+## Cookies session (2026-06-10 afternoon) — DONE, gate6 3/3
+Root cause was the empty-clients family AGAIN (#10):
+pageConfigurationWithEmptyClients installs CookieJar over
+EmptyStorageSessionProvider (NULL NetworkStorageSession) → document.cookie
+writes vanish, reads return "" → google's "Cookies are disabled"
+interstitial. AND the network path never attached/stored cookies.
+- src/embedder/EmbedderStrategies.cpp: embedderStorageSession() —
+  NetworkStorageSession(defaultSessionID) with
+  setCookieDatabase(CookieJarDB ":memory:") (in-memory sqlite; curl port
+  ctor would use a MEMFS file path); EmbedderStorageSessionProvider +
+  createEmbedderStorageSessionProvider() for main.cpp; BibResourceLoad
+  gained appendCookieHeader() (in createCurlRequest — initial + every
+  redirect hop) and storeResponseCookies() (in curlDidReceiveResponse
+  BEFORE the redirect check, so Set-Cookie on 3xx legs sticks). Both are
+  verbatim NetworkDataTaskCurl recipes (appendCookieHeader /
+  handleCookieHeaders).
+- src/embedder/main.cpp: pageConfiguration.cookieJar =
+  CookieJar::create(createEmbedderStorageSessionProvider()).
+- CookieJarDB ":memory:" is a first-class mode (isOnMemory()); accept
+  policy defaults to Always; no threads/locks inside — single-thread safe.
+- NEW GATE: tools/gate6-cookies-test.mjs + web/gate6/cookies.html
+  (document.cookie round-trip, navigator.cookieEnabled, network
+  Set-Cookie→Cookie echo via /cookie-test/set + /cookie-test/echo
+  endpoints added to tools/dev-server.mjs). 3/3.
+- VERIFIED LIVE: google.com renders the REAL homepage (logo, search box,
+  Sign in — build/diagnose-https-www-google-com.png). old.reddit still
+  serves its "network policy" block page — that's server-side
+  (wisp-exit IP reputation / UA heuristics), NOT cookies; engine renders
+  the block page correctly. Possible later experiment: tweak
+  standardUserAgent().
 
 ## State (Phase 4 core COMPLETE — all gates green)
 - **THE ENGINE BROWSES THE REAL WEB.** GATE 4 3/3 + MODERN-SITE SMOKE 4/4:
@@ -46,6 +82,7 @@ NetworkStorageSession with CookieJarCurl/CookieJarDB.
     (`&curldebug=1` → libcurl verbose to the page log… NOTE: only in
     non-NDEBUG builds; release ignores it)
 - Gates: tools/run-embedder.cjs, gate2/gate3/gate4-browser-test.mjs,
+  gate5-images-test.mjs, gate6-cookies-test.mjs, urlbar-test.mjs,
   smoke-modern-site.mjs (parameterized: `node tools/smoke-modern-site.mjs
   https://any-site/`).
 - WebKit patch ledger 1851 lines (src/patches/webkit-emscripten.patch),
@@ -145,6 +182,7 @@ via temp -sASSERTIONS + --profiling-funcs; both REVERTED after):
   no-store reload spike; collision needs same size AND same ms mtime).
 
 ## NEXT: Phase 5 — browser chrome (plain web dev)
+(Priority order now lives in "NEXT SESSION STARTS HERE" at the top.)
 1. ~~URL bar~~ DONE (2026-06-10): #urlbar + Go in web/browser.html,
    Enter/click → bib_load_url in place, ?url= via history.replaceState,
    tools/urlbar-test.mjs 3/3. Still TODO: bib_stop/bib_reload, loading
@@ -159,9 +197,10 @@ via temp -sASSERTIONS + --profiling-funcs; both REVERTED after):
 4. History (back/forward): BackForwardClient is EmptyBackForwardClient
    (capacity 0) — needs a real in-memory BackForwardList for back/forward.
 
-## Phase 4 leftovers (updated 2026-06-10 ~13:30)
+## Phase 4 leftovers (updated 2026-06-10 ~14:00)
 - ~~Images~~ DONE — gate5-images 3/3; Wikipedia/eBay render with images.
-- **Cookies: TOP PRIORITY — see "NEXT SESSION STARTS HERE" above.**
+- ~~Cookies~~ DONE — gate6-cookies 3/3; google.com renders for real
+  (see "Cookies session" above). In-memory only; OPFS persistence open.
 - HTTP auth (401/407), sync XHR (blocked on single-thread — document as
   unsupported), ping/preconnect completions are error-stubs.
 - ~~WebSocket-in-page thread abort~~ DONE (scheduler pumped) — but
@@ -178,8 +217,9 @@ via temp -sASSERTIONS + --profiling-funcs; both REVERTED after):
 ## Known traps (carried forward)
 - Empty-client semantics bite SILENTLY. Before suspecting wasm, check
   what pageConfigurationWithEmptyClients installed (sandbox flags, final
-  no-op methods, false gates, dropped completion handlers). Seven root
-  causes so far were all this family.
+  no-op methods, false gates, dropped completion handlers, null
+  providers). TEN root causes so far were all this family (#10 =
+  EmptyStorageSessionProvider's null session ate document.cookie).
 - WTFLogAlways probes (printErr) inside WebCore/embedder beat static
   tracing for "handled but nothing happened" — REVERT before
   export-webkit-patches.sh.

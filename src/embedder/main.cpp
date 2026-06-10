@@ -18,6 +18,7 @@
 
 #include "BibPageClients.h"
 #include "CommonAtomStrings.h"
+#include "CookieJar.h"
 #include "Document.h"
 #include "DocumentLoader.h"
 #include "DocumentView.h" // inline LocalFrame::view() lives here, not in LocalFrame.h
@@ -45,6 +46,7 @@
 #include "SecurityContext.h"
 #include "Settings.h"
 #include "SharedBuffer.h"
+#include "StorageSessionProvider.h"
 #include <JavaScriptCore/InitializeThreading.h>
 #include <emscripten.h>
 #include <pal/SessionID.h>
@@ -65,6 +67,7 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 
 namespace BIB {
 void installEmbedderStrategies(); // EmbedderStrategies.cpp
+Ref<WebCore::StorageSessionProvider> createEmbedderStorageSessionProvider(); // EmbedderStrategies.cpp
 }
 
 static constexpr int kWidth = 800;
@@ -303,6 +306,11 @@ int main()
     auto pageConfiguration = WebCore::pageConfigurationWithEmptyClients(std::nullopt, PAL::SessionID::defaultSessionID());
     pageConfiguration.chromeClient = makeUniqueRef<BIB::BibChromeClient>();
     pageConfiguration.editorClient = makeUniqueRef<BIB::BibEditorClient>();
+    // Real cookie jar over the embedder's in-memory NetworkStorageSession.
+    // The empty-clients default wraps EmptyStorageSessionProvider (null
+    // session): document.cookie writes vanish, reads return "" — Google
+    // serves its "Cookies are disabled" interstitial on exactly that.
+    pageConfiguration.cookieJar = WebCore::CookieJar::create(BIB::createEmbedderStorageSessionProvider());
 
     // pageConfigurationWithEmptyClients hardcodes SandboxFlags::all() on the
     // main frame (it exists for SVGImage, which must never run script) —

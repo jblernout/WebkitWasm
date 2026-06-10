@@ -71,6 +71,43 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     const pathname = decodeURIComponent(url.pathname);
 
+    // gate6 cookie endpoints — static files can't Set-Cookie. The engine
+    // (through curl/Wisp) hits /set, then /echo must see the cookie back.
+    // Path=/cookie-test keeps the test cookies off every other dev path;
+    // /echo reflects ONLY bib* test cookies, not the whole Cookie header
+    // (Codex 2026-06-10).
+    if (pathname === "/cookie-test/set") {
+      res
+        .writeHead(200, {
+          "Content-Type": "text/plain",
+          "Set-Cookie": "bibtest=42; Path=/cookie-test",
+        })
+        .end("set");
+      return;
+    }
+    // 302 leg that ALSO sets a cookie — proves Set-Cookie on a 3xx is
+    // stored and re-attached on the redirected hop (gate6 check 4).
+    if (pathname === "/cookie-test/redirect-set") {
+      res
+        .writeHead(302, {
+          "Set-Cookie": "bibredir=9; Path=/cookie-test",
+          Location: "/cookie-test/echo",
+        })
+        .end();
+      return;
+    }
+    if (pathname === "/cookie-test/echo") {
+      const bibOnly = (req.headers.cookie ?? "")
+        .split(";")
+        .map((c) => c.trim())
+        .filter((c) => c.startsWith("bib"))
+        .join("; ");
+      res
+        .writeHead(200, { "Content-Type": "text/plain" })
+        .end(bibOnly);
+      return;
+    }
+
     let root = ROOT;
     let rel = pathname;
     const mount = mounts.find(
