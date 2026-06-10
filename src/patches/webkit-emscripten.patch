@@ -286,10 +286,10 @@ index 0000000000..0fc6a680f4
 +list(APPEND PAL_LIBRARIES OpenSSL::Crypto)
 diff --git a/Source/WebCore/PlatformEmscripten.cmake b/Source/WebCore/PlatformEmscripten.cmake
 new file mode 100644
-index 0000000000..1b7e437735
+index 0000000000..16e443f4ea
 --- /dev/null
 +++ b/Source/WebCore/PlatformEmscripten.cmake
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,76 @@
 +# WebCore platform file for PORT=Emscripten.
 +# Structure cribbed from PlatformPlayStation.cmake / PlatformWin.cmake:
 +# curl networking + ImageDecoders + OpenSSL crypto, Skia for graphics.
@@ -328,19 +328,44 @@ index 0000000000..1b7e437735
 +)
 +
 +list(APPEND WebCore_SOURCES
++    accessibility/emscripten/AXObjectCacheEmscripten.cpp
++    accessibility/emscripten/AccessibilityObjectEmscripten.cpp
++
++    crypto/emscripten/CryptoStubsEmscripten.cpp
++
++    editing/emscripten/EditorEmscripten.cpp
++
++    platform/emscripten/MIMETypeRegistryEmscripten.cpp
++    platform/emscripten/PasteboardEmscripten.cpp
++    platform/emscripten/PlatformKeyboardEventEmscripten.cpp
++    platform/emscripten/PlatformScreenEmscripten.cpp
++    platform/emscripten/ScrollbarThemeEmscripten.cpp
++    platform/emscripten/ThemeEmscripten.cpp
++
 +    platform/generic/KeyedDecoderGeneric.cpp
 +    platform/generic/KeyedEncoderGeneric.cpp
++
++    platform/graphics/emscripten/GLStubsEmscripten.cpp
++    platform/graphics/emscripten/SystemFontDatabaseEmscripten.cpp
 +
 +    platform/text/Hyphenation.cpp
 +    platform/text/LocaleICU.cpp
 +
 +    platform/unix/LoggingUnix.cpp
 +    platform/unix/SharedMemoryUnix.cpp
++
++    rendering/emscripten/RenderThemeEmscripten.cpp
 +)
 +
-+# Emscripten-specific port sources (theme, platform screen, user agent,
-+# pasteboard, system font database stubs) land here in Phase 3 alongside the
-+# embedder; configure does not need them.
++# Phase 2 embedder: the executable's sources and CMake logic live OUTSIDE the
++# WebKit tree (src/embedder/ in the project repo) so this patch stays minimal.
++# The include is DEFERRED to directory-end so it runs after
++# WEBKIT_FRAMEWORK(WebCore) — the WebCore target and the final
++# WebCore_*_INCLUDE_DIRECTORIES lists exist by then (same consumption pattern
++# as WebCoreTestSupport at the bottom of WebCore/CMakeLists.txt).
++if (EMSCRIPTEN_EMBEDDER_CMAKE)
++    cmake_language(DEFER CALL include "${EMSCRIPTEN_EMBEDDER_CMAKE}")
++endif ()
 diff --git a/Source/WebCore/accessibility/AXCoreObject.h b/Source/WebCore/accessibility/AXCoreObject.h
 index fc373ce9df..ced9647dab 100644
 --- a/Source/WebCore/accessibility/AXCoreObject.h
@@ -363,6 +388,232 @@ index fc373ce9df..ced9647dab 100644
      RefPtr<AccessibilityObjectWrapper> m_wrapper;
  #elif USE(ATSPI)
      RefPtr<AccessibilityObjectAtspi> m_wrapper;
+diff --git a/Source/WebCore/accessibility/emscripten/AXObjectCacheEmscripten.cpp b/Source/WebCore/accessibility/emscripten/AXObjectCacheEmscripten.cpp
+new file mode 100644
+index 0000000000..ef4993d56b
+--- /dev/null
++++ b/Source/WebCore/accessibility/emscripten/AXObjectCacheEmscripten.cpp
+@@ -0,0 +1,52 @@
++/*
++ * PORT=Emscripten AXObjectCache platform half, cribbed (simplified) from
++ * accessibility/playstation/AXObjectCachePlayStation.cpp. Accessibility is
++ * unconditional in WebKit 2.52 — every port must provide these. Notifications
++ * are dropped: the single-process embedder has no assistive-technology bridge
++ * (a JS-side ARIA bridge would land in a much later phase).
++ */
++
++#include "config.h"
++#include "AXObjectCache.h"
++
++#include "AccessibilityObject.h"
++
++namespace WebCore {
++
++void AXObjectCache::attachWrapper(AccessibilityObject& object)
++{
++    // The generic RefCounted AccessibilityObjectWrapper stub (AXCoreObject.h,
++    // PLATFORM(PLAYSTATION) || PLATFORM(HAIKU) || __EMSCRIPTEN__ branch).
++    auto wrapper = adoptRef(*new AccessibilityObjectWrapper());
++    object.setWrapper(wrapper.ptr());
++}
++
++void AXObjectCache::detachWrapper(AXCoreObject*, AccessibilityDetachmentType)
++{
++}
++
++void AXObjectCache::postPlatformNotification(AccessibilityObject&, AXNotification)
++{
++}
++
++void AXObjectCache::nodeTextChangePlatformNotification(AccessibilityObject*, AXTextChange, unsigned, const String&)
++{
++}
++
++void AXObjectCache::frameLoadingEventPlatformNotification(RenderView*, AXLoadingEvent)
++{
++}
++
++void AXObjectCache::handleScrolledToAnchor(const Node&)
++{
++}
++
++void AXObjectCache::platformHandleFocusedUIElementChanged(Element*, Element*)
++{
++}
++
++void AXObjectCache::platformPerformDeferredCacheUpdate()
++{
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/accessibility/emscripten/AccessibilityObjectEmscripten.cpp b/Source/WebCore/accessibility/emscripten/AccessibilityObjectEmscripten.cpp
+new file mode 100644
+index 0000000000..928271f2db
+--- /dev/null
++++ b/Source/WebCore/accessibility/emscripten/AccessibilityObjectEmscripten.cpp
+@@ -0,0 +1,25 @@
++/*
++ * PORT=Emscripten AccessibilityObject platform half, cribbed verbatim from
++ * accessibility/playstation/AccessibilityObjectPlayStation.cpp.
++ */
++
++#include "config.h"
++#include "AccessibilityObject.h"
++
++namespace WebCore {
++
++void AccessibilityObject::detachPlatformWrapper(AccessibilityDetachmentType)
++{
++}
++
++bool AccessibilityObject::accessibilityIgnoreAttachment() const
++{
++    return false;
++}
++
++AccessibilityObjectInclusion AccessibilityObject::accessibilityPlatformIncludesObject() const
++{
++    return AccessibilityObjectInclusion::DefaultBehavior;
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/crypto/emscripten/CryptoStubsEmscripten.cpp b/Source/WebCore/crypto/emscripten/CryptoStubsEmscripten.cpp
+new file mode 100644
+index 0000000000..a448e8a75e
+--- /dev/null
++++ b/Source/WebCore/crypto/emscripten/CryptoStubsEmscripten.cpp
+@@ -0,0 +1,42 @@
++/*
++ * PORT=Emscripten WebCrypto link stubs. The OpenSSL WebCrypto backend
++ * (crypto/openssl/*) is DEFERRED to Phase 4 — those sources are written
++ * against BoringSSL and do not compile vs real OpenSSL 3.5 (see
++ * PlatformEmscripten.cmake). The cross-platform WebCrypto core still
++ * references these platform hooks, so satisfy wasm-ld with "not supported"
++ * behavior: no algorithms register, key imports fail cleanly. Remove this
++ * file when the real backend lands.
++ */
++
++#include "config.h"
++#include "CryptoAlgorithmRegistry.h"
++#include "CryptoKeyEC.h"
++#include "CryptoKeyRSA.h"
++
++namespace WebCore {
++
++void CryptoAlgorithmRegistry::platformRegisterAlgorithms()
++{
++}
++
++bool CryptoKeyEC::platformSupportedCurve(NamedCurve)
++{
++    return false;
++}
++
++RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportRaw(CryptoAlgorithmIdentifier, NamedCurve, Vector<uint8_t>&&, bool, CryptoKeyUsageBitmap)
++{
++    return nullptr;
++}
++
++RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportPkcs8(CryptoAlgorithmIdentifier, NamedCurve, Vector<uint8_t>&&, bool, CryptoKeyUsageBitmap)
++{
++    return nullptr;
++}
++
++RefPtr<CryptoKeyRSA> CryptoKeyRSA::create(CryptoAlgorithmIdentifier, CryptoAlgorithmIdentifier, bool, const CryptoKeyRSAComponents&, bool, CryptoKeyUsageBitmap)
++{
++    return nullptr;
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/editing/emscripten/EditorEmscripten.cpp b/Source/WebCore/editing/emscripten/EditorEmscripten.cpp
+new file mode 100644
+index 0000000000..731d4ca29b
+--- /dev/null
++++ b/Source/WebCore/editing/emscripten/EditorEmscripten.cpp
+@@ -0,0 +1,83 @@
++/*
++ * PORT=Emscripten Editor pasteboard glue, cribbed from
++ * editing/libwpe/EditorLibWPE.cpp. The pasteboard stub returns no data, so
++ * the fragment path is dead code at runtime — kept structurally identical so
++ * a real clipboard bridge later only has to fix PasteboardEmscripten.
++ */
++
++#include "config.h"
++#include "Editor.h"
++
++#include "DocumentFragment.h"
++#include "FrameDestructionObserverInlines.h"
++#include "LocalFrameInlines.h"
++#include "NotImplemented.h"
++#include "Pasteboard.h"
++#include "Settings.h"
++#include "SimpleRange.h"
++#include "markup.h"
++
++namespace WebCore {
++
++static RefPtr<DocumentFragment> createFragmentFromPasteboardData(Pasteboard& pasteboard, LocalFrame& frame, const SimpleRange& range, bool allowPlainText, bool& chosePlainText)
++{
++    chosePlainText = false;
++
++    Vector<String> types = pasteboard.typesForLegacyUnsafeBindings();
++    if (types.isEmpty())
++        return nullptr;
++
++    if (types.contains("text/html"_s) && frame.document()) {
++        String markup = pasteboard.readString("text/html"_s);
++        return createFragmentFromMarkup(*frame.document(), markup, emptyString(), { });
++    }
++
++    if (!allowPlainText)
++        return nullptr;
++
++    if (types.contains("text/plain;charset=utf-8"_s)) {
++        chosePlainText = true;
++        return createFragmentFromText(range, pasteboard.readString("text/plain;charset=utf-8"_s));
++    }
++
++    return nullptr;
++}
++
++void Editor::writeSelectionToPasteboard(Pasteboard& pasteboard)
++{
++    PasteboardWebContent pasteboardContent;
++    pasteboardContent.text = selectedTextForDataTransfer();
++    pasteboardContent.markup = serializePreservingVisualAppearance(document().selection().selection(), ResolveURLs::YesExcludingURLsForPrivacy, SerializeComposedTree::Yes, IgnoreUserSelectNone::Yes);
++    pasteboard.write(pasteboardContent);
++}
++
++void Editor::writeImageToPasteboard(Pasteboard&, Element&, const URL&, const String&)
++{
++    notImplemented();
++}
++
++void Editor::pasteWithPasteboard(Pasteboard* pasteboard, OptionSet<PasteOption> options)
++{
++    auto range = selectedRange();
++    if (!range)
++        return;
++
++    bool chosePlainText;
++    auto fragment = createFragmentFromPasteboardData(*pasteboard, *document().frame(), *range, options.contains(PasteOption::AllowPlainText), chosePlainText);
++
++    if (fragment && options.contains(PasteOption::AsQuotation))
++        quoteFragmentForPasting(*fragment);
++
++    if (fragment && shouldInsertFragment(*fragment, *range, EditorInsertAction::Pasted))
++        pasteAsFragment(*fragment, canSmartReplaceWithPasteboard(*pasteboard), chosePlainText, options.contains(PasteOption::IgnoreMailBlockquote) ? MailBlockquoteHandling::IgnoreBlockquote : MailBlockquoteHandling::RespectBlockquote);
++}
++
++void Editor::platformCopyFont()
++{
++}
++
++void Editor::platformPasteFont()
++{
++}
++
++} // namespace WebCore
 diff --git a/Source/WebCore/loader/DocumentLoader.cpp b/Source/WebCore/loader/DocumentLoader.cpp
 index 2c9b359bdf..9e44b75c10 100644
 --- a/Source/WebCore/loader/DocumentLoader.cpp
@@ -375,6 +626,19 @@ index 2c9b359bdf..9e44b75c10 100644
  #include "EventNames.h"
  #include "ExtensionStyleSheets.h"
  #include "FormSubmission.h"
+diff --git a/Source/WebCore/platform/Pasteboard.h b/Source/WebCore/platform/Pasteboard.h
+index 11cef75ac7..07c2bf511f 100644
+--- a/Source/WebCore/platform/Pasteboard.h
++++ b/Source/WebCore/platform/Pasteboard.h
+@@ -107,7 +107,7 @@ struct PasteboardWebContent {
+     bool canSmartCopyOrDelete;
+     String text;
+     String markup;
+-#elif USE(LIBWPE)
++#elif USE(LIBWPE) || defined(__EMSCRIPTEN__)
+     String text;
+     String markup;
+ #endif
 diff --git a/Source/WebCore/platform/WebCorePersistentCoders.cpp b/Source/WebCore/platform/WebCorePersistentCoders.cpp
 index bc608e04f7..4abc58def6 100644
 --- a/Source/WebCore/platform/WebCorePersistentCoders.cpp
@@ -402,6 +666,394 @@ index bc608e04f7..4abc58def6 100644
          return std::nullopt;
  
      WebCore::CertificateInfo::CertificateChain certificateChain;
+diff --git a/Source/WebCore/platform/emscripten/MIMETypeRegistryEmscripten.cpp b/Source/WebCore/platform/emscripten/MIMETypeRegistryEmscripten.cpp
+new file mode 100644
+index 0000000000..678f480e6c
+--- /dev/null
++++ b/Source/WebCore/platform/emscripten/MIMETypeRegistryEmscripten.cpp
+@@ -0,0 +1,67 @@
++/*
++ * PORT=Emscripten MIME type table, cribbed from
++ * platform/playstation/MIMETypeRegistryPlayStation.cpp.
++ */
++
++#include "config.h"
++#include "MIMETypeRegistry.h"
++
++namespace WebCore {
++
++static const std::initializer_list<TypeExtensionPair>& platformMediaTypes()
++{
++    static std::initializer_list<TypeExtensionPair> platformMediaTypes = {
++        { "image/bmp"_s, "bmp"_s },
++        { "text/css"_s, "css"_s },
++        { "image/gif"_s, "gif"_s },
++        { "text/html"_s, "htm"_s },
++        { "text/html"_s, "html"_s },
++        { "image/x-icon"_s, "ico"_s },
++        { "image/jpeg"_s, "jpeg"_s },
++        { "image/jpeg"_s, "jpg"_s },
++        { "application/x-javascript"_s, "js"_s },
++        { "application/pdf"_s, "pdf"_s },
++        { "image/png"_s, "png"_s },
++        { "application/rss+xml"_s, "rss"_s },
++        { "image/svg+xml"_s, "svg"_s },
++        { "text/plain"_s, "text"_s },
++        { "text/plain"_s, "txt"_s },
++        { "image/x-xbitmap"_s, "xbm"_s },
++        { "application/xhtml+xml"_s, "xhtml"_s },
++        { "text/xml"_s, "xml"_s },
++        { "text/xsl"_s, "xsl"_s },
++        { "image/webp"_s, "webp"_s },
++    };
++    return platformMediaTypes;
++}
++
++String MIMETypeRegistry::mimeTypeForExtension(StringView extension)
++{
++    for (auto& entry : platformMediaTypes()) {
++        if (equalIgnoringASCIICase(extension, entry.extension))
++            return entry.type;
++    }
++    return emptyString();
++}
++
++bool MIMETypeRegistry::isApplicationPluginMIMEType(const String&)
++{
++    return false;
++}
++
++String MIMETypeRegistry::preferredExtensionForMIMEType(const String& mimeType)
++{
++    for (auto& entry : platformMediaTypes()) {
++        if (equalIgnoringASCIICase(mimeType, entry.type))
++            return entry.extension;
++    }
++    return emptyString();
++}
++
++Vector<String> MIMETypeRegistry::extensionsForMIMEType(const String&)
++{
++    ASSERT_NOT_IMPLEMENTED_YET();
++    return { };
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/platform/emscripten/PasteboardEmscripten.cpp b/Source/WebCore/platform/emscripten/PasteboardEmscripten.cpp
+new file mode 100644
+index 0000000000..e2f6c761dc
+--- /dev/null
++++ b/Source/WebCore/platform/emscripten/PasteboardEmscripten.cpp
+@@ -0,0 +1,131 @@
++/*
++ * PORT=Emscripten pasteboard, cribbed from
++ * platform/libwpe/PasteboardLibWPE.cpp with the PlatformStrategies plumbing
++ * removed: the single-process embedder installs no pasteboard strategy, so
++ * every read returns empty and every write is dropped. A real clipboard
++ * bridge (navigator.clipboard on the host page) is a later phase.
++ */
++
++#include "config.h"
++#include "Pasteboard.h"
++
++#include "NotImplemented.h"
++
++namespace WebCore {
++
++std::unique_ptr<Pasteboard> Pasteboard::createForCopyAndPaste(std::unique_ptr<PasteboardContext>&& context)
++{
++    return makeUnique<Pasteboard>(WTF::move(context));
++}
++
++Pasteboard::Pasteboard(std::unique_ptr<PasteboardContext>&& context)
++    : m_context(WTF::move(context))
++{
++}
++
++bool Pasteboard::hasData()
++{
++    return false;
++}
++
++Vector<String> Pasteboard::typesSafeForBindings(const String&)
++{
++    notImplemented();
++    return { };
++}
++
++Vector<String> Pasteboard::typesForLegacyUnsafeBindings()
++{
++    return { };
++}
++
++String Pasteboard::readOrigin()
++{
++    notImplemented();
++    return { };
++}
++
++String Pasteboard::readString(const String&)
++{
++    return { };
++}
++
++String Pasteboard::readStringInCustomData(const String&)
++{
++    notImplemented();
++    return { };
++}
++
++void Pasteboard::writeString(const String&, const String&)
++{
++}
++
++void Pasteboard::clear()
++{
++}
++
++void Pasteboard::clear(const String&)
++{
++}
++
++void Pasteboard::read(PasteboardPlainText&, PlainTextURLReadingPolicy, std::optional<size_t>)
++{
++}
++
++void Pasteboard::read(PasteboardWebContentReader&, WebContentReadingPolicy, std::optional<size_t>)
++{
++    notImplemented();
++}
++
++void Pasteboard::read(PasteboardFileReader&, std::optional<size_t>)
++{
++}
++
++void Pasteboard::write(const PasteboardURL&)
++{
++}
++
++void Pasteboard::writeTrustworthyWebURLsPboardType(const PasteboardURL&)
++{
++    notImplemented();
++}
++
++void Pasteboard::write(const PasteboardImage&)
++{
++}
++
++void Pasteboard::write(const PasteboardBuffer&)
++{
++}
++
++void Pasteboard::write(const PasteboardWebContent&)
++{
++}
++
++Pasteboard::FileContentState Pasteboard::fileContentState()
++{
++    return FileContentState::NoFileOrImageData;
++}
++
++bool Pasteboard::canSmartReplace()
++{
++    return false;
++}
++
++void Pasteboard::writeMarkup(const String&)
++{
++}
++
++void Pasteboard::writePlainText(const String&, SmartReplaceOption)
++{
++}
++
++void Pasteboard::writeCustomData(const Vector<PasteboardCustomData>&)
++{
++}
++
++void Pasteboard::write(const Color&)
++{
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/platform/emscripten/PlatformKeyboardEventEmscripten.cpp b/Source/WebCore/platform/emscripten/PlatformKeyboardEventEmscripten.cpp
+new file mode 100644
+index 0000000000..7c75566b9c
+--- /dev/null
++++ b/Source/WebCore/platform/emscripten/PlatformKeyboardEventEmscripten.cpp
+@@ -0,0 +1,16 @@
++/*
++ * PORT=Emscripten keyboard modifier state. Real modifier tracking arrives
++ * with input forwarding in Phase 3; until then no modifiers are ever down.
++ */
++
++#include "config.h"
++#include "PlatformKeyboardEvent.h"
++
++namespace WebCore {
++
++OptionSet<PlatformEvent::Modifier> PlatformKeyboardEvent::currentStateOfModifierKeys()
++{
++    return { };
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/platform/emscripten/PlatformScreenEmscripten.cpp b/Source/WebCore/platform/emscripten/PlatformScreenEmscripten.cpp
+new file mode 100644
+index 0000000000..6324d2fe7e
+--- /dev/null
++++ b/Source/WebCore/platform/emscripten/PlatformScreenEmscripten.cpp
+@@ -0,0 +1,59 @@
++/*
++ * PORT=Emscripten platform screen stub, cribbed from
++ * platform/playstation/PlatformScreenPlayStation.cpp. The "screen" is the
++ * host <canvas>; static metrics are fine until the embedder forwards real
++ * ones (Phase 3).
++ */
++
++#include "config.h"
++#include "PlatformScreen.h"
++
++#include "DestinationColorSpace.h"
++#include "FloatRect.h"
++#include "NotImplemented.h"
++
++namespace WebCore {
++
++int screenDepth(Widget*)
++{
++    return 24;
++}
++
++int screenDepthPerComponent(Widget*)
++{
++    return 8;
++}
++
++bool screenIsMonochrome(Widget*)
++{
++    return false;
++}
++
++bool screenHasInvertedColors()
++{
++    return false;
++}
++
++FloatRect screenRect(Widget*)
++{
++    notImplemented();
++    return { 0, 0, 1920, 1080 };
++}
++
++FloatRect screenAvailableRect(Widget*)
++{
++    notImplemented();
++    return { 0, 0, 1920, 1080 };
++}
++
++bool screenSupportsExtendedColor(Widget*)
++{
++    return false;
++}
++
++DestinationColorSpace screenColorSpace(Widget*)
++{
++    return DestinationColorSpace::SRGB();
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/platform/emscripten/ScrollbarThemeEmscripten.cpp b/Source/WebCore/platform/emscripten/ScrollbarThemeEmscripten.cpp
+new file mode 100644
+index 0000000000..90181709db
+--- /dev/null
++++ b/Source/WebCore/platform/emscripten/ScrollbarThemeEmscripten.cpp
+@@ -0,0 +1,54 @@
++/*
++ * PORT=Emscripten scrollbar theme, cribbed from
++ * platform/playstation/ScrollbarThemePlayStation.cpp (class folded into the
++ * .cpp — no other TU needs the type). Flat-color composite scrollbars.
++ */
++
++#include "config.h"
++#include "ScrollbarThemeComposite.h"
++
++#include "GraphicsContext.h"
++#include "NotImplemented.h"
++#include "ScrollView.h"
++#include "Scrollbar.h"
++
++namespace WebCore {
++
++class ScrollbarThemeEmscripten final : public ScrollbarThemeComposite {
++public:
++    ScrollbarThemeEmscripten() = default;
++    virtual ~ScrollbarThemeEmscripten() = default;
++
++    int scrollbarThickness(ScrollbarWidth scrollbarWidth = ScrollbarWidth::Auto, OverlayScrollbarSizeRelevancy = OverlayScrollbarSizeRelevancy::IncludeOverlayScrollbarSize) override
++    {
++        if (scrollbarWidth == ScrollbarWidth::None)
++            return 0;
++        return 7;
++    }
++
++    bool hasButtons(Scrollbar&) override { return false; }
++    bool hasThumb(Scrollbar&) override { return true; }
++
++    IntRect backButtonRect(Scrollbar&, ScrollbarPart, bool = false) override { return { }; }
++    IntRect forwardButtonRect(Scrollbar&, ScrollbarPart, bool = false) override { return { }; }
++    IntRect trackRect(Scrollbar& scrollbar, bool = false) override { return scrollbar.frameRect(); }
++
++    void paintTrackBackground(GraphicsContext& context, Scrollbar& scrollbar, const IntRect& trackRect) override
++    {
++        context.fillRect(trackRect, scrollbar.enabled() ? Color::lightGray : SRGBA<uint8_t> { 224, 224, 224 });
++    }
++
++    void paintThumb(GraphicsContext& context, Scrollbar& scrollbar, const IntRect& thumbRect) override
++    {
++        if (scrollbar.enabled())
++            context.fillRect(thumbRect, Color::darkGray);
++    }
++};
++
++ScrollbarTheme& ScrollbarTheme::nativeTheme()
++{
++    static ScrollbarThemeEmscripten theme;
++    return theme;
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/platform/emscripten/ThemeEmscripten.cpp b/Source/WebCore/platform/emscripten/ThemeEmscripten.cpp
+new file mode 100644
+index 0000000000..4cb702e122
+--- /dev/null
++++ b/Source/WebCore/platform/emscripten/ThemeEmscripten.cpp
+@@ -0,0 +1,25 @@
++/*
++ * PORT=Emscripten Theme, cribbed from platform/playstation/ThemePlayStation —
++ * the base Theme's generic form-control metrics are sufficient; the class
++ * lives in this .cpp because nothing else needs the type.
++ */
++
++#include "config.h"
++#include "Theme.h"
++
++#include <wtf/NeverDestroyed.h>
++
++namespace WebCore {
++
++class ThemeEmscripten final : public Theme {
++private:
++    friend NeverDestroyed<ThemeEmscripten>;
++};
++
++Theme& Theme::singleton()
++{
++    static NeverDestroyed<ThemeEmscripten> theme;
++    return theme;
++}
++
++} // namespace WebCore
 diff --git a/Source/WebCore/platform/generic/KeyedDecoderGeneric.cpp b/Source/WebCore/platform/generic/KeyedDecoderGeneric.cpp
 index e4484b487f..a45573e1e5 100644
 --- a/Source/WebCore/platform/generic/KeyedDecoderGeneric.cpp
@@ -476,6 +1128,132 @@ index 9e58feb225..2b882079a9 100644
      m_encoder.encodeFixedLengthData(bytes);
  }
  
+diff --git a/Source/WebCore/platform/graphics/emscripten/GLStubsEmscripten.cpp b/Source/WebCore/platform/graphics/emscripten/GLStubsEmscripten.cpp
+new file mode 100644
+index 0000000000..420b5c65ec
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/emscripten/GLStubsEmscripten.cpp
+@@ -0,0 +1,51 @@
++/*
++ * PORT=Emscripten GL/compositing link stubs. Phase 2 is Skia CPU raster
++ * with accelerated compositing OFF: none of these run, but wasm static
++ * linking has no lazy binding — every referenced symbol must resolve.
++ * The Skia GPU path (Phase 6) replaces this file with a real
++ * PlatformDisplay/GLContext over Emscripten EGL.
++ */
++
++#include "config.h"
++#include "GLContext.h"
++#include "GLFence.h"
++#include "GraphicsLayer.h"
++#include "PlatformDisplay.h"
++
++namespace WebCore {
++
++// The real GLContextWrapper.cpp hard-includes ANGLE headers our build
++// excludes; no context is ever constructed, so the current-context
++// bookkeeping its dtor performs has nothing to clean up.
++GLContextWrapper::~GLContextWrapper()
++{
++}
++
++GLContext::~GLContext() = default;
++
++bool GLContext::makeContextCurrent()
++{
++    return false;
++}
++
++std::unique_ptr<GLFence> GLFence::create(const GLDisplay&)
++{
++    return nullptr;
++}
++
++bool GLFence::isSupported(const GLDisplay&)
++{
++    return false;
++}
++
++PlatformDisplay& PlatformDisplay::sharedDisplay()
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++Ref<GraphicsLayer> GraphicsLayer::create(GraphicsLayerFactory*, GraphicsLayerClient&, Type)
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/platform/graphics/emscripten/SystemFontDatabaseEmscripten.cpp b/Source/WebCore/platform/graphics/emscripten/SystemFontDatabaseEmscripten.cpp
+new file mode 100644
+index 0000000000..4a0bd1177b
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/emscripten/SystemFontDatabaseEmscripten.cpp
+@@ -0,0 +1,32 @@
++/*
++ * PORT=Emscripten system font database, cribbed verbatim from
++ * platform/graphics/playstation/SystemFontDatabasePlayStation.cpp — both
++ * ports have no OS font service; the base class + a fixed shorthand works.
++ */
++
++#include "config.h"
++#include "SystemFontDatabase.h"
++
++#include "NotImplemented.h"
++#include "WebKitFontFamilyNames.h"
++#include <wtf/NeverDestroyed.h>
++
++namespace WebCore {
++
++SystemFontDatabase& SystemFontDatabase::singleton()
++{
++    static NeverDestroyed<SystemFontDatabase> database = SystemFontDatabase();
++    return database.get();
++}
++
++auto SystemFontDatabase::platformSystemFontShorthandInfo(FontShorthand) -> SystemFontShorthandInfo
++{
++    notImplemented();
++    return { WebKitFontFamilyNames::standardFamily, 16, normalWeightValue() };
++}
++
++void SystemFontDatabase::platformInvalidate()
++{
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/rendering/emscripten/RenderThemeEmscripten.cpp b/Source/WebCore/rendering/emscripten/RenderThemeEmscripten.cpp
+new file mode 100644
+index 0000000000..1486ed1c71
+--- /dev/null
++++ b/Source/WebCore/rendering/emscripten/RenderThemeEmscripten.cpp
+@@ -0,0 +1,25 @@
++/*
++ * PORT=Emscripten RenderTheme, cribbed from
++ * rendering/playstation/RenderThemePlayStation — base RenderTheme paints
++ * usable generic form controls; nothing to override for first paint.
++ */
++
++#include "config.h"
++#include "RenderTheme.h"
++
++#include <wtf/NeverDestroyed.h>
++
++namespace WebCore {
++
++class RenderThemeEmscripten final : public RenderTheme {
++public:
++    friend NeverDestroyed<RenderThemeEmscripten>;
++};
++
++RenderTheme& RenderTheme::singleton()
++{
++    static NeverDestroyed<RenderThemeEmscripten> theme;
++    return theme;
++}
++
++} // namespace WebCore
 diff --git a/Source/cmake/OptionsEmscripten.cmake b/Source/cmake/OptionsEmscripten.cmake
 new file mode 100644
 index 0000000000..d6bf7a8539
