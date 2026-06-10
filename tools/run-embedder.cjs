@@ -1,7 +1,15 @@
-// Phase 2 gate runner: execute the embedder under node, pre-create
-// fontconfig's cache dir in MEMFS, and extract /out.ppm to build/ after exit.
-// CommonJS on purpose — Emscripten's non-modularized output breaks under ESM
-// (the package.json "type":"module" lesson from Phase 1).
+// Phase 2 gate runner: execute the embedder under node and extract /out.ppm
+// from MEMFS to build/ after exit.
+//
+// Two Emscripten-under-node traps handled here:
+// 1. The project package.json is "type":"module" — build/webcore/bin/ gets
+//    its own {"type":"commonjs"} package.json (build-webcore.sh) so
+//    require() works on embedder.js.
+// 2. `global.Module` config is IGNORED: the script's hoisted
+//    `var Module = typeof Module != "undefined" ? Module : {}` shadows the
+//    global. But it sets `module.exports = Module` and wasm instantiation is
+//    async, so config attached synchronously AFTER require() is in place
+//    before the runtime starts.
 'use strict';
 
 const fs = require('fs');
@@ -11,21 +19,21 @@ const root = path.resolve(__dirname, '..');
 const jsPath = path.join(root, 'build/webcore/bin/embedder.js');
 const outPath = path.join(root, 'build/out.ppm');
 
-global.Module = {
-    preRun: [() => {
-        // fontconfig's compiled-in cache dir; MEMFS starts without /var.
-        global.Module.FS.mkdirTree('/var/cache/fontconfig');
-    }],
-    onExit: (code) => {
-        try {
-            const data = global.Module.FS.readFile('/out.ppm');
-            fs.writeFileSync(outPath, Buffer.from(data));
-            console.log(`RUNNER: wrote ${outPath} (${data.length} bytes)`);
-        } catch (e) {
-            console.log(`RUNNER: no /out.ppm (${e.message})`);
-        }
-        console.log(`RUNNER: exit code ${code}`);
-    },
-};
+const Module = require(jsPath);
 
-require(jsPath);
+Module.preRun = Module.preRun || [];
+Module.preRun.push(() => {
+    // fontconfig's compiled-in cache dir; MEMFS starts without /var.
+    Module.FS.mkdirTree('/var/cache/fontconfig');
+});
+
+Module.onExit = (code) => {
+    try {
+        const data = Module.FS.readFile('/out.ppm');
+        fs.writeFileSync(outPath, Buffer.from(data));
+        console.log(`RUNNER: wrote ${outPath} (${data.length} bytes)`);
+    } catch (e) {
+        console.log(`RUNNER: no /out.ppm (${e.message})`);
+    }
+    console.log(`RUNNER: exit code ${code}`);
+};

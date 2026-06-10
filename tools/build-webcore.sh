@@ -64,4 +64,7 @@ ninja -C "$BUILD" -k 50 WebCore BibEmbedder > "$ROOT/build/webcore-ninja.log" 2>
   exit 1
 }
 echo "NINJA: OK"
+# The project package.json is "type":"module"; node must treat the
+# non-modularized Emscripten output as CommonJS (tools/run-embedder.cjs).
+printf '{"type":"commonjs"}\n' > "$BUILD/bin/package.json"
 ls -la "$BUILD/lib/" "$BUILD/bin/" 2>/dev/null || true
