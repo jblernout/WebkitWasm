@@ -91,14 +91,22 @@ Key properties:
         (tools/build-deps/webcore-deps.sh): zlib, libpng, libjpeg-turbo,
         libwebp, freetype, harfbuzz(+icu), libxml2, sqlite3 — all static,
         all -pthread.
-  - [ ] PORT=Emscripten skeleton: OptionsEmscripten.cmake +
-        PlatformEmscripten.cmake modeled on PlayStation port; then WebCore
-        configure probe to map the collision surface.
-  - [ ] Minimal WebCore config; render a fixed HTML string offscreen; blit
+  - [x] PORT=Emscripten skeleton: OptionsEmscripten.cmake +
+        PlatformEmscripten.cmake modeled on PlayStation port (2026-06-09).
+  - [x] curl tier built to wasm-sysroot (decision-003): OpenSSL 3.5.0,
+        nghttp2, brotli, libpsl(+ICU), curl 8.17, fontconfig 2.15
+        (etc/fonts staged in sysroot for runtime packaging).
+  - [x] 2026-06-09: WebCore configure PASSES and **libWebCore.a COMPILES**
+        (plus libJavaScriptCore/libWTF/libPAL/libSkia in build/webcore/lib).
+        Patch ledger 640 lines; Codex-reviewed (0 critical/high, 3 findings
+        fixed). WebCrypto deferred (BoringSSL-flavored upstream sources).
+  - [ ] Embedder + first paint: render a fixed HTML string offscreen; blit
     to canvas. No network, no events. Requires embedding WebCore::Page +
     client interfaces directly against internal headers — there is NO
     supported single-process embedding API outside Cocoa. Model on the
     PlayStation port (curl + generic RunLoop + Skia + static embedding).
+    Start from WebCore loader/EmptyClients.h (pageConfigurationWithEmptyClients
+    — the path SVGImage uses internally for exactly this job).
   - GATE: "hello <h1>" pixels on canvas. This is the make-or-break gate.
 - [ ] **Phase 3 — Interactivity**
   - Mouse/keyboard/scroll plumbing, text input, fonts, images (png/jpeg/
