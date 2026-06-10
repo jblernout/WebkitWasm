@@ -81,10 +81,57 @@ Firefox.** Evidence (tools/memwatch.mjs, tools/reloadwatch.mjs — keep both):
 - Dev workflow advice: space engine-page reloads ~30s+ in Firefox, or
   test in Chromium.
 
+## Abort-hunt session (2026-06-10 afternoon) — "complex sites abort" SOLVED
+User report: pages with images/assets abort; google/ebay/2captcha abort.
+All root-caused with gate5 + tools/site-diagnose.mjs (symbolized stacks
+via temp -sASSERTIONS + --profiling-funcs; both REVERTED after):
+- **WorkQueue thread-spawn abort**: ANY WorkQueue::create spawned a real
+  thread (pthread_create=ENOTSUP → Thread::create RELEASE_ASSERT →
+  abort). First page with an <img> died in ImageFrameWorkQueue. PATCH:
+  WorkQueueGeneric.cpp backs every queue with the MAIN RunLoop;
+  WorkQueue.cpp dispatchSync runs inline; ConcurrentWorkQueue::apply
+  runs serially.
+- **ImageFrameWorkQueue spin-deadlock**: SynchronizedFixedQueue
+  (BufferSize=8) blocking enqueue/dequeue can't be satisfied by another
+  thread — >8 pending decodes spun the only thread at 100% CPU forever
+  (Wikipedia). PATCH: dispatch() decodes via callOnMainThread, no queue.
+- **Root cause #8 — loadsImagesAutomatically defaults FALSE** in raw
+  WebCore: every non-data: image load silently DEFERRED (no request, no
+  error, blank <img>). FIX: setLoadsImagesAutomatically(true) in
+  main.cpp settings block.
+- **Root cause #9 — createBlobRegistry() returned nullptr** (our own
+  deferred stub): first `new Blob(...)` any modern bundle ran →
+  blobRegistry() CheckedRef null → abort. google/ebay/Turnstile all died
+  here. FIX: EmbedderBlobRegistry forwarding to in-process
+  BlobRegistryImpl (WebKitLegacy WebBlobRegistry pattern) + blob: loads
+  routed through loader.start() (BlobResourceHandle builtin map).
+- **Worker::create graceful-fail**: throws NotSupportedError instead of
+  aborting the engine (WorkerThread::start would Thread::create).
+  SharedWorker is settings-gated OFF already; ServiceWorker off.
+- **In-page WebSocket**: CurlStreamScheduler got the main-thread pump
+  (same recipe as CurlRequestScheduler) BUT CurlStream's blocking
+  CONNECT_ONLY perform() can never complete single-threaded (the SOCKFS
+  WebSocket needs the JS loop to open) → CurlStream now fails the stream
+  immediately = pages get clean WebSocket error events. REAL in-page WS
+  needs a multi-interface CurlStream rework (deferred).
+- RESULTS: gate5-images 3/3 (PNG+GIF+data:), Wikipedia Main Page renders
+  WITH images (build/diagnose-…wikipedia….png), eBay homepage renders
+  (hero, logos, search UI; 23 wisp streams), google + 2captcha no longer
+  abort. old.reddit = engine-correct, server bot-blocked (needs cookies).
+  Benign leftover: "missingImage" platform resource warning (no broken-
+  image icon bundled).
+- NEW TOOLS: tools/gate5-images-test.mjs (now a standard gate),
+  tools/site-diagnose.mjs (abort/paint/stream classifier),
+  tools/urlbar-test.mjs. web/gate5/ fixtures (valid 180-byte PNG,
+  226-byte GIF, images.html with onload/onerror signal divs).
+- Empty-client ledger grew: IDB requests DANGLE silently
+  (EmptyDatabaseProvider no-op delegate) — future silent gate.
+
 ## NEXT: Phase 5 — browser chrome (plain web dev)
-1. URL bar + go button + loading state in web/browser.html (bib_load_url
-   already exported; add bib_stop/bib_reload? FrameLoader has
-   stopAllLoaders/reload).
+1. ~~URL bar~~ DONE (2026-06-10): #urlbar + Go in web/browser.html,
+   Enter/click → bib_load_url in place, ?url= via history.replaceState,
+   tools/urlbar-test.mjs 3/3. Still TODO: bib_stop/bib_reload, loading
+   state from engine callbacks.
 2. Title/URL/progress callbacks: BibFrameLoaderClient overrides
    (dispatchDidReceiveTitle, dispatchDidStartProvisionalLoad,
    dispatchDidFinishLoad...) → EM_ASM → host page events. Note: most

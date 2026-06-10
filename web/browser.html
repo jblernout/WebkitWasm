@@ -9,6 +9,14 @@
     canvas:focus { outline: 2px solid #4c8; }
     pre { color: #9a9; max-height: 14em; overflow-y: auto; }
     #gate.pass { color: #4c4; } #gate.fail { color: #e55; }
+    #urlrow { display: flex; gap: 6px; margin: 8px 0; max-width: 802px; }
+    #urlbar { flex: 1; font: 13px monospace; padding: 5px 8px; background: #2a2a2a;
+              color: #ddd; border: 1px solid #555; border-radius: 4px; }
+    #urlbar:focus { outline: 1px solid #4c8; }
+    #gobtn { padding: 5px 14px; background: #355; color: #ddd; border: 1px solid #577;
+             border-radius: 4px; cursor: pointer; }
+    #gobtn:hover { background: #466; }
+    #gobtn:disabled { opacity: 0.4; cursor: default; }
   </style>
 </head>
 <body>
@@ -20,6 +28,11 @@
     ticks: <span id="ticks">0</span> |
     blits: <span id="blits">0</span>
   </p>
+  <div id="urlrow">
+    <input id="urlbar" type="text" placeholder="https://example.com/ — Enter or Go navigates the engine"
+           spellcheck="false" autocomplete="off" disabled>
+    <button id="gobtn" disabled>Go</button>
+  </div>
   <canvas id="screen" width="800" height="600" tabindex="0"></canvas>
   <pre id="log"></pre>
   <!-- wisp-js client polyfill (global `wisp_client`), vendored from
@@ -250,6 +263,28 @@
       });
     }
 
+    // --- URL bar: navigate the ENGINE in place (no host-page reload) ---
+    const urlbarEl = document.getElementById("urlbar");
+    const gobtnEl = document.getElementById("gobtn");
+    function navigateEngine(raw) {
+      let url = (raw ?? urlbarEl.value).trim();
+      if (!url) return;
+      if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) url = "https://" + url;
+      urlbarEl.value = url;
+      statusEl.textContent = `loading ${url}`;
+      log(`navigate: ${url}`);
+      Module.ccall("bib_load_url", null, ["string"], [url]);
+      // Keep ?url= shareable/bookmarkable without reloading the page.
+      const next = new URL(location.href);
+      next.searchParams.set("url", url);
+      history.replaceState(null, "", next);
+      canvas.focus();
+    }
+    gobtnEl.addEventListener("click", () => navigateEngine());
+    urlbarEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") navigateEngine();
+    });
+
     // Classic (non-modularized) Emscripten output picks this up: in browser
     // global scope `var Module` re-declares without clobbering the value.
     window.Module = {
@@ -274,7 +309,10 @@
         wireInput();
         canvas.focus();
         requestAnimationFrame(blitLoop);
+        urlbarEl.disabled = false;
+        gobtnEl.disabled = false;
         if (navigateURL) {
+          urlbarEl.value = navigateURL;
           statusEl.textContent = `loading ${navigateURL}`;
           Module.ccall("bib_load_url", null, ["string"], [navigateURL]);
         }

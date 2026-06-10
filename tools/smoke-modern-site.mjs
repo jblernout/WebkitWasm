@@ -55,16 +55,23 @@ try {
 await page.waitForTimeout(15000);
 
 const sampled = await page.evaluate(() => {
+  // Render ONCE and sample the framebuffer directly — __bib.probe()
+  // forces a full engine repaint per call, which is minutes of work for
+  // a 15k-sample grid on an image-heavy page.
+  const ptr = window.Module._bib_render(1);
+  if (!ptr) return { nonWhite: 0, samples: 0, distinctColors: 0 };
+  const w = window.Module._bib_frame_width();
+  const heap = window.Module.HEAPU8;
   let nonWhite = 0,
     samples = 0;
   const colors = new Set();
   for (let y = 2; y < 600; y += 4)
     for (let x = 2; x < 800; x += 8) {
-      const p = window.__bib.probe(x, y);
-      if (!p) continue;
+      const i = ptr + (y * w + x) * 4;
+      const r = heap[i], g = heap[i + 1], b = heap[i + 2];
       samples++;
-      if (!(p[0] === 255 && p[1] === 255 && p[2] === 255)) nonWhite++;
-      colors.add((p[0] << 16) | (p[1] << 8) | p[2]);
+      if (!(r === 255 && g === 255 && b === 255)) nonWhite++;
+      colors.add((r << 16) | (g << 8) | b);
     }
   return { nonWhite, samples, distinctColors: colors.size };
 });

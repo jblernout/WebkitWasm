@@ -229,6 +229,96 @@ index 2e375967e2..0c67eb0154 100644
      explicit RawHex(int32_t value)
          : RawHex(static_cast<uint32_t>(value))
      { }
+diff --git a/Source/WTF/wtf/WorkQueue.cpp b/Source/WTF/wtf/WorkQueue.cpp
+index 887b24ccca..8ec375212c 100644
+--- a/Source/WTF/wtf/WorkQueue.cpp
++++ b/Source/WTF/wtf/WorkQueue.cpp
+@@ -63,12 +63,21 @@ void ConcurrentWorkQueue::dispatch(Function<void()>&& function)
+ #if !PLATFORM(COCOA)
+ void WorkQueueBase::dispatchSync(Function<void()>&& function)
+ {
++#if defined(__EMSCRIPTEN__)
++    // Single-threaded port: every queue is backed by the main RunLoop
++    // (WorkQueueGeneric.cpp), so semaphore-waiting here would queue the
++    // task behind the current one and deadlock the only thread. Run the
++    // function inline — same thread either way; only FIFO ordering with
++    // already-queued tasks is sacrificed.
++    function();
++#else
+     BinarySemaphore semaphore;
+     dispatch([&semaphore, function = WTF::move(function)]() mutable {
+         function();
+         semaphore.signal();
+     });
+     semaphore.wait();
++#endif
+ }
+ 
+ void WorkQueueBase::dispatchWithQOS(Function<void()>&& function, QOS)
+@@ -86,6 +95,14 @@ void ConcurrentWorkQueue::apply(size_t iterations, WTF::Function<void(size_t ind
+         return;
+     }
+ 
++#if defined(__EMSCRIPTEN__)
++    // Single-threaded port: the ThreadPool below would Thread::create and
++    // abort. Run every iteration serially on the caller instead.
++    for (size_t i = 0; i < iterations; ++i)
++        function(i);
++    return;
++#endif
++
+     class ThreadPool {
+     public:
+         ThreadPool()
+diff --git a/Source/WTF/wtf/generic/WorkQueueGeneric.cpp b/Source/WTF/wtf/generic/WorkQueueGeneric.cpp
+index 97c8e9dd2e..fe6f954fa4 100644
+--- a/Source/WTF/wtf/generic/WorkQueueGeneric.cpp
++++ b/Source/WTF/wtf/generic/WorkQueueGeneric.cpp
+@@ -42,6 +42,20 @@ WorkQueueBase::WorkQueueBase(RunLoop& runLoop)
+ 
+ void WorkQueueBase::platformInitialize(ASCIILiteral name, Type, QOS qos)
+ {
++#if defined(__EMSCRIPTEN__)
++    // PORT=Emscripten is single-threaded: pthread_create returns ENOTSUP,
++    // so RunLoop::create -> Thread::create would RELEASE_ASSERT (this was
++    // an instant abort() the first time a page contained an <img> —
++    // ImageFrameWorkQueue). Back EVERY WorkQueue with the main RunLoop
++    // instead: dispatch() becomes a deferred main-loop task, the same
++    // single-threading treatment CurlRequestScheduler got. The
++    // BinarySemaphore handshake must be skipped too — waiting on the only
++    // thread can never be signalled.
++    UNUSED_PARAM(name);
++    UNUSED_PARAM(qos);
++    m_runLoop = &RunLoop::mainSingleton();
++    m_threadID = mainThreadID;
++#else
+     m_runLoop = RunLoop::create(name, ThreadType::Unknown, qos);
+     BinarySemaphore semaphore;
+     m_runLoop->dispatch([&] {
+@@ -49,10 +63,15 @@ void WorkQueueBase::platformInitialize(ASCIILiteral name, Type, QOS qos)
+         semaphore.signal();
+     });
+     semaphore.wait();
++#endif
+ }
+ 
+ void WorkQueueBase::platformInvalidate()
+ {
++#if defined(__EMSCRIPTEN__)
++    // The queue only borrows the main RunLoop — never stop it.
++    m_runLoop = nullptr;
++#else
+     if (m_runLoop) {
+         Ref<RunLoop> protector = m_runLoop.releaseNonNull();
+         protector->stop();
+@@ -60,6 +79,7 @@ void WorkQueueBase::platformInvalidate()
+             RunLoop::currentSingleton().stop();
+         });
+     }
++#endif
+ }
+ 
+ void WorkQueueBase::dispatch(Function<void()>&& function)
 diff --git a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
 index a3e0d45073..492395e879 100644
 --- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
@@ -1307,6 +1397,51 @@ index 9e58feb225..2b882079a9 100644
      m_encoder.encodeFixedLengthData(bytes);
  }
  
+diff --git a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
+index 1c8e16fe23..383bc012d6 100644
+--- a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
++++ b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
+@@ -114,10 +114,40 @@ void ImageFrameWorkQueue::dispatch(const Request& request)
+ {
+     ASSERT(isMainThread());
+ 
++#if defined(__EMSCRIPTEN__)
++    // PORT=Emscripten is single-threaded: SynchronizedFixedQueue's blocking
++    // enqueue (BufferSize=8 — a page with >8 pending image decodes hits it;
++    // Wikipedia spun the only thread at 100% CPU forever) and the worker's
++    // blocking dequeue can never be satisfied by another thread. Skip the
++    // queue + worker loop entirely: defer the decode one RunLoop cycle via
++    // callOnMainThread, then deliver with upstream's staleness checks
++    // (stop() clears decodeQueue, which voids in-flight requests). The
++    // decode is synchronous on the only thread — jank is inherent here.
++    // m_workQueue stays null, so isDecodingWorkQueueIdle() remains true.
++    decodeQueue().append(request);
++
++    RefPtr decoder = protectedSource()->decoder();
++    if (!decoder)
++        return;
++
++    callOnMainThread([protectedThis = Ref { *this }, protectedSource = this->protectedSource(), protectedDecoder = decoder.releaseNonNull(), request] () mutable {
++        if (protectedSource.ptr() != protectedThis->m_source.get())
++            return;
++        if (protectedThis->decodeQueue().isEmpty() || protectedThis->decodeQueue().first() != request)
++            return;
++
++        PlatformImagePtr platformImage = protectedDecoder->createFrameImageAtIndex(request.index, request.subsamplingLevel, request.options);
++        RefPtr nativeImage = NativeImage::create(WTF::move(platformImage));
++
++        protectedThis->decodeQueue().removeFirst();
++        protectedSource->imageFrameDecodeAtIndexHasFinished(request.index, request.subsamplingLevel, request.animatingState, request.options, WTF::move(nativeImage));
++    });
++#else
+     requestQueue().enqueue(request);
+     decodeQueue().append(request);
+ 
+     start();
++#endif
+ }
+ 
+ void ImageFrameWorkQueue::stop()
 diff --git a/Source/WebCore/platform/graphics/emscripten/GLStubsEmscripten.cpp b/Source/WebCore/platform/graphics/emscripten/GLStubsEmscripten.cpp
 new file mode 100644
 index 0000000000..420b5c65ec
@@ -1563,6 +1698,206 @@ index fc5b225a8b..cb78582969 100644
      long m_maxConnects;
      long m_maxTotalConnections;
      long m_maxHostConnections;
+diff --git a/Source/WebCore/platform/network/curl/CurlStream.cpp b/Source/WebCore/platform/network/curl/CurlStream.cpp
+index e7708fd8bf..d4df13908a 100644
+--- a/Source/WebCore/platform/network/curl/CurlStream.cpp
++++ b/Source/WebCore/platform/network/curl/CurlStream.cpp
+@@ -41,6 +41,18 @@ CurlStream::CurlStream(CurlStreamScheduler& scheduler, CurlStreamID streamID, UR
+     : m_scheduler(scheduler)
+     , m_streamID(streamID)
+ {
++#if defined(__EMSCRIPTEN__)
++    // Single-threaded port: the blocking CONNECT_ONLY perform() below can
++    // never complete — the SOCKFS WebSocket underneath needs the JS event
++    // loop to open, and that loop is starved while perform() spins. Fail
++    // the stream immediately so pages get a clean WebSocket error/close
++    // event instead of a minutes-long frozen tab. Real in-page WebSocket
++    // support needs a multi-interface rework of CurlStream (deferred).
++    UNUSED_PARAM(serverTrustEvaluation);
++    UNUSED_PARAM(localhostAlias);
++    notifyFailure(CURLE_COULDNT_CONNECT);
++    return;
++#else
+     ASSERT(!isMainThread());
+ 
+     m_curlHandle = makeUnique<CurlHandle>();
+@@ -62,11 +74,14 @@ CurlStream::CurlStream(CurlStreamScheduler& scheduler, CurlStreamID streamID, UR
+     m_scheduler.callClientOnMainThread(m_streamID, [streamID = m_streamID](Client& client) {
+         client.didOpen(streamID);
+     });
++#endif
+ }
+ 
+ CurlStream::~CurlStream()
+ {
++#if !defined(__EMSCRIPTEN__)
+     ASSERT(!isMainThread());
++#endif
+     destroyHandle();
+ }
+ 
+@@ -80,7 +95,9 @@ void CurlStream::destroyHandle()
+ 
+ void CurlStream::send(UniqueArray<uint8_t>&& buffer, size_t length)
+ {
++#if !defined(__EMSCRIPTEN__)
+     ASSERT(!isMainThread());
++#endif
+ 
+     if (!m_curlHandle)
+         return;
+@@ -90,7 +107,9 @@ void CurlStream::send(UniqueArray<uint8_t>&& buffer, size_t length)
+ 
+ void CurlStream::appendMonitoringFd(fd_set& readfds, fd_set& writefds, fd_set& exceptfds, int& maxfd)
+ {
++#if !defined(__EMSCRIPTEN__)
+     ASSERT(!isMainThread());
++#endif
+ 
+     if (!m_curlHandle)
+         return;
+@@ -113,7 +132,9 @@ void CurlStream::appendMonitoringFd(fd_set& readfds, fd_set& writefds, fd_set& e
+ 
+ void CurlStream::tryToTransfer(const fd_set& readfds, const fd_set& writefds, const fd_set& exceptfds)
+ {
++#if !defined(__EMSCRIPTEN__)
+     ASSERT(!isMainThread());
++#endif
+ 
+     if (!m_curlHandle)
+         return;
+diff --git a/Source/WebCore/platform/network/curl/CurlStreamScheduler.cpp b/Source/WebCore/platform/network/curl/CurlStreamScheduler.cpp
+index 0fdc759290..31bb7496e0 100644
+--- a/Source/WebCore/platform/network/curl/CurlStreamScheduler.cpp
++++ b/Source/WebCore/platform/network/curl/CurlStreamScheduler.cpp
+@@ -27,6 +27,10 @@
+ #include "CurlStreamScheduler.h"
+ #include <wtf/TZoneMallocInlines.h>
+ 
++#if defined(__EMSCRIPTEN__)
++#include <wtf/RunLoop.h>
++#endif
++
+ #if USE(CURL)
+ 
+ namespace WebCore {
+@@ -98,7 +102,11 @@ void CurlStreamScheduler::callOnWorkerThread(Function<void()>&& task)
+ 
+ void CurlStreamScheduler::callClientOnMainThread(CurlStreamID streamID, Function<void(CurlStream::Client&)>&& task)
+ {
++#if !defined(__EMSCRIPTEN__)
++    // Single-threaded port: the pump runs ON the main thread; the deferred
++    // callOnMainThread below keeps the upstream async delivery contract.
+     ASSERT(!isMainThread());
++#endif
+ 
+     callOnMainThread([this, streamID, task = WTF::move(task)]() {
+         if (auto client = m_clientList.get(streamID))
+@@ -108,6 +116,18 @@ void CurlStreamScheduler::callClientOnMainThread(CurlStreamID streamID, Function
+ 
+ void CurlStreamScheduler::startThreadIfNeeded()
+ {
++#if defined(__EMSCRIPTEN__)
++    // Single-threaded wasm: no thread — arm a self-rescheduling pump on
++    // the main RunLoop instead (the CurlRequestScheduler recipe; the
++    // worker thread here would abort in Thread::create the moment a page
++    // opened a WebSocket).
++    if (m_pumpScheduled)
++        return;
++    m_pumpScheduled = true;
++    RunLoop::mainSingleton().dispatch([this] {
++        pumpMainThread();
++    });
++#else
+     {
+         Locker locker { m_mutex };
+         if (m_runThread)
+@@ -122,8 +142,56 @@ void CurlStreamScheduler::startThreadIfNeeded()
+     m_thread = Thread::create("curlStreamThread"_s, [this] {
+         workerThread();
+     }, ThreadType::Network);
++#endif
+ }
+ 
++#if defined(__EMSCRIPTEN__)
++void CurlStreamScheduler::pumpMainThread()
++{
++    ASSERT(isMainThread());
++
++    m_pumpScheduled = false;
++
++    executeTasks();
++
++    // One non-blocking pass of the worker loop body: select() with a zero
++    // timeout polls readiness of the SOCKFS-backed sockets.
++    int rc = 0;
++    fd_set readfds;
++    fd_set writefds;
++    fd_set exceptfds;
++    int maxfd = -1;
++
++    FD_ZERO(&readfds);
++    FD_ZERO(&writefds);
++    FD_ZERO(&exceptfds);
++
++    for (auto& stream : m_streamList.values())
++        stream->appendMonitoringFd(readfds, writefds, exceptfds, maxfd);
++
++    if (maxfd >= 0) {
++        struct timeval timeout { 0, 0 };
++        rc = ::select(maxfd + 1, &readfds, &writefds, &exceptfds, &timeout);
++        if (rc == -1) {
++            FD_ZERO(&readfds);
++            FD_ZERO(&writefds);
++            FD_ZERO(&exceptfds);
++        }
++    }
++
++    for (auto& stream : m_streamList.values())
++        stream->tryToTransfer(readfds, writefds, exceptfds);
++
++    bool moreWork;
++    {
++        Locker locker { m_mutex };
++        moreWork = m_streamList.size() || m_taskQueue.size();
++    }
++    if (moreWork)
++        startThreadIfNeeded();
++}
++#endif
++
+ void CurlStreamScheduler::stopThreadIfNoMoreJobRunning()
+ {
+     ASSERT(!isMainThread());
+@@ -140,7 +208,9 @@ void CurlStreamScheduler::stopThreadIfNoMoreJobRunning()
+ 
+ void CurlStreamScheduler::executeTasks()
+ {
++#if !defined(__EMSCRIPTEN__)
+     ASSERT(!isMainThread());
++#endif
+ 
+     Vector<Function<void()>> taskQueue;
+ 
+diff --git a/Source/WebCore/platform/network/curl/CurlStreamScheduler.h b/Source/WebCore/platform/network/curl/CurlStreamScheduler.h
+index 2d7a77d759..d8759893ff 100644
+--- a/Source/WebCore/platform/network/curl/CurlStreamScheduler.h
++++ b/Source/WebCore/platform/network/curl/CurlStreamScheduler.h
+@@ -54,6 +54,14 @@ private:
+ 
+     void workerThread();
+ 
++#if defined(__EMSCRIPTEN__)
++    // PORT=Emscripten is single-threaded: the worker thread is replaced by
++    // a self-rescheduling main-RunLoop pump (same recipe as
++    // CurlRequestScheduler::pumpMainThread).
++    void pumpMainThread();
++    bool m_pumpScheduled { false };
++#endif
++
+     Lock m_mutex;
+     RefPtr<Thread> m_thread;
+     bool m_runThread { false };
 diff --git a/Source/WebCore/platform/network/emscripten/CurlSSLHandleEmscripten.cpp b/Source/WebCore/platform/network/emscripten/CurlSSLHandleEmscripten.cpp
 new file mode 100644
 index 0000000000..493312c0cd
@@ -1681,6 +2016,27 @@ index 0000000000..1486ed1c71
 +}
 +
 +} // namespace WebCore
+diff --git a/Source/WebCore/workers/Worker.cpp b/Source/WebCore/workers/Worker.cpp
+index a74247d0ad..8f716b24f6 100644
+--- a/Source/WebCore/workers/Worker.cpp
++++ b/Source/WebCore/workers/Worker.cpp
+@@ -101,6 +101,16 @@ Worker::Worker(ScriptExecutionContext& context, JSC::RuntimeFlags runtimeFlags,
+ 
+ ExceptionOr<Ref<Worker>> Worker::create(ScriptExecutionContext& context, JSC::RuntimeFlags runtimeFlags, Variant<RefPtr<TrustedScriptURL>, String>&& url, WorkerOptions&& options)
+ {
++#if defined(__EMSCRIPTEN__)
++    // PORT=Emscripten is single-threaded: WorkerThread::start ->
++    // Thread::create -> pthread_create(ENOTSUP) -> RELEASE_ASSERT would
++    // abort() the whole engine the moment a page calls `new Worker(...)`
++    // (Cloudflare Turnstile, most modern bundles). Fail the constructor
++    // with a catchable exception instead — pages that feature-test or
++    // try/catch keep running without their worker.
++    return Exception { ExceptionCode::NotSupportedError, "Web Workers are not supported in this single-threaded engine"_s };
++#endif
++
+     auto compliantScriptURLString = trustedTypeCompliantString(context, WTF::move(url), "Worker constructor"_s);
+     if (compliantScriptURLString.hasException())
+         return compliantScriptURLString.releaseException();
 diff --git a/Source/cmake/OptionsEmscripten.cmake b/Source/cmake/OptionsEmscripten.cmake
 new file mode 100644
 index 0000000000..75382f94ee

@@ -1,0 +1,22 @@
+<!DOCTYPE html><html><head><style>
+  body { margin:0; background:#ffffff; }
+  img { position:absolute; width:64px; height:64px; }
+  .sig { position:absolute; top:120px; width:64px; height:30px; background:#777777; }
+  #netpng { left:20px; top:20px; }  #sig1 { left:20px; }
+  #netgif { left:120px; top:20px; } #sig2 { left:120px; }
+  #datapng { left:220px; top:20px; } #sig3 { left:220px; }
+</style></head><body>
+<img id=netpng src="red.png">
+<img id=netgif src="green.gif">
+<img id=datapng src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAe0lEQVR4nO3PUQkAIBTAwFfBCvaPYihD+HEIgwW4zdnr64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS1oQAsa0IIGtKABLXjsAmmg8OKixS2HAAAAAElFTkSuQmCC">
+<div id=sig1 class=sig></div><div id=sig2 class=sig></div><div id=sig3 class=sig></div>
+<script>
+  // load -> green, error -> red, neither -> stays #777777
+  for (const [img, sig] of [['netpng','sig1'],['netgif','sig2'],['datapng','sig3']]) {
+    const i = document.getElementById(img), s = document.getElementById(sig);
+    i.addEventListener('load', () => s.style.background = '#00cc00');
+    i.addEventListener('error', () => s.style.background = '#cc0000');
+    if (i.complete && i.naturalWidth > 0) s.style.background = '#00cc00';
+  }
+</script>
+</body></html>

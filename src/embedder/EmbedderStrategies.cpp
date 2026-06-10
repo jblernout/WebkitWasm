@@ -20,6 +20,8 @@
 
 #include "config.h"
 
+#include "BlobRegistry.h"
+#include "BlobRegistryImpl.h"
 #include "CurlRequest.h"
 #include "CurlRequestClient.h"
 #include "CurlResponse.h"
@@ -268,8 +270,12 @@ public:
     void scheduleLoad(ResourceLoader& loader)
     {
         // ResourceLoader::start() handles data: URLs internally, before the
-        // ResourceHandle path (which is unreachable on curl ports).
-        if (loader.request().url().protocolIsData()) {
+        // ResourceHandle path (which is unreachable on curl ports). blob:
+        // URLs also work through start(): BlobRegistryImpl registers a
+        // BlobResourceHandle constructor for the "blob" protocol in
+        // ResourceHandle's builtin map, served from EmbedderBlobRegistry's
+        // in-process impl — never curl.
+        if (loader.request().url().protocolIsData() || loader.request().url().protocolIsBlob()) {
             loader.start();
             return;
         }
@@ -395,6 +401,64 @@ class EmbedderMediaStrategy final : public MediaStrategy {
     // VIDEO / WEB_AUDIO / MEDIA_SOURCE are OFF: no pure virtuals remain.
 };
 
+// In-process BlobRegistry forwarding to WebCore's own BlobRegistryImpl —
+// the single-process equivalent of WebKitLegacy's WebBlobRegistry. The
+// blobRegistryImpl() override is what lets loaders resolve blob: data
+// without IPC.
+class EmbedderBlobRegistry final : public WebCore::BlobRegistry {
+    void registerInternalFileBlobURL(const URL& url, Ref<BlobDataFileReference>&& file, const String&, const String& contentType) final
+    {
+        m_impl.registerInternalFileBlobURL(url, WTF::move(file), contentType);
+    }
+
+    void registerInternalBlobURL(const URL& url, Vector<BlobPart>&& parts, const String& contentType) final
+    {
+        m_impl.registerInternalBlobURL(url, WTF::move(parts), contentType);
+    }
+
+    void registerBlobURL(const URL& url, const URL& srcURL, const PolicyContainer& policyContainer, const std::optional<SecurityOriginData>& topOrigin) final
+    {
+        m_impl.registerBlobURL(url, srcURL, policyContainer, topOrigin);
+    }
+
+    void registerInternalBlobURLOptionallyFileBacked(const URL& url, const URL& srcURL, RefPtr<BlobDataFileReference>&& file, const String& contentType) final
+    {
+        m_impl.registerInternalBlobURLOptionallyFileBacked(url, srcURL, WTF::move(file), contentType, { });
+    }
+
+    void registerInternalBlobURLForSlice(const URL& url, const URL& srcURL, long long start, long long end, const String& contentType) final
+    {
+        m_impl.registerInternalBlobURLForSlice(url, srcURL, start, end, contentType);
+    }
+
+    void unregisterBlobURL(const URL& url, const std::optional<SecurityOriginData>& topOrigin) final
+    {
+        m_impl.unregisterBlobURL(url, topOrigin);
+    }
+
+    void registerBlobURLHandle(const URL& url, const std::optional<SecurityOriginData>& topOrigin) final
+    {
+        m_impl.registerBlobURLHandle(url, topOrigin);
+    }
+
+    void unregisterBlobURLHandle(const URL& url, const std::optional<SecurityOriginData>& topOrigin) final
+    {
+        m_impl.unregisterBlobURLHandle(url, topOrigin);
+    }
+
+    String blobType(const URL& url) final { return m_impl.blobType(url); }
+    unsigned long long blobSize(const URL& url) final { return m_impl.blobSize(url); }
+
+    void writeBlobsToTemporaryFilesForIndexedDB(const Vector<String>& blobURLs, CompletionHandler<void(Vector<String>&& filePaths)>&& completionHandler) final
+    {
+        m_impl.writeBlobsToTemporaryFilesForIndexedDB(blobURLs, WTF::move(completionHandler));
+    }
+
+    BlobRegistryImpl* blobRegistryImpl() final { return &m_impl; }
+
+    BlobRegistryImpl m_impl;
+};
+
 class EmbedderPlatformStrategies final : public PlatformStrategies {
     LoaderStrategy* createLoaderStrategy() final
     {
@@ -416,8 +480,13 @@ class EmbedderPlatformStrategies final : public PlatformStrategies {
 
     BlobRegistry* createBlobRegistry() final
     {
-        // No blob URLs yet; revisit with fetch/XHR hardening.
-        return nullptr;
+        // In-process registry backed by WebCore's BlobRegistryImpl (the
+        // WebKitLegacy WebBlobRegistry pattern). Returning nullptr here
+        // aborted the engine on the FIRST `new Blob(...)` any page ran —
+        // blobRegistry() CheckedRefs the pointer (root cause #9;
+        // google/ebay/Turnstile all died on it).
+        static NeverDestroyed<EmbedderBlobRegistry> registry;
+        return &registry.get();
     }
 };
 

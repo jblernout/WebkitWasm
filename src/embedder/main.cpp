@@ -325,6 +325,11 @@ int main()
     // byte-stable; interactive mode runs JSC (CLoop) inside the page.
     page->settings().setScriptEnabled(interactive);
     page->settings().setAcceleratedCompositingEnabled(false);
+    // Raw WebCore defaults this to FALSE (embedders must opt in) —
+    // without it CachedResourceLoader silently DEFERS every non-data:
+    // image load: no request, no error event, blank <img> (root cause #8,
+    // empty-defaults family).
+    page->settings().setLoadsImagesAutomatically(true);
 
     RefPtr localMainFrame = page->localMainFrame();
     if (!localMainFrame) {
