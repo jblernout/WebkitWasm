@@ -1670,8 +1670,79 @@ index 0000000000..4a0bd1177b
 +}
 +
 +} // namespace WebCore
+diff --git a/Source/WebCore/platform/network/curl/CurlContext.cpp b/Source/WebCore/platform/network/curl/CurlContext.cpp
+index 145c3e2b04..53096f7d68 100644
+--- a/Source/WebCore/platform/network/curl/CurlContext.cpp
++++ b/Source/WebCore/platform/network/curl/CurlContext.cpp
+@@ -134,7 +134,7 @@ CurlContext::CurlContext()
+     m_isHttp3Enabled = (info->features & CURL_VERSION_HTTP3) && m_isAltSvcEnabled;
+ #endif
+ 
+-#ifndef NDEBUG
++#if !defined(NDEBUG) || defined(__EMSCRIPTEN__) // BIB: keep runtime-gated curl tracing in release wasm builds
+     m_verbose = envVar.defined("DEBUG_CURL");
+ 
+     auto logFile = envVar.read("CURL_LOG_FILE");
+@@ -145,7 +145,7 @@ CurlContext::CurlContext()
+ 
+ CurlContext::~CurlContext()
+ {
+-#ifndef NDEBUG
++#if !defined(NDEBUG) || defined(__EMSCRIPTEN__) // BIB: keep runtime-gated curl tracing in release wasm builds
+     if (m_logFile)
+         fclose(m_logFile);
+ #endif
+@@ -308,7 +308,7 @@ CurlHandle::CurlHandle()
+ 
+     enableProxyIfExists();
+ 
+-#ifndef NDEBUG
++#if !defined(NDEBUG) || defined(__EMSCRIPTEN__) // BIB: keep runtime-gated curl tracing in release wasm builds
+     enableVerboseIfUsed();
+     enableStdErrIfUsed();
+ #endif
+@@ -935,7 +935,7 @@ std::optional<CertificateInfo> CurlHandle::certificateInfo() const
+     return std::nullopt;
+ }
+ 
+-#ifndef NDEBUG
++#if !defined(NDEBUG) || defined(__EMSCRIPTEN__) // BIB: keep runtime-gated curl tracing in release wasm builds
+ 
+ void CurlHandle::enableVerboseIfUsed()
+ {
+diff --git a/Source/WebCore/platform/network/curl/CurlContext.h b/Source/WebCore/platform/network/curl/CurlContext.h
+index e673140e1d..c7b1961f55 100644
+--- a/Source/WebCore/platform/network/curl/CurlContext.h
++++ b/Source/WebCore/platform/network/curl/CurlContext.h
+@@ -132,7 +132,7 @@ public:
+     Seconds connectTimeout() const { return m_connectTimeout; }
+     Seconds defaultTimeoutInterval() const { return m_defaultTimeoutInterval; }
+ 
+-#ifndef NDEBUG
++#if !defined(NDEBUG) || defined(__EMSCRIPTEN__) // BIB: keep runtime-gated curl tracing in release wasm builds
+     FILE* getLogFile() const { return m_logFile; }
+     bool isVerbose() const { return m_verbose; }
+ #endif
+@@ -156,7 +156,7 @@ private:
+ 
+     String m_alternativeServicesStorageFile;
+ 
+-#ifndef NDEBUG
++#if !defined(NDEBUG) || defined(__EMSCRIPTEN__) // BIB: keep runtime-gated curl tracing in release wasm builds
+     FILE* m_logFile { nullptr };
+     bool m_verbose { false };
+ #endif
+@@ -316,7 +316,7 @@ public:
+     CURLcode send(const uint8_t*, size_t, size_t&);
+     CURLcode receive(uint8_t*, size_t, size_t&);
+ 
+-#ifndef NDEBUG
++#if !defined(NDEBUG) || defined(__EMSCRIPTEN__) // BIB: keep runtime-gated curl tracing in release wasm builds
+     void enableVerboseIfUsed();
+     void enableStdErrIfUsed();
+ #endif
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-index d867e52909..0dae5dade1 100644
+index d867e52909..ef71bd5e2e 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
 @@ -173,7 +173,16 @@ void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&&
@@ -1691,6 +1762,25 @@ index d867e52909..0dae5dade1 100644
  }
  
  void CurlRequest::runOnWorkerThreadIfRequired(Function<void()>&& task)
+@@ -511,6 +520,18 @@ int CurlRequest::didReceiveDebugInfo(curl_infotype type, std::span<const char> d
+     if (!data.data())
+         return 0;
+ 
++#if !defined(NDEBUG) || defined(__EMSCRIPTEN__)
++    // BIB: this callback REPLACES curl's default stderr verbose output, so
++    // DEBUG_CURL was silently swallowed for every CurlRequest transfer.
++    // Re-emit the informational lines when verbose tracing is requested.
++    if (type == CURLINFO_TEXT && CurlContext::singleton().isVerbose()) {
++        auto size = data.size();
++        while (size && (data[size - 1] == '\n' || data[size - 1] == '\r'))
++            --size;
++        WTFLogAlways("curl: %.*s", static_cast<int>(size), data.data());
++    }
++#endif
++
+     if (type == CURLINFO_HEADER_OUT) {
+         String requestHeader(data);
+         auto headerFields = requestHeader.split("\r\n"_s);
 diff --git a/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp b/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
 index 43dce2f2ad..55bd14604b 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp

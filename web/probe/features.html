@@ -1,0 +1,27 @@
+<!DOCTYPE html><html><body>
+<script>
+  // Feature-availability probe: results go out via the guest-console
+  // forwarder (BIB: console log lines on stderr). Add names as needed.
+  const names = [
+    'IntersectionObserver', 'ResizeObserver', 'MutationObserver',
+    'requestAnimationFrame', 'requestIdleCallback', 'queueMicrotask',
+    'fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource',
+    'Worker', 'SharedWorker', 'WebAssembly', 'crypto',
+    'localStorage', 'sessionStorage', 'indexedDB', 'caches',
+    'matchMedia', 'history', 'customElements', 'Proxy',
+    'BroadcastChannel', 'MessageChannel', 'AbortController',
+    'PerformanceObserver', 'reportError', 'structuredClone',
+  ];
+  const missing = [], present = [];
+  for (const n of names) {
+    let ok = false;
+    try { ok = typeof window[n] !== 'undefined'; } catch (e) { ok = false; }
+    (ok ? present : missing).push(n);
+  }
+  console.log('FEATURES present: ' + present.join(','));
+  console.log('FEATURES missing: ' + missing.join(','));
+  try { console.log('FEATURES subtle: crypto.subtle=' + (typeof crypto?.subtle)); } catch (e) {}
+  try { console.log('FEATURES sw: navigator.serviceWorker=' + (typeof navigator.serviceWorker)); } catch (e) {}
+  try { console.log('FEATURES ua: ' + navigator.userAgent); } catch (e) {}
+</script>
+</body></html>

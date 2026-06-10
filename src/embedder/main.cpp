@@ -21,6 +21,7 @@
 #include "BibStorage.h"
 #include "CommonAtomStrings.h"
 #include "CookieJar.h"
+#include "CurlContext.h"
 #include "Document.h"
 #include "DocumentLoader.h"
 #include "DocumentView.h" // inline LocalFrame::view() lives here, not in LocalFrame.h
@@ -309,6 +310,21 @@ EMSCRIPTEN_KEEPALIVE int bib_key(int type, const char* key, const char* code, co
 
 int main()
 {
+    // Verbose libcurl tracing (?curldebug=1 on the host page). Set from C
+    // because Module.ENV-based getenv proved unreliable here. MUST happen
+    // before installEmbedderStrategies(): the cookie-session setup
+    // constructs the CurlContext singleton, which reads DEBUG_CURL exactly
+    // once in its constructor.
+    if (EM_ASM_INT({ return Module.bibCurlDebug ? 1 : 0; }))
+        setenv("DEBUG_CURL", "1", 1);
+    printf("EMBEDDER: curldebug=%s\n", getenv("DEBUG_CURL") ? "on" : "off");
+    if (getenv("DEBUG_CURL")) {
+        // Constructs the CurlContext singleton NOW (post-setenv) and reports
+        // whether the verbose flag actually latched — splits env plumbing
+        // from curl-output plumbing when tracing goes missing.
+        printf("EMBEDDER: curl verbose=%d\n", WebCore::CurlContext::singleton().isVerbose());
+    }
+
     JSC::initialize();
     WTF::initializeMainThread();
     WTF::setProcessPrivileges(WTF::allPrivileges());

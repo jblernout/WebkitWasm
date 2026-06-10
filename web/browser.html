@@ -100,7 +100,18 @@
       const m = sockfsURL.exec(url);
       if (m && isEngineSocket(protocols)) {
         log(`wisp: stream -> ${m[1]}:${m[2]}`);
-        return new wisp_client.client.WispWebSocket(`${wispServer}${m[1]}:${m[2]}`);
+        const ws = new wisp_client.client.WispWebSocket(`${wispServer}${m[1]}:${m[2]}`);
+        // Surface non-voluntary stream closes with the wisp reason name.
+        // A failed dial otherwise dies inside TLS as a phantom curl=35
+        // "SSL connect error" — e.g. hosts an ad-blocking DNS resolves to
+        // 0.0.0.0 land here as NetworkError/ConnRefused.
+        ws.addEventListener("close", (e) => {
+          if (e.code === 2) return; // Voluntary
+          const names = wisp_client.packet.close_reasons;
+          const name = Object.keys(names).find((k) => names[k] === e.code) ?? "?";
+          log(`wisp: stream CLOSED ${m[1]}:${m[2]} reason=${e.code} (${name})`);
+        });
+        return ws;
       }
       return new NativeWebSocket(url, protocols);
     };
@@ -311,12 +322,12 @@
       // which the dispatcher above reroutes onto Wisp streams. The
       // subprotocol is the dispatcher's engine-socket marker.
       websocket: { url: "ws://", subprotocol: "bib-sockfs" },
+      // ?curldebug=1 -> libcurl verbose tracing via printErr. Read from C
+      // in main() via setenv — Module.ENV-based getenv proved unreliable.
+      bibCurlDebug: !!params.get("curldebug"),
       preRun: [function () {
         // fontconfig's compiled-in cache dir must exist in MEMFS.
         Module.FS.mkdirTree("/var/cache/fontconfig");
-        // ?curldebug=1 -> libcurl verbose tracing via printErr.
-        if (params.get("curldebug"))
-          Module.ENV.DEBUG_CURL = "1";
       }],
       // Called from C right before emscripten_exit_with_live_runtime() —
       // the engine page is loaded, laid out, and painted once.

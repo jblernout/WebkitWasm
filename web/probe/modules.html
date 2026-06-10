@@ -1,0 +1,18 @@
+<!DOCTYPE html><html><body>
+<script>
+  console.log('MODULES classic inline: ran');
+</script>
+<script type="module">
+  console.log('MODULES module inline: ran');
+  try {
+    const m = await import('./modules-dep.mjs');
+    console.log('MODULES dynamic import: ' + m.value);
+  } catch (e) {
+    console.log('MODULES dynamic import FAILED: ' + e);
+  }
+</script>
+<script type="module" src="./modules-static.mjs"></script>
+<script nomodule>
+  console.log('MODULES nomodule ran (engine claims NO module support)');
+</script>
+</body></html>
