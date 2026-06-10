@@ -1,0 +1,53 @@
+<!DOCTYPE html><html><head><style>
+  body { margin:0; background:#ffffff; }
+  .sig { position:absolute; top:20px; width:64px; height:30px; background:#777777; }
+  #sigglobal { left:20px; }
+  #sigopen { left:120px; }
+  #sigput { left:220px; }
+  #sigreopen { left:320px; }
+</style></head><body>
+<div id=sigglobal class=sig></div><div id=sigopen class=sig></div><div id=sigput class=sig></div><div id=sigreopen class=sig></div>
+<script>
+  // pass -> green, fail -> red, never ran -> stays #777777
+  const sig = (id, ok) => document.getElementById(id).style.background = ok ? '#00cc00' : '#cc0000';
+  // 1. The global is touchable. Before root cause #13 was fixed, merely
+  //    evaluating window.indexedDB hit EmptyDatabaseProvider's
+  //    RELEASE_ASSERT and killed this whole script (discord.com/login).
+  let idb;
+  try { idb = window.indexedDB; sig('sigglobal', !!idb && typeof idb.open === 'function'); }
+  catch (e) { sig('sigglobal', false); }
+
+  // 2. open + onupgradeneeded + onsuccess — full async round-trip through
+  //    the in-process IDBServer (request -> WorkQueue -> reply).
+  // 3. put/get round-trip inside transactions.
+  // 4. Reopen on a second connection — same MemoryIDBBackingStore.
+  const fail = () => { sig('sigopen', false); sig('sigput', false); sig('sigreopen', false); };
+  try {
+    const req = idb.open('bibgate', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onerror = fail;
+    req.onsuccess = () => {
+      sig('sigopen', true);
+      const db = req.result;
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put('idb-roundtrip-42', 'k1');
+      tx.onabort = () => { sig('sigput', false); sig('sigreopen', false); };
+      tx.oncomplete = () => {
+        const get = db.transaction('kv').objectStore('kv').get('k1');
+        get.onerror = () => { sig('sigput', false); sig('sigreopen', false); };
+        get.onsuccess = () => {
+          sig('sigput', get.result === 'idb-roundtrip-42');
+          db.close();
+          const req2 = idb.open('bibgate', 1);
+          req2.onerror = () => sig('sigreopen', false);
+          req2.onsuccess = () => {
+            const g2 = req2.result.transaction('kv').objectStore('kv').get('k1');
+            g2.onerror = () => sig('sigreopen', false);
+            g2.onsuccess = () => sig('sigreopen', g2.result === 'idb-roundtrip-42');
+          };
+        };
+      };
+    };
+  } catch (e) { fail(); }
+</script>
+</body></html>

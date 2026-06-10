@@ -11,6 +11,7 @@
 get_filename_component(BIB_EMBEDDER_DIR "${EMSCRIPTEN_EMBEDDER_CMAKE}" DIRECTORY)
 
 add_executable(BibEmbedder
+    ${BIB_EMBEDDER_DIR}/BibIDBServer.cpp
     ${BIB_EMBEDDER_DIR}/EmbedderStrategies.cpp
     ${BIB_EMBEDDER_DIR}/main.cpp
 )

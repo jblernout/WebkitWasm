@@ -356,6 +356,37 @@ index a3e0d45073..492395e879 100644
  #if OS(DARWIN)
      kern_return_t result = thread_suspend(m_platformThread);
      if (result != KERN_SUCCESS)
+diff --git a/Source/WebCore/Modules/indexeddb/server/IDBBackingStore.h b/Source/WebCore/Modules/indexeddb/server/IDBBackingStore.h
+index f90708bddc..6f88c5a831 100644
+--- a/Source/WebCore/Modules/indexeddb/server/IDBBackingStore.h
++++ b/Source/WebCore/Modules/indexeddb/server/IDBBackingStore.h
+@@ -63,7 +63,14 @@ class IDBBackingStore : public CanMakeThreadSafeCheckedPtr<IDBBackingStore> {
+     WTF_MAKE_TZONE_ALLOCATED(IDBBackingStore);
+     WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(IDBBackingStore);
+ public:
++#if defined(__EMSCRIPTEN__)
++    // PORT=Emscripten is single-threaded: the IDB server "queue" is the main
++    // RunLoop, so everything legitimately runs on the main thread and this
++    // not-on-main-thread guard can never hold.
++    virtual ~IDBBackingStore() = default;
++#else
+     virtual ~IDBBackingStore() { RELEASE_ASSERT(!isMainThread()); }
++#endif
+ 
+     virtual IDBError getOrEstablishDatabaseInfo(IDBDatabaseInfo&) = 0;
+     virtual uint64_t databaseVersion() = 0;
+@@ -115,7 +122,11 @@ public:
+     virtual void handleLowMemoryWarning() = 0;
+ 
+ protected:
++#if defined(__EMSCRIPTEN__)
++    IDBBackingStore() = default; // see dtor note: single-threaded port
++#else
+     IDBBackingStore() { RELEASE_ASSERT(!isMainThread()); }
++#endif
+ };
+ 
+ } // namespace IDBServer
 diff --git a/Source/WebCore/PAL/pal/PlatformEmscripten.cmake b/Source/WebCore/PAL/pal/PlatformEmscripten.cmake
 new file mode 100644
 index 0000000000..0fc6a680f4

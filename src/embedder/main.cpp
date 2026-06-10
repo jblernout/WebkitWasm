@@ -16,6 +16,7 @@
 
 #include "config.h"
 
+#include "BibIDBServer.h"
 #include "BibPageClients.h"
 #include "BibStorage.h"
 #include "CommonAtomStrings.h"
@@ -332,6 +333,12 @@ int main()
     // below) — `window.localStorage` was a ReferenceError that modern site
     // bootstraps treat as fatal.
     pageConfiguration.storageNamespaceProvider = BIB::BibStorageNamespaceProvider::create();
+    // Real in-process IndexedDB (root cause #13): the empty-clients
+    // DatabaseProvider RELEASE_ASSERTs on idbConnectionToServerForSession —
+    // any guest JS touching window.indexedDB killed that page's script
+    // (discord.com/login went blank exactly there). WebKitLegacy's
+    // InProcessIDBServer recipe, in-memory backing store.
+    pageConfiguration.databaseProvider = BIB::BibDatabaseProvider::create();
 
     // pageConfigurationWithEmptyClients hardcodes SandboxFlags::all() on the
     // main frame (it exists for SVGImage, which must never run script) —
