@@ -626,6 +626,26 @@ index 2c9b359bdf..9e44b75c10 100644
  #include "EventNames.h"
  #include "ExtensionStyleSheets.h"
  #include "FormSubmission.h"
+diff --git a/Source/WebCore/loader/EmptyClients.h b/Source/WebCore/loader/EmptyClients.h
+index 09a23e649b..d1e434fd88 100644
+--- a/Source/WebCore/loader/EmptyClients.h
++++ b/Source/WebCore/loader/EmptyClients.h
+@@ -115,10 +115,12 @@ class EmptyChromeClient : public ChromeClient {
+     std::optional<PointerCharacteristics> pointerCharacteristicsOfPrimaryPointingDevice() const final { return std::nullopt; };
+     OptionSet<PointerCharacteristics> pointerCharacteristicsOfAllAvailablePointingDevices() const final { return { }; }
+ 
+-    void invalidateRootView(const IntRect&) final { }
++    // PORT=Emscripten: the embedder's ChromeClient (BibChromeClient) needs
++    // the scroll-damage callbacks too, not just invalidateContentsAndRootView.
++    void invalidateRootView(const IntRect&) override { }
+     void invalidateContentsAndRootView(const IntRect&) override { }
+-    void invalidateContentsForSlowScroll(const IntRect&) final { }
+-    void scroll(const IntSize&, const IntRect&, const IntRect&) final { }
++    void invalidateContentsForSlowScroll(const IntRect&) override { }
++    void scroll(const IntSize&, const IntRect&, const IntRect&) override { }
+ 
+     IntPoint screenToRootView(const IntPoint& p) const final { return p; }
+     IntPoint rootViewToScreen(const IntPoint& p) const final { return p; }
 diff --git a/Source/WebCore/platform/Pasteboard.h b/Source/WebCore/platform/Pasteboard.h
 index 11cef75ac7..07c2bf511f 100644
 --- a/Source/WebCore/platform/Pasteboard.h
@@ -639,6 +659,36 @@ index 11cef75ac7..07c2bf511f 100644
      String text;
      String markup;
  #endif
+diff --git a/Source/WebCore/platform/ScrollAnimator.cpp b/Source/WebCore/platform/ScrollAnimator.cpp
+index 618fea8022..2a1399a5cc 100644
+--- a/Source/WebCore/platform/ScrollAnimator.cpp
++++ b/Source/WebCore/platform/ScrollAnimator.cpp
+@@ -419,7 +419,7 @@ void ScrollAnimator::removeWheelEventTestCompletionDeferralForReason(ScrollingNo
+         monitor->removeDeferralForReason(identifier, reason);
+ }
+ 
+-#if USE(COORDINATED_GRAPHICS)
++#if USE(COORDINATED_GRAPHICS) || defined(__EMSCRIPTEN__)
+ bool ScrollAnimator::scrollAnimationEnabled() const
+ {
+     return checkedScrollableArea()->scrollAnimatorEnabled();
+diff --git a/Source/WebCore/platform/ScrollAnimator.h b/Source/WebCore/platform/ScrollAnimator.h
+index 9ec21f04c1..88e3db3f76 100644
+--- a/Source/WebCore/platform/ScrollAnimator.h
++++ b/Source/WebCore/platform/ScrollAnimator.h
+@@ -166,7 +166,11 @@ private:
+     void removeWheelEventTestCompletionDeferralForReason(ScrollingNodeID, WheelEventTestMonitor::DeferReason) const final;
+     ScrollingNodeID scrollingNodeIDForTesting() const final;
+ 
+-#if USE(COORDINATED_GRAPHICS)
++#if USE(COORDINATED_GRAPHICS) || defined(__EMSCRIPTEN__)
++    // PORT=Emscripten joins this guard: without it the base
++    // ScrollingEffectsControllerClient default (always animate) applies, and
++    // this port has no display-refresh driver to service scroll animations —
++    // every wheel scroll would be swallowed by a never-ticking animation.
+     bool scrollAnimationEnabled() const final;
+ #endif
+ 
 diff --git a/Source/WebCore/platform/WebCorePersistentCoders.cpp b/Source/WebCore/platform/WebCorePersistentCoders.cpp
 index bc608e04f7..4abc58def6 100644
 --- a/Source/WebCore/platform/WebCorePersistentCoders.cpp
@@ -882,13 +932,16 @@ index 0000000000..e2f6c761dc
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/emscripten/PlatformKeyboardEventEmscripten.cpp b/Source/WebCore/platform/emscripten/PlatformKeyboardEventEmscripten.cpp
 new file mode 100644
-index 0000000000..7c75566b9c
+index 0000000000..edef4ba355
 --- /dev/null
 +++ b/Source/WebCore/platform/emscripten/PlatformKeyboardEventEmscripten.cpp
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,35 @@
 +/*
-+ * PORT=Emscripten keyboard modifier state. Real modifier tracking arrives
-+ * with input forwarding in Phase 3; until then no modifiers are ever down.
++ * PORT=Emscripten keyboard platform half.
++ * The embedder sends RawKeyDown/Char/KeyUp (never combined KeyDown), so
++ * disambiguateKeyDownEvent is only here to satisfy the link and to behave
++ * correctly if anything synthesizes a KeyDown; logic cribbed from
++ * platform/libwpe/PlatformKeyboardEventLibWPE.cpp.
 + */
 +
 +#include "config.h"
@@ -899,6 +952,22 @@ index 0000000000..7c75566b9c
 +OptionSet<PlatformEvent::Modifier> PlatformKeyboardEvent::currentStateOfModifierKeys()
 +{
 +    return { };
++}
++
++void PlatformKeyboardEvent::disambiguateKeyDownEvent(Type type, bool backwardsCompatibility)
++{
++    ASSERT(m_type == PlatformEvent::Type::KeyDown);
++    m_type = type;
++    // No m_handledByInputMethod check: that member is guarded to IME-capable
++    // ports (GTK/LIBWPE/APPKIT) and this port has no input method.
++    if (backwardsCompatibility)
++        return;
++
++    if (type == PlatformEvent::Type::RawKeyDown) {
++        m_text = String();
++        m_unmodifiedText = String();
++    } else
++        m_keyIdentifier = String();
 +}
 +
 +} // namespace WebCore

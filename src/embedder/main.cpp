@@ -16,26 +16,38 @@
 
 #include "config.h"
 
+#include "BibPageClients.h"
 #include "CommonAtomStrings.h"
 #include "Document.h"
 #include "DocumentLoader.h"
 #include "DocumentView.h" // inline LocalFrame::view() lives here, not in LocalFrame.h
 #include "DocumentWriter.h"
 #include "EmptyClients.h"
+#include "EventHandler.h"
+#include "FocusController.h"
 #include "FrameLoader.h"
 #include "GraphicsContextSkia.h"
+#include "HandleUserInputEventResult.h"
 #include "LocalFrame.h"
 #include "LocalFrameInlines.h"
 #include "LocalFrameView.h"
 #include "Page.h"
 #include "PageConfiguration.h"
+#include "PlatformKeyboardEvent.h"
+#include "PlatformMouseEvent.h"
+#include "PlatformWheelEvent.h"
 #include "RenderTreeAsText.h"
+#include "ScriptController.h"
+#include "ScrollAnimator.h"
+#include "ScrollingCoordinatorTypes.h" // WheelEventProcessingSteps
+#include "SecurityContext.h"
 #include "Settings.h"
 #include "SharedBuffer.h"
 #include <JavaScriptCore/InitializeThreading.h>
 #include <emscripten.h>
 #include <pal/SessionID.h>
 #include <wtf/MainThread.h>
+#include <wtf/MonotonicTime.h>
 #include <wtf/ProcessPrivilege.h>
 #include <wtf/RunLoop.h>
 
@@ -47,6 +59,7 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 
 #include <cstdio>
+#include <cstdlib>
 
 namespace BIB {
 void installEmbedderStrategies(); // EmbedderStrategies.cpp
@@ -102,14 +115,30 @@ static bool writePPM(const char* path, const SkPixmap& pixmap)
     return ok;
 }
 
-// Layout (if dirty) + paint the full frame into the persistent surface.
+// Layout + paint the full frame into the persistent surface, then clear the
+// dirty flag BibChromeClient maintains.
 static bool paintFrame()
 {
     g_engine->mainFrame->protectedDocument()->updateLayoutIgnorePendingStylesheets();
     g_engine->surface->getCanvas()->clear(SK_ColorWHITE);
     WebCore::GraphicsContextSkia context(*g_engine->surface->getCanvas(), WebCore::RenderingMode::Unaccelerated, WebCore::RenderingPurpose::Unspecified);
     g_engine->frameView->paint(context, WebCore::IntRect(0, 0, kWidth, kHeight));
+    BIB::g_frameDirty = false;
     return true;
+}
+
+static OptionSet<WebCore::PlatformEvent::Modifier> modifiersFromBits(int bits)
+{
+    OptionSet<WebCore::PlatformEvent::Modifier> modifiers;
+    if (bits & 1)
+        modifiers.add(WebCore::PlatformEvent::Modifier::ShiftKey);
+    if (bits & 2)
+        modifiers.add(WebCore::PlatformEvent::Modifier::ControlKey);
+    if (bits & 4)
+        modifiers.add(WebCore::PlatformEvent::Modifier::AltKey);
+    if (bits & 8)
+        modifiers.add(WebCore::PlatformEvent::Modifier::MetaKey);
+    return modifiers;
 }
 
 extern "C" {
@@ -118,23 +147,129 @@ EMSCRIPTEN_KEEPALIVE int bib_frame_width() { return kWidth; }
 EMSCRIPTEN_KEEPALIVE int bib_frame_height() { return kHeight; }
 
 // One non-blocking engine-RunLoop iteration: fires due WebCore timers and
-// dispatched main-thread functions. Drive from requestAnimationFrame.
+// dispatched main-thread functions (DOM timers, RenderingUpdateScheduler's
+// fallback timer, caret blink). Drive from requestAnimationFrame.
 // (RunMode::Iterate never sleeps — RunLoopGeneric's Drain-only waitUntil.)
 EMSCRIPTEN_KEEPALIVE void bib_tick()
 {
     WTF::RunLoop::cycle();
 }
 
-// Repaint and return the RGBA frame buffer (kWidth*kHeight*4 bytes).
-// Returns 0 on failure.
-EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render()
+// Returns the RGBA frame buffer (kWidth*kHeight*4) after repainting, or 0.
+// force=0: only repaints (and returns the buffer) when the page is dirty —
+//          the rAF blit loop skips putImageData on clean frames.
+// force=1: always repaints and returns the buffer (pixel probes, first use).
+EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
 {
-    if (!g_engine || !paintFrame())
+    if (!g_engine)
+        return nullptr;
+    if (!force && !BIB::g_frameDirty)
+        return nullptr;
+    if (!paintFrame())
         return nullptr;
     auto dstInfo = SkImageInfo::Make(kWidth, kHeight, kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
     if (!g_engine->surface->readPixels(SkPixmap(dstInfo, g_blitPixels, kWidth * 4), 0, 0))
         return nullptr;
     return g_blitPixels;
+}
+
+// --- Input forwarding (canvas events -> WebCore EventHandler) ---
+
+EMSCRIPTEN_KEEPALIVE void bib_mouse_move(double x, double y, int modifierBits)
+{
+    if (!g_engine)
+        return;
+    WebCore::PlatformMouseEvent event({ x, y }, { x, y }, WebCore::MouseButton::None,
+        WebCore::PlatformEvent::Type::MouseMoved, 0, modifiersFromBits(modifierBits),
+        MonotonicTime::now(), 0, WebCore::SyntheticClickType::NoTap);
+    g_engine->mainFrame->eventHandler().mouseMoved(event);
+}
+
+EMSCRIPTEN_KEEPALIVE void bib_mouse_button(int down, int jsButton, double x, double y, int clickCount, int modifierBits)
+{
+    if (!g_engine)
+        return;
+    auto button = WebCore::MouseButton::Other;
+    if (jsButton == 0)
+        button = WebCore::MouseButton::Left;
+    else if (jsButton == 1)
+        button = WebCore::MouseButton::Middle;
+    else if (jsButton == 2)
+        button = WebCore::MouseButton::Right;
+    WebCore::PlatformMouseEvent event({ x, y }, { x, y }, button,
+        down ? WebCore::PlatformEvent::Type::MousePressed : WebCore::PlatformEvent::Type::MouseReleased,
+        clickCount, modifiersFromBits(modifierBits), MonotonicTime::now(), 0,
+        WebCore::SyntheticClickType::NoTap);
+    if (down)
+        g_engine->mainFrame->eventHandler().handleMousePressEvent(event);
+    else
+        g_engine->mainFrame->eventHandler().handleMouseReleaseEvent(event);
+}
+
+EMSCRIPTEN_KEEPALIVE void bib_wheel(double x, double y, double deltaX, double deltaY, int modifierBits)
+{
+    if (!g_engine)
+        return;
+    auto modifiers = modifiersFromBits(modifierBits);
+    // DOM wheel deltas are positive-down; PlatformWheelEvent is positive-up.
+    WebCore::PlatformWheelEvent event(WebCore::IntPoint(x, y), WebCore::IntPoint(x, y),
+        -deltaX, -deltaY, -deltaX / 120.0f, -deltaY / 120.0f,
+        WebCore::PlatformWheelEventGranularity::ScrollByPixelWheelEvent,
+        modifiers.contains(WebCore::PlatformEvent::Modifier::ShiftKey),
+        modifiers.contains(WebCore::PlatformEvent::Modifier::ControlKey),
+        modifiers.contains(WebCore::PlatformEvent::Modifier::AltKey),
+        modifiers.contains(WebCore::PlatformEvent::Modifier::MetaKey));
+    g_engine->mainFrame->eventHandler().handleWheelEvent(event,
+        { WebCore::WheelEventProcessingSteps::SynchronousScrolling, WebCore::WheelEventProcessingSteps::BlockingDOMEventDispatch });
+}
+
+// Diagnostics: dump script/scroll state to stdout (host console).
+EMSCRIPTEN_KEEPALIVE void bib_diag()
+{
+    if (!g_engine)
+        return;
+    auto& frame = *g_engine->mainFrame;
+    RefPtr doc = frame.document();
+    printf("DIAG: scriptEnabledSetting=%d\n", frame.settings().isScriptEnabled());
+    printf("DIAG: canExecuteScripts=%d\n", frame.script().canExecuteScripts(WebCore::ReasonForCallingCanExecuteScripts::NotAboutToExecuteScript));
+    printf("DIAG: sandboxedScripts=%d\n", doc && doc->isSandboxed(WebCore::SandboxFlag::Scripts));
+    printf("DIAG: docURL=%s\n", doc ? doc->url().string().utf8().data() : "(null)");
+    auto contents = g_engine->frameView->contentsSize();
+    printf("DIAG: contentsSize=%dx%d scrollY=%d\n", contents.width(), contents.height(), g_engine->frameView->scrollPosition().y());
+    printf("DIAG: isScrollableOrRubberbandable=%d canHaveScrollbars=%d vScrollbar=%d scrollAnimatorEnabled=%d\n",
+        g_engine->frameView->isScrollableOrRubberbandable(),
+        g_engine->frameView->canHaveScrollbars(),
+        !!g_engine->frameView->verticalScrollbar(),
+        frame.settings().scrollAnimatorEnabled());
+    auto result = frame.script().executeScriptIgnoringException("6*7"_s, JSC::SourceTaintedOrigin::Untainted);
+    printf("DIAG: executeScript(6*7) isNumber=%d value=%d\n", result && result.isNumber(), result && result.isNumber() ? (int)result.asNumber() : -1);
+}
+
+// Diagnostics: programmatic scroll, bypassing the wheel-event path.
+EMSCRIPTEN_KEEPALIVE void bib_scroll_to(int y)
+{
+    if (!g_engine)
+        return;
+    g_engine->frameView->setScrollPosition(WebCore::ScrollPosition(0, y));
+}
+
+// type: 0 = RawKeyDown, 1 = KeyUp, 2 = Char. Strings are UTF-8 (use ccall).
+// text is only meaningful for Char events.
+EMSCRIPTEN_KEEPALIVE int bib_key(int type, const char* key, const char* code, const char* text, int windowsVirtualKeyCode, int isAutoRepeat, int modifierBits)
+{
+    if (!g_engine)
+        return 0;
+    auto eventType = WebCore::PlatformEvent::Type::RawKeyDown;
+    if (type == 1)
+        eventType = WebCore::PlatformEvent::Type::KeyUp;
+    else if (type == 2)
+        eventType = WebCore::PlatformEvent::Type::Char;
+    String textString = eventType == WebCore::PlatformEvent::Type::Char ? String::fromUTF8(text) : String();
+    WebCore::PlatformKeyboardEvent event(eventType, textString, textString,
+        String::fromUTF8(key), String::fromUTF8(code), emptyString(),
+        windowsVirtualKeyCode, isAutoRepeat, false, false,
+        modifiersFromBits(modifierBits), MonotonicTime::now());
+    return g_engine->mainFrame->eventHandler().keyEvent(event);
 }
 
 } // extern "C"
@@ -147,11 +282,27 @@ int main()
     WebCore::initializeCommonAtomStrings();
     BIB::installEmbedderStrategies();
 
+    const bool interactive = EM_ASM_INT({ return Module.bibInteractive ? 1 : 0; });
+
     printf("EMBEDDER: init OK\n");
 
     auto pageConfiguration = WebCore::pageConfigurationWithEmptyClients(std::nullopt, PAL::SessionID::defaultSessionID());
+    pageConfiguration.chromeClient = makeUniqueRef<BIB::BibChromeClient>();
+    pageConfiguration.editorClient = makeUniqueRef<BIB::BibEditorClient>();
+
+    // pageConfigurationWithEmptyClients hardcodes SandboxFlags::all() on the
+    // main frame (it exists for SVGImage, which must never run script) —
+    // Document::initSecurityContext copies the frame's flags, silently
+    // blocking ALL script regardless of Settings::setScriptEnabled. Clear
+    // them for the interactive embedder; gate mode keeps SVG semantics.
+    if (interactive) {
+        if (auto* localParams = std::get_if<WebCore::PageConfiguration::LocalMainFrameCreationParameters>(&pageConfiguration.mainFrameCreationParameters))
+            localParams->effectiveSandboxFlags = { };
+    }
     auto page = WebCore::Page::create(WTF::move(pageConfiguration));
-    page->settings().setScriptEnabled(false);
+    // Script stays OFF in gate mode so the offscreen pixel gate is
+    // byte-stable; interactive mode runs JSC (CLoop) inside the page.
+    page->settings().setScriptEnabled(interactive);
     page->settings().setAcceleratedCompositingEnabled(false);
 
     RefPtr localMainFrame = page->localMainFrame();
@@ -164,7 +315,12 @@ int main()
     localMainFrame->init();
 
     RefPtr frameView = localMainFrame->view();
-    frameView->setCanHaveScrollbars(false);
+    frameView->setCanHaveScrollbars(interactive);
+
+    if (interactive) {
+        page->focusController().setActive(true);
+        page->focusController().setFocused(true);
+    }
 
     Ref loader = localMainFrame->loader();
     RefPtr documentLoader = loader->activeDocumentLoader();
@@ -172,10 +328,24 @@ int main()
         printf("EMBEDDER: FAIL no activeDocumentLoader\n");
         return 1;
     }
+
+    // The host page may supply the document via Module.bibHTML (a JS
+    // string); without it the built-in gate page loads. Copied out of the
+    // JS heap via stringToUTF8 (forced into the runtime by
+    // EXPORTED_RUNTIME_METHODS) into a malloc'd UTF-8 buffer.
+    char* hostHTML = nullptr;
+    int hostHTMLBytes = EM_ASM_INT({ return Module.bibHTML ? lengthBytesUTF8(Module.bibHTML) + 1 : 0; });
+    if (hostHTMLBytes > 0) {
+        hostHTML = static_cast<char*>(malloc(hostHTMLBytes));
+        EM_ASM({ stringToUTF8(Module.bibHTML, $0, $1); }, hostHTML, hostHTMLBytes);
+    }
+    const char* html = hostHTML ? hostHTML : kTestHTML;
+
     documentLoader->writer().setMIMEType("text/html"_s);
     documentLoader->writer().begin(URL());
-    documentLoader->writer().addData(WebCore::SharedBuffer::create(unsafeMakeSpan(reinterpret_cast<const uint8_t*>(kTestHTML), strlen(kTestHTML))));
+    documentLoader->writer().addData(WebCore::SharedBuffer::create(unsafeMakeSpan(reinterpret_cast<const uint8_t*>(html), strlen(html))));
     documentLoader->writer().end();
+    free(hostHTML);
 
     printf("EMBEDDER: HTML loaded\n");
 
@@ -204,7 +374,7 @@ int main()
     }
     printf("EMBEDDER: paint OK\n");
 
-    if (EM_ASM_INT({ return Module.bibInteractive ? 1 : 0; })) {
+    if (interactive) {
         // Browser mode: hand control to the host page's rAF loop. The unwind
         // skips the rest of main and keeps the runtime (and g_engine) alive.
         printf("EMBEDDER: interactive — runtime stays alive\n");

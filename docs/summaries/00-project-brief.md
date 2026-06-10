@@ -118,9 +118,27 @@ Key properties:
     Offscreen node gate unchanged and still passing.
   - GATE: "hello <h1>" pixels — PASSED offscreen 2026-06-09, in-tab
     2026-06-10.
-- [ ] **Phase 3 — Interactivity**
-  - Mouse/keyboard/scroll plumbing, text input, fonts, images (png/jpeg/
-    webp), CSS at full fidelity.
+- [x] **Phase 3 — Interactivity** (core COMPLETE 2026-06-10 ~01:35)
+  - [x] Mouse plumbing: move/press/release → EventHandler; :hover restyle
+    repaints via BibChromeClient dirty flag (invalidation-driven; clean
+    frames skip the blit entirely).
+  - [x] SCRIPT ON: JSC (CLoop) executes inside the engine page — onclick
+    mutates DOM, event listeners fire. Root cause fixed:
+    pageConfigurationWithEmptyClients hardcodes SandboxFlags::all()
+    (SVGImage semantics) — cleared on the main frame in interactive mode.
+  - [x] Keyboard + text input: RawKeyDown/Char/KeyUp → EventHandler;
+    BibEditorClient (EmptyEditorClient surface, gates flipped true,
+    WinCairo key-command map) inserts typed text into <input> fields.
+  - [x] Wheel/trackpad scrolling: root cause was ScrollAnimator's
+    scrollAnimationEnabled defaulting TRUE off the COORDINATED_GRAPHICS
+    guard — animations never tick (no display-refresh driver) → guard-join
+    patch routes to Settings → immediateScrollBy (synchronous).
+  - [x] GATE 3 PASSED: 8/8 pixel assertions via real Playwright input
+    (tools/gate3-browser-test.mjs; proof build/gate3-canvas.png). All
+    three gates green (offscreen byte-identical, gate2 identical counts).
+  - [ ] Deferred to later phases: images (need resource loading — Phase 4
+    loader), full CSS fidelity audit, smooth scrolling (needs a rAF-driven
+    scroll-animation driver), IME/composition input.
 - [ ] **Phase 4 — Networking over Wisp**
   - libcurl with custom socket layer → Wisp client → wisp server.
   - http(s) page loads end-to-end; cookies + cache in OPFS.

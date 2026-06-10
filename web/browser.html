@@ -6,6 +6,7 @@
   <style>
     body { font: 14px system-ui, sans-serif; margin: 16px; background: #1e1e1e; color: #ddd; }
     canvas { border: 1px solid #555; background: #fff; image-rendering: pixelated; }
+    canvas:focus { outline: 2px solid #4c8; }
     pre { color: #9a9; max-height: 14em; overflow-y: auto; }
     #gate.pass { color: #4c4; } #gate.fail { color: #e55; }
   </style>
@@ -15,17 +16,19 @@
   <p>
     crossOriginIsolated: <b id="coi"></b> |
     status: <span id="status">booting…</span> |
-    gate: <b id="gate">pending</b> |
-    frames: <span id="frames">0</span>
+    gate: <b id="gate">n/a</b> |
+    ticks: <span id="ticks">0</span> |
+    blits: <span id="blits">0</span>
   </p>
-  <canvas id="screen" width="800" height="600"></canvas>
+  <canvas id="screen" width="800" height="600" tabindex="0"></canvas>
   <pre id="log"></pre>
   <script>
     document.getElementById("coi").textContent = String(globalThis.crossOriginIsolated);
     const logEl = document.getElementById("log");
     const statusEl = document.getElementById("status");
     const gateEl = document.getElementById("gate");
-    const framesEl = document.getElementById("frames");
+    const ticksEl = document.getElementById("ticks");
+    const blitsEl = document.getElementById("blits");
     function log(line) {
       logEl.textContent += line + "\n";
       console.log("[bib] " + line);
@@ -34,16 +37,81 @@
     const canvas = document.getElementById("screen");
     const ctx = canvas.getContext("2d");
 
-    // Machine-readable state for tools/gate2-browser-test.mjs.
+    // ?demo=hello loads the Phase 2 gate page (pixel-stable, script-free,
+    // verdict computed on frame 0 — used by gate2-browser-test.mjs).
+    // Default is the interactive Phase 3 page (script ON, driven by
+    // gate3-browser-test.mjs through real input).
+    const demo = new URLSearchParams(location.search).get("demo") ?? "interactive";
+
+    // MUST stay byte-identical to kTestHTML in src/embedder/main.cpp so the
+    // browser pixel counts match the offscreen gate exactly.
+    const helloHTML =
+      "<!DOCTYPE html>" +
+      "<html><head><title>gate</title></head>" +
+      "<body style='background:#ffffff; margin:0'>" +
+      "<h1 style='color:#cc0000; font-size:48px; margin:20px'>hello</h1>" +
+      "<div style='width:200px; height:100px; background:#0066cc'></div>" +
+      "</body></html>";
+
+    // Interactive test page. Absolute positions + flat colors so the gate
+    // can probe exact pixels regardless of fonts:
+    //   hoverbox  (20,20 100x100)  #00aa00 -> #ff8800 on :hover
+    //   clickbtn  (160,20 100x100) #888888; onclick paints result #ff00ff
+    //   result    (300,20 100x100) #444444
+    //   keyresult (440,20 100x100) #222222; 'h' keydown -> #00ffff,
+    //                                       field value 'hi' -> #ffff00
+    //   field     (580,30 input)   typing target
+    //   marker    (20,700 100x100) #123456, visible only after scrolling
+    const interactiveHTML =
+      "<!DOCTYPE html><html><head><style>" +
+      "  body { margin:0; background:#ffffff; }" +
+      "  #hoverbox { position:absolute; left:20px; top:20px; width:100px; height:100px; background:#00aa00; }" +
+      "  #hoverbox:hover { background:#ff8800; }" +
+      "  #clickbtn { position:absolute; left:160px; top:20px; width:100px; height:100px; background:#888888; }" +
+      "  #result   { position:absolute; left:300px; top:20px; width:100px; height:100px; background:#444444; }" +
+      "  #keyresult{ position:absolute; left:440px; top:20px; width:100px; height:100px; background:#222222; }" +
+      "  #field    { position:absolute; left:580px; top:30px; width:150px; height:32px; font-size:16px; }" +
+      "  #marker   { position:absolute; left:20px; top:700px; width:100px; height:100px; background:#123456; }" +
+      "</style></head><body>" +
+      "<div id=hoverbox></div>" +
+      "<div id=clickbtn onclick=\"document.getElementById('result').style.background='#ff00ff'\"></div>" +
+      "<div id=result></div>" +
+      "<div id=keyresult></div>" +
+      "<input id=field>" +
+      "<div style='height:1400px'></div>" +
+      "<div id=marker></div>" +
+      "<script>" +
+      "  document.addEventListener('keydown', function(e) { if (e.key === 'h') document.getElementById('keyresult').style.background = '#00ffff'; });" +
+      "  document.getElementById('field').addEventListener('input', function(e) { if (e.target.value === 'hi') document.getElementById('keyresult').style.background = '#ffff00'; });" +
+      "<\/script>" +
+      "</body></html>";
+
+    // Diagnostic: does an inline <script> execute at all? Body turns green
+    // iff JSC ran. Probe any pixel: #00cc00 = script ran, #ffffff = not.
+    const scriptTestHTML =
+      "<!DOCTYPE html><html><body style='margin:0; background:#ffffff'>" +
+      "<script>document.body.style.background='#00cc00';<\/script>" +
+      "</body></html>";
+
+    // Machine-readable state for the gate tests.
     const bib = (window.__bib = {
-      ready: false, frames: 0, verdict: "pending",
+      ready: false, ticks: 0, frames: 0, verdict: "pending",
       exactBlue: -1, redGlyph: -1,
+      // Force a repaint and read one pixel straight from the engine's
+      // unpremultiplied RGBA buffer (NOT canvas getImageData — the canvas
+      // premul round-trip is lossy).
+      probe(x, y) {
+        const ptr = Module._bib_render(1);
+        if (!ptr) return null;
+        const w = Module._bib_frame_width();
+        const i = ptr + (y * w + x) * 4;
+        const heap = Module.HEAPU8;
+        return [heap[i], heap[i + 1], heap[i + 2]];
+      },
     });
 
-    // Same region assertions as the offscreen gate (main.cpp), computed from
-    // the engine's own unpremultiplied RGBA bytes BEFORE the canvas touches
-    // them — putImageData/getImageData round-trips premul and is lossy.
-    function judgeFrame(pixels, w, h) {
+    // Same region assertions as the offscreen gate (hello demo only).
+    function judgeHelloFrame(pixels, w, h) {
       let exactBlue = 0, redGlyph = 0;
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
@@ -63,28 +131,70 @@
 
     function blitLoop() {
       Module._bib_tick();
-      const ptr = Module._bib_render();
-      if (!ptr) {
-        bib.verdict = "FAIL";
-        statusEl.textContent = "render failed";
-        return;
+      // force only the very first frame; afterwards the engine returns null
+      // for clean frames and we skip the blit entirely.
+      const ptr = Module._bib_render(bib.frames === 0 ? 1 : 0);
+      if (ptr) {
+        const w = Module._bib_frame_width();
+        const h = Module._bib_frame_height();
+        // Rebuild the heap view every frame: ALLOW_MEMORY_GROWTH detaches
+        // the ArrayBuffer when the wasm memory grows.
+        const pixels = new Uint8ClampedArray(Module.HEAPU8.buffer, ptr, w * h * 4);
+        ctx.putImageData(new ImageData(pixels, w, h), 0, 0);
+        if (bib.frames === 0 && demo === "hello") judgeHelloFrame(pixels, w, h);
+        bib.frames++;
+        blitsEl.textContent = bib.frames;
       }
-      const w = Module._bib_frame_width();
-      const h = Module._bib_frame_height();
-      // Rebuild the heap view every frame: ALLOW_MEMORY_GROWTH detaches the
-      // ArrayBuffer when the wasm memory grows.
-      const pixels = new Uint8ClampedArray(Module.HEAPU8.buffer, ptr, w * h * 4);
-      ctx.putImageData(new ImageData(pixels, w, h), 0, 0);
-      if (bib.frames === 0) judgeFrame(pixels, w, h);
-      bib.frames++;
-      framesEl.textContent = bib.frames;
+      bib.ticks++;
+      ticksEl.textContent = bib.ticks;
       requestAnimationFrame(blitLoop);
+    }
+
+    // --- Input forwarding: canvas events -> engine EventHandler ---
+    const mods = (e) =>
+      (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+
+    function wireInput() {
+      canvas.addEventListener("mousemove", (e) => {
+        Module._bib_mouse_move(e.offsetX, e.offsetY, mods(e));
+      });
+      canvas.addEventListener("mousedown", (e) => {
+        canvas.focus();
+        e.preventDefault();
+        Module._bib_mouse_button(1, e.button, e.offsetX, e.offsetY, e.detail || 1, mods(e));
+      });
+      canvas.addEventListener("mouseup", (e) => {
+        e.preventDefault();
+        Module._bib_mouse_button(0, e.button, e.offsetX, e.offsetY, e.detail || 1, mods(e));
+      });
+      canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+      canvas.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        Module._bib_wheel(e.offsetX, e.offsetY, e.deltaX, e.deltaY, mods(e));
+      }, { passive: false });
+
+      const sendKey = (type, e, text) =>
+        Module.ccall("bib_key", "number",
+          ["number", "string", "string", "string", "number", "number", "number"],
+          [type, e.key, e.code, text, e.keyCode | 0, e.repeat ? 1 : 0, mods(e)]);
+      canvas.addEventListener("keydown", (e) => {
+        // Let host-page shortcuts (devtools, reload) through; consume the rest.
+        if (!e.ctrlKey && !e.metaKey) e.preventDefault();
+        sendKey(0, e, "");
+        // The Char half of the RawKeyDown/Char split for printable keys
+        // (Enter/Tab included, matching WM_CHAR-style ports).
+        if (e.key.length === 1) sendKey(2, e, e.key);
+        else if (e.key === "Enter") sendKey(2, e, "\r");
+        else if (e.key === "Tab") sendKey(2, e, "\t");
+      });
+      canvas.addEventListener("keyup", (e) => sendKey(1, e, ""));
     }
 
     // Classic (non-modularized) Emscripten output picks this up: in browser
     // global scope `var Module` re-declares without clobbering the value.
     window.Module = {
       bibInteractive: true,
+      bibHTML: demo === "hello" ? helloHTML : demo === "scripttest" ? scriptTestHTML : interactiveHTML,
       preRun: [function () {
         // fontconfig's compiled-in cache dir must exist in MEMFS.
         Module.FS.mkdirTree("/var/cache/fontconfig");
@@ -93,7 +203,9 @@
       // the engine page is loaded, laid out, and painted once.
       onEngineReady: function () {
         bib.ready = true;
-        statusEl.textContent = "engine live";
+        statusEl.textContent = `engine live (${demo})`;
+        wireInput();
+        canvas.focus();
         requestAnimationFrame(blitLoop);
       },
       print: (s) => log("out: " + s),

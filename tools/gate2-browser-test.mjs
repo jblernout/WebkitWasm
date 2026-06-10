@@ -1,12 +1,14 @@
 // Gate 2 browser test: WebKit-in-wasm paints its framebuffer onto a <canvas>
-// in a real (headless Chromium) tab, and the rAF blit loop stays alive.
+// in a real (headless Chromium) tab, and the rAF loop stays alive.
+// Loads the hello demo (?demo=hello) — the Phase 2 gate page — and expects
+// pixel counts identical to the offscreen node gate.
 // Serve first:
 //   node tools/dev-server.mjs web --mount /engine=build/webcore/bin
 // then:
 //   node tools/gate2-browser-test.mjs [url]
 import { chromium } from "playwright";
 
-const url = process.argv[2] ?? "http://127.0.0.1:8080/browser.html";
+const url = process.argv[2] ?? "http://127.0.0.1:8080/browser.html?demo=hello";
 const browser = await chromium.launch();
 const page = await browser.newPage();
 
@@ -28,14 +30,15 @@ try {
   );
   const verdict = await page.evaluate(() => window.__bib.verdict);
   if (verdict === "PASS") {
-    // Liveness: the blit loop must keep producing frames, not just one.
-    await page.waitForFunction(() => window.__bib.frames >= 10, {
+    // Liveness: the rAF loop must keep ticking. (Blit count stays at 1 for
+    // a static page by design — clean frames skip putImageData.)
+    await page.waitForFunction(() => window.__bib.ticks >= 10, {
       timeout: 30000,
     });
   }
   const bib = await page.evaluate(() => window.__bib);
   console.log(
-    `__bib: verdict=${bib.verdict} exactBlue=${bib.exactBlue} redGlyph=${bib.redGlyph} frames=${bib.frames}`
+    `__bib: verdict=${bib.verdict} exactBlue=${bib.exactBlue} redGlyph=${bib.redGlyph} ticks=${bib.ticks} blits=${bib.frames}`
   );
   await page
     .locator("#screen")

@@ -42,7 +42,10 @@ target_link_options(BibEmbedder PRIVATE
     # MEMFS in Module.onExit, and both hosts pre-create fontconfig's cache
     # dir in preRun. HEAPU8: the browser host page (web/browser.html) wraps
     # bib_render()'s pixel pointer in a Uint8ClampedArray for putImageData.
-    "SHELL:-sEXPORTED_RUNTIME_METHODS=FS,HEAPU8"
+    # ccall: browser.html marshals bib_key()'s string args. stringToUTF8/
+    # lengthBytesUTF8: main.cpp reads Module.bibHTML inside EM_ASM — export
+    # forces them into the runtime so the EM_ASM block can call them.
+    "SHELL:-sEXPORTED_RUNTIME_METHODS=FS,HEAPU8,ccall,stringToUTF8,lengthBytesUTF8"
     # Surface the COMPLETE undefined-symbol list per link attempt instead of
     # wasm-ld's default 20-error cutoff — each stub iteration costs minutes.
     "SHELL:-Wl,--error-limit=0"
