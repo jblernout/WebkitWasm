@@ -1,14 +1,42 @@
 // Static dev server with the COOP/COEP headers required for
-// SharedArrayBuffer (Emscripten pthreads). No deps.
+// crossOriginIsolated wasm hosting. No deps.
 //
-//   node tools/dev-server.mjs [root-dir]   (default root: web/, port: $PORT or 8080)
+//   node tools/dev-server.mjs [root-dir] [--mount /prefix=dir]...
+//   (default root: web/, port: $PORT or 8080)
+//
+// --mount maps a URL prefix to a directory OUTSIDE the root, e.g.
+//   --mount /engine=build/webcore/bin
+// so multi-GB build artifacts are served in place instead of being copied
+// into web/. Each mount gets the same realpath+containment guard as the root.
 
 import { createServer } from "node:http";
 import { createReadStream } from "node:fs";
 import { stat, realpath } from "node:fs/promises";
 import { join, sep, extname, resolve } from "node:path";
 
-const ROOT = await realpath(resolve(process.argv[2] ?? "web"));
+const positional = [];
+const mounts = []; // [{ prefix: "/engine", root: "/abs/dir" }]
+for (let i = 2; i < process.argv.length; i++) {
+  const arg = process.argv[i];
+  if (arg === "--mount") {
+    const spec = process.argv[++i] ?? "";
+    const eq = spec.indexOf("=");
+    if (eq < 1 || !spec.startsWith("/")) {
+      console.error(`dev server: bad --mount "${spec}" (want /prefix=dir)`);
+      process.exit(1);
+    }
+    mounts.push({
+      prefix: spec.slice(0, eq).replace(/\/+$/, ""),
+      root: await realpath(resolve(spec.slice(eq + 1))),
+    });
+  } else {
+    positional.push(arg);
+  }
+}
+// Longest prefix wins so /engine/sub can coexist with /engine.
+mounts.sort((a, b) => b.prefix.length - a.prefix.length);
+
+const ROOT = await realpath(resolve(positional[0] ?? "web"));
 const PORT = Number(process.env.PORT ?? 8080);
 
 const MIME = {
@@ -27,7 +55,7 @@ const MIME = {
   ".woff2": "font/woff2",
 };
 
-const inRoot = (p) => p === ROOT || p.startsWith(ROOT + sep);
+const inRoot = (p, root) => p === root || p.startsWith(root + sep);
 
 const server = createServer(async (req, res) => {
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
@@ -36,8 +64,20 @@ const server = createServer(async (req, res) => {
 
   try {
     const url = new URL(req.url, "http://localhost");
-    const candidate = resolve(join(ROOT, decodeURIComponent(url.pathname)));
-    if (!inRoot(candidate)) {
+    const pathname = decodeURIComponent(url.pathname);
+
+    let root = ROOT;
+    let rel = pathname;
+    const mount = mounts.find(
+      (m) => pathname === m.prefix || pathname.startsWith(m.prefix + "/")
+    );
+    if (mount) {
+      root = mount.root;
+      rel = pathname.slice(mount.prefix.length) || "/";
+    }
+
+    const candidate = resolve(join(root, rel));
+    if (!inRoot(candidate, root)) {
       res.writeHead(403).end("403");
       return;
     }
@@ -50,7 +90,7 @@ const server = createServer(async (req, res) => {
       file = await realpath(join(file, "index.html"));
       s = await stat(file);
     }
-    if (!inRoot(file)) {
+    if (!inRoot(file, root)) {
       res.writeHead(403).end("403");
       return;
     }
@@ -78,5 +118,8 @@ server.on("error", (err) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  console.log(`dev server: http://127.0.0.1:${PORT}  root=${ROOT}  COOP/COEP=on`);
+  const mountDesc = mounts.map((m) => ` ${m.prefix}=>${m.root}`).join("");
+  console.log(
+    `dev server: http://127.0.0.1:${PORT}  root=${ROOT}${mountDesc}  COOP/COEP=on`
+  );
 });

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>BrowserInBrowser — WebKit-in-wasm canvas</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 16px; background: #1e1e1e; color: #ddd; }
+    canvas { border: 1px solid #555; background: #fff; image-rendering: pixelated; }
+    pre { color: #9a9; max-height: 14em; overflow-y: auto; }
+    #gate.pass { color: #4c4; } #gate.fail { color: #e55; }
+  </style>
+</head>
+<body>
+  <h1>WebKit-in-wasm: engine framebuffer → canvas</h1>
+  <p>
+    crossOriginIsolated: <b id="coi"></b> |
+    status: <span id="status">booting…</span> |
+    gate: <b id="gate">pending</b> |
+    frames: <span id="frames">0</span>
+  </p>
+  <canvas id="screen" width="800" height="600"></canvas>
+  <pre id="log"></pre>
+  <script>
+    document.getElementById("coi").textContent = String(globalThis.crossOriginIsolated);
+    const logEl = document.getElementById("log");
+    const statusEl = document.getElementById("status");
+    const gateEl = document.getElementById("gate");
+    const framesEl = document.getElementById("frames");
+    function log(line) {
+      logEl.textContent += line + "\n";
+      console.log("[bib] " + line);
+    }
+
+    const canvas = document.getElementById("screen");
+    const ctx = canvas.getContext("2d");
+
+    // Machine-readable state for tools/gate2-browser-test.mjs.
+    const bib = (window.__bib = {
+      ready: false, frames: 0, verdict: "pending",
+      exactBlue: -1, redGlyph: -1,
+    });
+
+    // Same region assertions as the offscreen gate (main.cpp), computed from
+    // the engine's own unpremultiplied RGBA bytes BEFORE the canvas touches
+    // them — putImageData/getImageData round-trips premul and is lossy.
+    function judgeFrame(pixels, w, h) {
+      let exactBlue = 0, redGlyph = 0;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = (y * w + x) * 4;
+          const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+          if (r === 0x00 && g === 0x66 && b === 0xcc) exactBlue++;
+          if (y < 76 && r > 0x90 && g < 0x60 && b < 0x60) redGlyph++;
+        }
+      }
+      bib.exactBlue = exactBlue;
+      bib.redGlyph = redGlyph;
+      bib.verdict = exactBlue === 200 * 100 && redGlyph >= 200 ? "PASS" : "FAIL";
+      gateEl.textContent = `${bib.verdict} (blue=${exactBlue} glyph=${redGlyph})`;
+      gateEl.className = bib.verdict === "PASS" ? "pass" : "fail";
+      log(`gate: ${bib.verdict} exactBlue=${exactBlue} redGlyph=${redGlyph}`);
+    }
+
+    function blitLoop() {
+      Module._bib_tick();
+      const ptr = Module._bib_render();
+      if (!ptr) {
+        bib.verdict = "FAIL";
+        statusEl.textContent = "render failed";
+        return;
+      }
+      const w = Module._bib_frame_width();
+      const h = Module._bib_frame_height();
+      // Rebuild the heap view every frame: ALLOW_MEMORY_GROWTH detaches the
+      // ArrayBuffer when the wasm memory grows.
+      const pixels = new Uint8ClampedArray(Module.HEAPU8.buffer, ptr, w * h * 4);
+      ctx.putImageData(new ImageData(pixels, w, h), 0, 0);
+      if (bib.frames === 0) judgeFrame(pixels, w, h);
+      bib.frames++;
+      framesEl.textContent = bib.frames;
+      requestAnimationFrame(blitLoop);
+    }
+
+    // Classic (non-modularized) Emscripten output picks this up: in browser
+    // global scope `var Module` re-declares without clobbering the value.
+    window.Module = {
+      bibInteractive: true,
+      preRun: [function () {
+        // fontconfig's compiled-in cache dir must exist in MEMFS.
+        Module.FS.mkdirTree("/var/cache/fontconfig");
+      }],
+      // Called from C right before emscripten_exit_with_live_runtime() —
+      // the engine page is loaded, laid out, and painted once.
+      onEngineReady: function () {
+        bib.ready = true;
+        statusEl.textContent = "engine live";
+        requestAnimationFrame(blitLoop);
+      },
+      print: (s) => log("out: " + s),
+      printErr: (s) => log("err: " + s),
+      onAbort: (r) => {
+        bib.verdict = "abort";
+        statusEl.textContent = "ABORTED";
+        log("abort: " + r);
+      },
+    };
+  </script>
+  <script src="engine/embedder.js"></script>
+</body>
+</html>

@@ -109,10 +109,15 @@ Key properties:
     symbols → one stub iteration (playbook memory has the recipe).
     Single-threaded (matches the lib stack: no -pthread anywhere).
     Commits a680190 (links) → da01669 (gate). Output: build/out.png.
-  - [ ] Canvas half of the gate: blit the same pixels to an interactable
-    <canvas> in a COOP/COEP browser tab (Phase 3 entry point — the
-    offscreen pixels make this mechanical).
-  - GATE: "hello <h1>" pixels — PASSED offscreen 2026-06-09.
+  - [x] 2026-06-10 ~00:09: **Canvas half PASSED.** Same pixels blitted to a
+    <canvas> in a COOP/COEP Chromium tab (GATE2-BROWSER: PASS, identical
+    counts: exactBlue=20000 redGlyph=1541, 11 sustained rAF frames).
+    Engine stays alive via emscripten_exit_with_live_runtime(); host page
+    web/browser.html drives exported bib_tick()/bib_render() and blits the
+    unpremul RGBA buffer via putImageData. Proof: build/gate2-canvas.png.
+    Offscreen node gate unchanged and still passing.
+  - GATE: "hello <h1>" pixels — PASSED offscreen 2026-06-09, in-tab
+    2026-06-10.
 - [ ] **Phase 3 — Interactivity**
   - Mouse/keyboard/scroll plumbing, text input, fonts, images (png/jpeg/
     webp), CSS at full fidelity.

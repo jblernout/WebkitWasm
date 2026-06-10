@@ -38,9 +38,11 @@ target_link_options(BibEmbedder PRIVATE
     "SHELL:-sALLOW_MEMORY_GROWTH=1"
     "SHELL:-sMAXIMUM_MEMORY=4GB"
     "SHELL:-sEXIT_RUNTIME=1"
-    # The node runner (tools/run-embedder.cjs) reads /out.ppm out of MEMFS
-    # in Module.onExit, and pre-creates fontconfig's cache dir in preRun.
-    "SHELL:-sEXPORTED_RUNTIME_METHODS=FS"
+    # FS: the node runner (tools/run-embedder.cjs) reads /out.ppm out of
+    # MEMFS in Module.onExit, and both hosts pre-create fontconfig's cache
+    # dir in preRun. HEAPU8: the browser host page (web/browser.html) wraps
+    # bib_render()'s pixel pointer in a Uint8ClampedArray for putImageData.
+    "SHELL:-sEXPORTED_RUNTIME_METHODS=FS,HEAPU8"
     # Surface the COMPLETE undefined-symbol list per link attempt instead of
     # wasm-ld's default 20-error cutoff — each stub iteration costs minutes.
     "SHELL:-Wl,--error-limit=0"

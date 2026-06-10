@@ -4,6 +4,10 @@
 **Finalized**: ~23:57 after the Codex review (0 crit / 0 high / 2 med /
 3 low — ALL FIXED in c8fbf59; gate re-verified with strict assertions:
 exactBlue=20000, redGlyph=1541).
+**Updated 2026-06-10 ~00:10**: STEP 1 (canvas blit) DONE — GATE2-BROWSER
+PASS, identical pixel counts in a real Chromium tab, 11 sustained rAF
+frames. See "Step 1 outcome" below; next is step 2/3 (invalidation-driven
+repaint, then input).
 **Supersedes**: handoff-2026-06-09-phase2-embedder.md (→ docs/archive/).
 
 ## State (commits a680190 → c8fbf59, tree clean, review done)
@@ -27,28 +31,45 @@ exactBlue=20000, redGlyph=1541).
   3-line embedder hook in PlatformEmscripten.cmake. Ledger ~1500 lines.
 - Everything SINGLE-THREADED (no -pthread in any object). Deliberate.
 
-## NEXT TASK: Phase 3 — pixels in a real tab, then input
-1. **Canvas blit**: host page (extend tools/dev-server.mjs assets) loads
-   embedder.js in a COOP/COEP tab (Phase 1's gate1-browser-test.mjs is the
-   Playwright template). Replace the PPM dump with an exported
-   `render(ptr)` path: either main() keeps the surface alive + a
-   `EMSCRIPTEN_KEEPALIVE` function returns the pixel pointer, or switch
-   the embedder to `-sMODULARIZE` and drive it from JS. Blit via
-   `ctx.putImageData(new ImageData(new Uint8ClampedArray(HEAPU8.buffer,
-   ptr, w*h*4), w, h), 0, 0)`. Browser fonts/ICU already embedded —
-   nothing else to package.
-2. **A real RunLoop**: main() currently exits after one paint. For a live
-   page: after load, enter the generic RunLoop (RunLoop::run()) and drive
-   paints from a requestAnimationFrame→C callback (emscripten_set_main_loop
-   conflicts with RunLoop; prefer exported tick function called from rAF
-   that runs RunLoop::cycle() + paint-if-dirty via ChromeClient invalidation
-   — override EmptyChromeClient::invalidateContentsAndRootView).
+## Step 1 outcome (DONE 2026-06-10 ~00:09)
+- `src/embedder/main.cpp` restructured: engine state in an intentionally
+  leaked global `Engine` struct; gate mode unchanged (node PPM path still
+  passes byte-identical); `Module.bibInteractive` (read via EM_ASM_INT)
+  switches to interactive mode → `Module.onEngineReady()` then
+  `emscripten_exit_with_live_runtime()`.
+- Exported C API: `bib_frame_width/height`, `bib_tick()`
+  (WTF::RunLoop::cycle() — RunMode::Iterate NEVER blocks, verified in
+  RunLoopGeneric.cpp: the waitUntil is Drain-only), `bib_render()`
+  (repaint + readPixels into static unpremul RGBA buffer).
+- `web/browser.html` host page: pre-set window.Module (browser var-Module
+  pickup works, unlike node CJS), preRun mkdirTree /var/cache/fontconfig,
+  rAF loop _bib_tick→_bib_render→putImageData with a FRESH heap view each
+  frame (ALLOW_MEMORY_GROWTH detaches). Verdict computed from the engine's
+  own bytes, NOT canvas getImageData (premul round-trip is lossy).
+- `tools/dev-server.mjs`: `--mount /engine=build/webcore/bin` (realpath
+  containment per mount root) — no copying 87 MB artifacts into web/.
+- `tools/gate2-browser-test.mjs`: Playwright gate. PASS = identical counts
+  (exactBlue=20000, redGlyph=1541) + frames>=10 liveness.
+  Run: `node tools/dev-server.mjs web --mount /engine=build/webcore/bin`
+  then `node tools/gate2-browser-test.mjs`. Proof: build/gate2-canvas.png.
+- `embedder.cmake`: EXPORTED_RUNTIME_METHODS=FS,HEAPU8.
+
+## NEXT TASK: Phase 3 remaining — invalidation, input, script
+2. **Invalidation-driven repaint**: today every rAF frame repaints fully
+   (intentional for the milestone). Override
+   EmptyChromeClient::invalidateContentsAndRootView (custom ChromeClient in
+   the PageConfiguration — pageConfigurationWithEmptyClients then replace,
+   or build the config by hand) to set a dirty flag/rect; bib_render()
+   becomes paint-if-dirty (still must repaint on first frame).
 3. **Input forwarding**: canvas mouse/key events → exported C functions →
    `EventHandler::handleMousePressEvent(PlatformMouseEvent)` etc. Crib
    event construction from any port's WebView (PlayStation/WinCairo).
+   Hover/`:hover` restyle is the visual proof (needs step 2's invalidation
+   to show up).
 4. **Script back on**: setScriptEnabled(true) — JSC inside a WebCore page
-   is UNTESTED in this port (CLoop on the main thread; watch for timer/
-   microtask starvation without a live RunLoop — do this AFTER step 2).
+   is UNTESTED in this port (CLoop on the main thread). bib_tick() already
+   cycles the RunLoop every frame, so timers/microtasks have a heartbeat;
+   watch for starvation between rAF ticks.
 5. Then images (decoders are compiled: png/jpeg/webp), scrolling, more CSS.
 
 ## Known traps for Phase 3 (from tonight)

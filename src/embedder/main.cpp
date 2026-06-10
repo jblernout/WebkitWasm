@@ -1,9 +1,15 @@
-// BrowserInBrowser Phase 2 embedder: the make-or-break gate.
+// BrowserInBrowser embedder.
 // Builds a WebCore::Page against internal headers (no public embedding API
 // exists outside Cocoa — decision-001), loads a fixed HTML string, lays it
-// out, and paints through a Skia raster surface. Output is a PPM dump in the
-// wasm FS plus a render-tree text dump on stdout, so layout correctness is
-// verifiable even before fonts are packaged.
+// out, and paints through a Skia raster surface.
+//
+// Two modes, decided at runtime by Module.bibInteractive:
+//  - gate mode (node, tools/run-embedder.cjs): one paint → PPM dump in the
+//    wasm FS + region-pixel assertions → exit. The Phase 2 gate, unchanged.
+//  - interactive mode (browser host page, web/browser.html): main() sets the
+//    page up, signals Module.onEngineReady, then keeps the runtime alive.
+//    The host drives bib_tick()/bib_render() from requestAnimationFrame and
+//    blits the returned RGBA buffer to a <canvas> via putImageData.
 //
 // Construction sequence is cribbed from SVGImage::dataChanged() — the one
 // in-tree user of pageConfigurationWithEmptyClients() that paints.
@@ -27,9 +33,11 @@
 #include "Settings.h"
 #include "SharedBuffer.h"
 #include <JavaScriptCore/InitializeThreading.h>
+#include <emscripten.h>
 #include <pal/SessionID.h>
 #include <wtf/MainThread.h>
 #include <wtf/ProcessPrivilege.h>
+#include <wtf/RunLoop.h>
 
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/core/SkCanvas.h>
@@ -55,6 +63,21 @@ static const char* kTestHTML =
     "<div style='width:200px; height:100px; background:#0066cc'></div>"
     "</body></html>";
 
+// Engine state outlives main() in interactive mode. Intentionally leaked:
+// destruction order of WebCore globals at process exit is not a supported
+// path in this embedder, and in gate mode the process exits anyway.
+struct Engine {
+    RefPtr<WebCore::Page> page;
+    RefPtr<WebCore::LocalFrame> mainFrame;
+    RefPtr<WebCore::LocalFrameView> frameView;
+    sk_sp<SkSurface> surface;
+};
+static Engine* g_engine;
+
+// bib_render() hands this buffer to JS. Unpremultiplied RGBA as ImageData
+// expects; for this engine's output (opaque pixels) conversion is identity.
+static uint8_t g_blitPixels[kWidth * kHeight * 4];
+
 // Dump RGBA pixels as a binary PPM (P6, alpha dropped) into the wasm FS.
 // The node runner extracts it afterwards.
 static bool writePPM(const char* path, const SkPixmap& pixmap)
@@ -78,6 +101,43 @@ static bool writePPM(const char* path, const SkPixmap& pixmap)
         ok = false;
     return ok;
 }
+
+// Layout (if dirty) + paint the full frame into the persistent surface.
+static bool paintFrame()
+{
+    g_engine->mainFrame->protectedDocument()->updateLayoutIgnorePendingStylesheets();
+    g_engine->surface->getCanvas()->clear(SK_ColorWHITE);
+    WebCore::GraphicsContextSkia context(*g_engine->surface->getCanvas(), WebCore::RenderingMode::Unaccelerated, WebCore::RenderingPurpose::Unspecified);
+    g_engine->frameView->paint(context, WebCore::IntRect(0, 0, kWidth, kHeight));
+    return true;
+}
+
+extern "C" {
+
+EMSCRIPTEN_KEEPALIVE int bib_frame_width() { return kWidth; }
+EMSCRIPTEN_KEEPALIVE int bib_frame_height() { return kHeight; }
+
+// One non-blocking engine-RunLoop iteration: fires due WebCore timers and
+// dispatched main-thread functions. Drive from requestAnimationFrame.
+// (RunMode::Iterate never sleeps — RunLoopGeneric's Drain-only waitUntil.)
+EMSCRIPTEN_KEEPALIVE void bib_tick()
+{
+    WTF::RunLoop::cycle();
+}
+
+// Repaint and return the RGBA frame buffer (kWidth*kHeight*4 bytes).
+// Returns 0 on failure.
+EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render()
+{
+    if (!g_engine || !paintFrame())
+        return nullptr;
+    auto dstInfo = SkImageInfo::Make(kWidth, kHeight, kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
+    if (!g_engine->surface->readPixels(SkPixmap(dstInfo, g_blitPixels, kWidth * 4), 0, 0))
+        return nullptr;
+    return g_blitPixels;
+}
+
+} // extern "C"
 
 int main()
 {
@@ -135,17 +195,25 @@ int main()
         printf("EMBEDDER: FAIL SkSurface\n");
         return 1;
     }
-    surface->getCanvas()->clear(SK_ColorWHITE);
 
-    {
-        WebCore::GraphicsContextSkia context(*surface->getCanvas(), WebCore::RenderingMode::Unaccelerated, WebCore::RenderingPurpose::Unspecified);
-        frameView->paint(context, WebCore::IntRect(0, 0, kWidth, kHeight));
+    g_engine = new Engine { WTF::move(page), WTF::move(localMainFrame), WTF::move(frameView), WTF::move(surface) };
+
+    if (!paintFrame()) {
+        printf("EMBEDDER: FAIL paint\n");
+        return 1;
     }
-
     printf("EMBEDDER: paint OK\n");
 
+    if (EM_ASM_INT({ return Module.bibInteractive ? 1 : 0; })) {
+        // Browser mode: hand control to the host page's rAF loop. The unwind
+        // skips the rest of main and keeps the runtime (and g_engine) alive.
+        printf("EMBEDDER: interactive — runtime stays alive\n");
+        EM_ASM({ if (Module.onEngineReady) Module.onEngineReady(); });
+        emscripten_exit_with_live_runtime();
+    }
+
     SkPixmap pixmap;
-    if (!surface->peekPixels(&pixmap)) {
+    if (!g_engine->surface->peekPixels(&pixmap)) {
         printf("EMBEDDER: FAIL peekPixels\n");
         return 1;
     }
