@@ -1,7 +1,11 @@
 # Handoff — Phase 5: browser chrome + Phase 4 leftovers (the ONE active handoff)
 
 **Written**: 2026-06-10 ~04:55 EDT, right after Phase 4 core completed.
+**Updated**: 2026-06-10 ~08:30 EDT after the Codex review round (commit
+ed77c77) — all findings fixed, all gates re-verified green.
 **Supersedes**: handoff-2026-06-10-phase4-networking.md (→ docs/archive/).
+**Session commits**: 95fe79c (Phase 4 networking complete) → ed77c77
+(Codex fixes). Tree clean.
 
 ## State (Phase 4 core COMPLETE — all gates green)
 - **THE ENGINE BROWSES THE REAL WEB.** GATE 4 3/3 + MODERN-SITE SMOKE 4/4:
@@ -17,6 +21,13 @@
   (main-thread pump under __EMSCRIPTEN__) → SOCKFS → page WebSocket
   dispatcher → WispWebSocket (web/vendor/wisp-client.js, wisp-js 0.4.1)
   → wisp server. data: URLs → loader->start() (pre-ResourceHandle path).
+- **Codex review hardening (ed77c77)**: (a) Location: file:/// redirects
+  REJECTED in BibResourceLoad::performRedirect (remote page could read
+  MEMFS — CA bundle/fonts — as content); (b) null willSendRequest
+  completion cancels the parked CurlRequest (was leaking it paused);
+  (c) the WebSocket dispatcher only reroutes sockets carrying the
+  'bib-sockfs' marker subprotocol (Module.websocket.subprotocol) — page
+  sockets can't be false-positive routed onto Wisp by URL shape.
 - **Run the stack** (three processes):
   - `node tools/dev-server.mjs web --mount /engine=build/webcore/bin`
   - `npm run wisp` (wisp-js-server on 5001, loopback/private allowed — DEV
