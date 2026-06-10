@@ -1,11 +1,21 @@
 # Handoff — Phase 5: browser chrome + Phase 4 leftovers (the ONE active handoff)
 
 **Written**: 2026-06-10 ~04:55 EDT, right after Phase 4 core completed.
-**Updated**: 2026-06-10 ~08:30 EDT after the Codex review round (commit
-ed77c77) — all findings fixed, all gates re-verified green.
+**Updated**: 2026-06-10 ~13:30 EDT after the memory investigation + the
+abort-hunt session (see sections below). Day's commits: 95fe79c →
+ed77c77 → fdadeff → 8b46572 (memory/no-leak + dev-server 304s) →
+2ea0200 (abort fixes + images + URL bar) → [Codex round-2 fixes commit].
 **Supersedes**: handoff-2026-06-10-phase4-networking.md (→ docs/archive/).
-**Session commits**: 95fe79c (Phase 4 networking complete) → ed77c77
-(Codex fixes). Tree clean.
+
+## ⟶ NEXT SESSION STARTS HERE: COOKIES (top priority)
+User hit it live twice: google.com renders "Cookies are disabled — try
+again" (screenshot evidence in session) and old.reddit serves its bot
+block page. CookieJarDB (sqlite) is already COMPILED+LINKED; what's
+missing is wiring: NetworkStorageSession ownership for the session +
+cookie strategy plumbing so CurlRequest attaches/stores cookies.
+Persistence (OPFS) can come later — in-memory cookies already fix
+"Cookies are disabled". Start from how WebKitLegacy/curl ports create
+NetworkStorageSession with CookieJarCurl/CookieJarDB.
 
 ## State (Phase 4 core COMPLETE — all gates green)
 - **THE ENGINE BROWSES THE REAL WEB.** GATE 4 3/3 + MODERN-SITE SMOKE 4/4:
@@ -126,6 +136,13 @@ via temp -sASSERTIONS + --profiling-funcs; both REVERTED after):
   226-byte GIF, images.html with onload/onerror signal divs).
 - Empty-client ledger grew: IDB requests DANGLE silently
   (EmptyDatabaseProvider no-op delegate) — future silent gate.
+- **Codex review round 2** (commits 8b46572+2ea0200; 0 crit/high, 1 med,
+  2 low): MED scheme injection (javascript:/file:/data: reached
+  bib_load_url via URL bar AND ?url=) → normalizeEngineURL http(s)
+  allowlist on both paths; LOW ImageFrameWorkQueue null-decoder left a
+  stale request at decodeQueue head → decoder check moved before append;
+  LOW ETag same-size stale-serve → DECLINED (fix would reintroduce the
+  no-store reload spike; collision needs same size AND same ms mtime).
 
 ## NEXT: Phase 5 — browser chrome (plain web dev)
 1. ~~URL bar~~ DONE (2026-06-10): #urlbar + Go in web/browser.html,
@@ -142,18 +159,21 @@ via temp -sASSERTIONS + --profiling-funcs; both REVERTED after):
 4. History (back/forward): BackForwardClient is EmptyBackForwardClient
    (capacity 0) — needs a real in-memory BackForwardList for back/forward.
 
-## Phase 4 leftovers (pick up opportunistically)
-- Images: decoders linked + loader live — verify <img> renders, add to a
-  gate (HN renders its gif arrows? grayarrow2x.gif didn't obviously show).
-- Cookies: CookieJarDB (sqlite, linked) — NetworkStorageSession wiring +
-  persistence later (OPFS). Many sites need cookies to behave.
+## Phase 4 leftovers (updated 2026-06-10 ~13:30)
+- ~~Images~~ DONE — gate5-images 3/3; Wikipedia/eBay render with images.
+- **Cookies: TOP PRIORITY — see "NEXT SESSION STARTS HERE" above.**
 - HTTP auth (401/407), sync XHR (blocked on single-thread — document as
   unsupported), ping/preconnect completions are error-stubs.
-- WebSocket-in-page: CurlStreamScheduler::createThreadIfNoCurrentThread
-  spawns a Thread — will trap/misbehave; needs the same main-thread-pump
-  treatment if/when needed.
-- Scheduler pump idles at rAF cadence (~60 pumps/s during load) — fine
-  for now; event-driven wakeup (socket callbacks) is a perf-phase item.
+- ~~WebSocket-in-page thread abort~~ DONE (scheduler pumped) — but
+  streams FAIL IMMEDIATELY by design: CurlStream's blocking CONNECT_ONLY
+  perform can't complete single-threaded. Real WS = multi-interface
+  CurlStream rework (pages currently get clean error events).
+- Workers: constructor throws NotSupportedError (catchable) — real
+  worker support would need a big architectural lift; not planned.
+- Scheduler pumps idle at rAF cadence — fine for now; event-driven
+  wakeup (socket callbacks) is a perf-phase item.
+- "missingImage" platform resource warning: bundle WebCore's broken-image
+  icon (cosmetic).
 
 ## Known traps (carried forward)
 - Empty-client semantics bite SILENTLY. Before suspecting wasm, check

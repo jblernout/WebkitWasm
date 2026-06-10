@@ -266,10 +266,27 @@
     // --- URL bar: navigate the ENGINE in place (no host-page reload) ---
     const urlbarEl = document.getElementById("urlbar");
     const gobtnEl = document.getElementById("gobtn");
-    function navigateEngine(raw) {
-      let url = (raw ?? urlbarEl.value).trim();
-      if (!url) return;
+    // http(s) only: file: would read MEMFS (CA bundle, fonts) as content,
+    // javascript: executes in the engine page — and ?url= arrives from
+    // arbitrary links (Codex 2026-06-10).
+    function normalizeEngineURL(raw) {
+      let url = (raw ?? "").trim();
+      if (!url) return null;
       if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) url = "https://" + url;
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+      } catch {
+        return null;
+      }
+      return url;
+    }
+    function navigateEngine(raw) {
+      const url = normalizeEngineURL(raw ?? urlbarEl.value);
+      if (!url) {
+        statusEl.textContent = "blocked: only http(s) URLs";
+        return;
+      }
       urlbarEl.value = url;
       statusEl.textContent = `loading ${url}`;
       log(`navigate: ${url}`);
@@ -311,10 +328,15 @@
         requestAnimationFrame(blitLoop);
         urlbarEl.disabled = false;
         gobtnEl.disabled = false;
-        if (navigateURL) {
-          urlbarEl.value = navigateURL;
-          statusEl.textContent = `loading ${navigateURL}`;
-          Module.ccall("bib_load_url", null, ["string"], [navigateURL]);
+        // Same allowlist as the URL bar — ?url= arrives from arbitrary
+        // links and must not smuggle javascript:/file:/data: schemes.
+        const bootURL = navigateURL && normalizeEngineURL(navigateURL);
+        if (navigateURL && !bootURL)
+          statusEl.textContent = "blocked: only http(s) URLs in ?url=";
+        if (bootURL) {
+          urlbarEl.value = bootURL;
+          statusEl.textContent = `loading ${bootURL}`;
+          Module.ccall("bib_load_url", null, ["string"], [bootURL]);
         }
       },
       print: (s) => log("out: " + s),

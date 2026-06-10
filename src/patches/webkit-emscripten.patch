@@ -1398,10 +1398,10 @@ index 9e58feb225..2b882079a9 100644
  }
  
 diff --git a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
-index 1c8e16fe23..383bc012d6 100644
+index 1c8e16fe23..479997e2ff 100644
 --- a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
 +++ b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
-@@ -114,10 +114,40 @@ void ImageFrameWorkQueue::dispatch(const Request& request)
+@@ -114,10 +114,43 @@ void ImageFrameWorkQueue::dispatch(const Request& request)
  {
      ASSERT(isMainThread());
  
@@ -1415,11 +1415,14 @@ index 1c8e16fe23..383bc012d6 100644
 +    // (stop() clears decodeQueue, which voids in-flight requests). The
 +    // decode is synchronous on the only thread — jank is inherent here.
 +    // m_workQueue stays null, so isDecodingWorkQueueIdle() remains true.
-+    decodeQueue().append(request);
-+
++    // Decoder check BEFORE the append: a request appended with no decoder
++    // has no delivery callback, and a stale head entry blocks every later
++    // first()==request delivery for this source (Codex 2026-06-10).
 +    RefPtr decoder = protectedSource()->decoder();
 +    if (!decoder)
 +        return;
++
++    decodeQueue().append(request);
 +
 +    callOnMainThread([protectedThis = Ref { *this }, protectedSource = this->protectedSource(), protectedDecoder = decoder.releaseNonNull(), request] () mutable {
 +        if (protectedSource.ptr() != protectedThis->m_source.get())
