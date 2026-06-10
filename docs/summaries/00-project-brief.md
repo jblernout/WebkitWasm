@@ -139,9 +139,37 @@ Key properties:
   - [ ] Deferred to later phases: images (need resource loading — Phase 4
     loader), full CSS fidelity audit, smooth scrolling (needs a rAF-driven
     scroll-animation driver), IME/composition input.
-- [ ] **Phase 4 — Networking over Wisp**
-  - libcurl with custom socket layer → Wisp client → wisp server.
-  - http(s) page loads end-to-end; cookies + cache in OPFS.
+- [x] **Phase 4 — Networking over Wisp** (core COMPLETE 2026-06-10 ~04:50)
+  - [x] Real http(s) page loads end-to-end: FrameLoader → CachedResource →
+    BibLoaderStrategy (drives WebCore::CurlRequest directly — curl has NO
+    ResourceHandle in 2.52; the WK2 feeding interface didReceiveResponse/
+    didReceiveBuffer/didFinishLoading/didFail is the supported path) →
+    curl_multi → Emscripten SOCKFS → WispWebSocket (wisp-js, page-level
+    WebSocket dispatcher; Module.websocket.url='ws://' keeps host:port) →
+    wisp server → TCP. TLS terminates IN-ENGINE (OpenSSL + embedded
+    Mozilla CA bundle at /etc/ssl/cacert.pem).
+  - [x] Single-threaded curl: CurlRequestScheduler pumped from the main
+    RunLoop under __EMSCRIPTEN__ (self-rescheduling dispatch, one
+    non-blocking perform pass per rAF cycle); CurlRequest::runOnMainThread
+    defers via callOnMainThread so client callbacks never re-enter from
+    inside curl_multi_perform. NO pthread rebuild needed.
+  - [x] Root causes fixed (the "empty client/guard semantics" family, #4–#7):
+    EmptyFrameLoaderClient drops policy completions (navigations stall),
+    canHandleRequest()=false, canShowMIMEType()=false, committedLoad()
+    no-op (bytes never reach the parser) → BibFrameLoaderClient. Plus
+    ENABLE_FTPDIR=ON poisoned CURLOPT_PROTOCOLS_STR: curl's protocol2num
+    zeroes the allowlist then fails mid-parse on unbuilt "ftp", leaving
+    only "file" allowed → every http load died with UNSUPPORTED_PROTOCOL.
+  - [x] GATE 4 PASSED 3/3 (tools/gate4-browser-test.mjs): fetched page
+    painted, inline script in fetched page ran, wisp transport used.
+  - [x] MODERN-SITE SMOKE PASSED 4/4 (tools/smoke-modern-site.mjs):
+    https://news.ycombinator.com live — TLS stream, full page render,
+    fetched-CSS styling applied (#ff6600 header). https://example.com
+    also verified. Proof: build/smoke-modern-site.png.
+  - [ ] Deferred: cookies (CookieJarDB/OPFS), HTTP auth challenges, sync
+    XHR (cannot block single-threaded), ping/preconnect, WebSocket-in-page
+    (CurlStreamScheduler spawns a thread — untested/inert), images audit
+    (decoders linked; loader now feeds them).
 - [ ] **Phase 5 — Browser chrome**
   - Tabs, URL bar, history, loading indicators around the canvas.
 - [ ] **Phase 6 — Performance**

@@ -286,10 +286,10 @@ index 0000000000..0fc6a680f4
 +list(APPEND PAL_LIBRARIES OpenSSL::Crypto)
 diff --git a/Source/WebCore/PlatformEmscripten.cmake b/Source/WebCore/PlatformEmscripten.cmake
 new file mode 100644
-index 0000000000..16e443f4ea
+index 0000000000..8fe0edd4e4
 --- /dev/null
 +++ b/Source/WebCore/PlatformEmscripten.cmake
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,92 @@
 +# WebCore platform file for PORT=Emscripten.
 +# Structure cribbed from PlatformPlayStation.cmake / PlatformWin.cmake:
 +# curl networking + ImageDecoders + OpenSSL crypto, Skia for graphics.
@@ -298,6 +298,18 @@ index 0000000000..16e443f4ea
 +
 +include(platform/Curl.cmake)
 +include(platform/ImageDecoders.cmake)
++
++# Static libcurl's transitive deps are not carried by CMake's CURL::libcurl
++# imported target — HTTP/2 (nghttp2) and Content-Encoding: br (brotli) must
++# reach the final link explicitly.
++find_library(NGHTTP2_LIBRARY nghttp2 REQUIRED)
++find_library(BROTLIDEC_LIBRARY brotlidec REQUIRED)
++find_library(BROTLICOMMON_LIBRARY brotlicommon REQUIRED)
++list(APPEND WebCore_LIBRARIES
++    ${NGHTTP2_LIBRARY}
++    ${BROTLIDEC_LIBRARY}
++    ${BROTLICOMMON_LIBRARY}
++)
 +# platform/OpenSSL.cmake (the WebCrypto backend) is DEFERRED to Phase 4:
 +# in 2.52 those sources are written against BoringSSL (<openssl/hkdf.h>
 +# one-shot HKDF(), non-const EVP_PKEY_get0_EC_KEY, case-insensitive
@@ -341,6 +353,10 @@ index 0000000000..16e443f4ea
 +    platform/emscripten/PlatformScreenEmscripten.cpp
 +    platform/emscripten/ScrollbarThemeEmscripten.cpp
 +    platform/emscripten/ThemeEmscripten.cpp
++    platform/emscripten/UserAgentEmscripten.cpp
++
++    platform/network/emscripten/CurlSSLHandleEmscripten.cpp
++    platform/network/emscripten/NetworkStateNotifierEmscripten.cpp
 +
 +    platform/generic/KeyedDecoderGeneric.cpp
 +    platform/generic/KeyedEncoderGeneric.cpp
@@ -646,6 +662,47 @@ index 09a23e649b..d1e434fd88 100644
  
      IntPoint screenToRootView(const IntPoint& p) const final { return p; }
      IntPoint rootViewToScreen(const IntPoint& p) const final { return p; }
+diff --git a/Source/WebCore/loader/EmptyFrameLoaderClient.h b/Source/WebCore/loader/EmptyFrameLoaderClient.h
+index 5ebee25c41..4048658d09 100644
+--- a/Source/WebCore/loader/EmptyFrameLoaderClient.h
++++ b/Source/WebCore/loader/EmptyFrameLoaderClient.h
+@@ -99,9 +99,14 @@ private:
+     LocalFrame* dispatchCreatePage(const NavigationAction&, NewFrameOpenerPolicy) final;
+     void dispatchShow() final;
+ 
+-    void dispatchDecidePolicyForResponse(const ResourceResponse&, const ResourceRequest&, const String&, FramePolicyFunction&&) final;
+-    void dispatchDecidePolicyForNewWindowAction(const NavigationAction&, const ResourceRequest&, FormState*, const String&, std::optional<HitTestResult>&&, FramePolicyFunction&&) final;
+-    void dispatchDecidePolicyForNavigationAction(const NavigationAction&, const ResourceRequest&, const ResourceResponse& redirectResponse, FormState*, const String&, std::optional<NavigationIdentifier>, std::optional<HitTestResult>&&, bool, NavigationUpgradeToHTTPSBehavior, SandboxFlags, PolicyDecisionMode, FramePolicyFunction&&) final;
++    // PORT=Emscripten: policy + content-delivery callbacks are `override`,
++    // not `final` — the embedder's frame client must answer policy checks
++    // (the empty bodies drop the completion handler: navigations stall),
++    // deliver bytes to the parser (committedLoad), and admit showable MIME
++    // types. Everything else stays final.
++    void dispatchDecidePolicyForResponse(const ResourceResponse&, const ResourceRequest&, const String&, FramePolicyFunction&&) override;
++    void dispatchDecidePolicyForNewWindowAction(const NavigationAction&, const ResourceRequest&, FormState*, const String&, std::optional<HitTestResult>&&, FramePolicyFunction&&) override;
++    void dispatchDecidePolicyForNavigationAction(const NavigationAction&, const ResourceRequest&, const ResourceResponse& redirectResponse, FormState*, const String&, std::optional<NavigationIdentifier>, std::optional<HitTestResult>&&, bool, NavigationUpgradeToHTTPSBehavior, SandboxFlags, PolicyDecisionMode, FramePolicyFunction&&) override;
+     void updateSandboxFlags(SandboxFlags) final;
+     void updateOpener(std::optional<FrameIdentifier>) final;
+     void setPrinting(bool, FloatSize, FloatSize, float, AdjustViewSize) final;
+@@ -125,15 +130,15 @@ private:
+     void willReplaceMultipartContent() final;
+     void didReplaceMultipartContent() final;
+ 
+-    void committedLoad(DocumentLoader*, const SharedBuffer&) final;
++    void committedLoad(DocumentLoader*, const SharedBuffer&) override; // PORT=Emscripten (see above)
+     void finishedLoading(DocumentLoader*) final;
+ 
+     void loadStorageAccessQuirksIfNeeded() final;
+ 
+     bool shouldFallBack(const ResourceError&) const final;
+ 
+-    bool canHandleRequest(const ResourceRequest&) const final;
+-    bool canShowMIMEType(const String&) const final;
++    bool canHandleRequest(const ResourceRequest&) const override; // PORT=Emscripten (see above)
++    bool canShowMIMEType(const String&) const override; // PORT=Emscripten (see above)
+     bool canShowMIMETypeAsHTML(const String&) const final;
+     bool representationExistsForURLScheme(StringView) const final;
+     String generatedMIMETypeForURLScheme(StringView) const final;
 diff --git a/Source/WebCore/platform/Pasteboard.h b/Source/WebCore/platform/Pasteboard.h
 index 11cef75ac7..07c2bf511f 100644
 --- a/Source/WebCore/platform/Pasteboard.h
@@ -1127,6 +1184,55 @@ index 0000000000..4cb702e122
 +}
 +
 +} // namespace WebCore
+diff --git a/Source/WebCore/platform/emscripten/UserAgentEmscripten.cpp b/Source/WebCore/platform/emscripten/UserAgentEmscripten.cpp
+new file mode 100644
+index 0000000000..863d2603a0
+--- /dev/null
++++ b/Source/WebCore/platform/emscripten/UserAgentEmscripten.cpp
+@@ -0,0 +1,43 @@
++/*
++ * PORT=Emscripten user agent, cribbed from
++ * platform/playstation/UserAgentPlayStation.cpp. Claims a generic
++ * Linux/Safari UA — sites sniff aggressively and "Emscripten" in the UA
++ * would put us on every unknown-browser fallback path.
++ */
++
++#include "config.h"
++#include "UserAgent.h"
++
++#include <wtf/NeverDestroyed.h>
++#include <wtf/text/MakeString.h>
++
++namespace WebCore {
++
++static constexpr ASCIILiteral versionForUAString()
++{
++    // https://bugs.webkit.org/show_bug.cgi?id=180365
++    return "605.1.15"_s;
++}
++
++static String standardUserAgentStatic()
++{
++    // Version/X is mandatory *before* Safari/X to be a valid Safari UA. See
++    // https://bugs.webkit.org/show_bug.cgi?id=133403 for details.
++    static NeverDestroyed<String> uaStatic(makeString("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/"_s, versionForUAString(), " (KHTML, like Gecko) Version/17.0 Safari/"_s, versionForUAString()));
++    return uaStatic;
++}
++
++String standardUserAgent(const String& applicationName, const String& applicationVersion)
++{
++    if (applicationName.isEmpty())
++        return standardUserAgentStatic();
++
++    return makeString(standardUserAgentStatic(), ' ', applicationName, '/', applicationVersion.isEmpty() ? versionForUAString() : applicationVersion);
++}
++
++String standardUserAgentForURL(const URL&)
++{
++    return standardUserAgentStatic();
++}
++
++} // namespace WebCore
 diff --git a/Source/WebCore/platform/generic/KeyedDecoderGeneric.cpp b/Source/WebCore/platform/generic/KeyedDecoderGeneric.cpp
 index e4484b487f..a45573e1e5 100644
 --- a/Source/WebCore/platform/generic/KeyedDecoderGeneric.cpp
@@ -1296,6 +1402,254 @@ index 0000000000..4a0bd1177b
 +}
 +
 +} // namespace WebCore
+diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
+index d867e52909..0dae5dade1 100644
+--- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
++++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
+@@ -173,7 +173,16 @@ void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&&
+ 
+ void CurlRequest::runOnMainThread(Function<void()>&& task)
+ {
++#if defined(__EMSCRIPTEN__)
++    // Single-threaded wasm: transfer callbacks already run on the main
++    // thread, inside curl_multi_perform. ensureOnMainThread would run the
++    // client task inline — re-entering WebCore (and possibly curl itself,
++    // via cancel/pause) from inside a curl callback. Always defer to the
++    // next RunLoop cycle to keep the upstream async contract.
++    callOnMainThread(WTF::move(task));
++#else
+     ensureOnMainThread(WTF::move(task));
++#endif
+ }
+ 
+ void CurlRequest::runOnWorkerThreadIfRequired(Function<void()>&& task)
+diff --git a/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp b/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
+index 43dce2f2ad..55bd14604b 100644
+--- a/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
++++ b/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
+@@ -33,6 +33,10 @@
+ 
+ #include "CurlRequestSchedulerClient.h"
+ 
++#if defined(__EMSCRIPTEN__)
++#include <wtf/RunLoop.h>
++#endif
++
+ namespace WebCore {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(CurlRequestScheduler);
+@@ -65,6 +69,12 @@ void CurlRequestScheduler::cancel(CurlRequestSchedulerClient* client)
+         return;
+ 
+     cancelTransfer(client);
++
++#if defined(__EMSCRIPTEN__)
++    // No parked worker thread will notice the queued finalize task; make
++    // sure the main-thread pump is armed to drain it.
++    startOrWakeUpThread();
++#endif
+ }
+ 
+ void CurlRequestScheduler::callOnWorkerThread(Function<void()>&& task)
+@@ -81,6 +91,30 @@ void CurlRequestScheduler::startOrWakeUpThread()
+ {
+     ASSERT(isMainThread());
+ 
++#if defined(__EMSCRIPTEN__)
++    // Single-threaded wasm: no worker thread exists. Lazily create the
++    // multi handle, then arm a self-rescheduling RunLoop pump that makes
++    // one non-blocking pass per cycle while work is pending (the
++    // libcurl.js pattern — curl_multi over non-blocking websocket
++    // sockets never needs to block).
++    {
++        Locker locker { m_multiHandleMutex };
++        if (!m_curlMultiHandle) {
++            m_curlMultiHandle.emplace();
++            m_curlMultiHandle->setMaxConnects(m_maxConnects);
++            m_curlMultiHandle->setMaxTotalConnections(m_maxTotalConnections);
++            m_curlMultiHandle->setMaxHostConnections(m_maxHostConnections);
++        }
++    }
++
++    if (m_pumpScheduled)
++        return;
++
++    m_pumpScheduled = true;
++    RunLoop::mainSingleton().dispatch([this] {
++        pumpMainThread();
++    });
++#else
+     {
+         Locker locker { m_mutex };
+         if (m_runThread) {
+@@ -100,7 +134,41 @@ void CurlRequestScheduler::startOrWakeUpThread()
+     m_thread = Thread::create("curlThread"_s, [this] {
+         workerThread();
+     }, ThreadType::Network);
++#endif
++}
++
++#if defined(__EMSCRIPTEN__)
++void CurlRequestScheduler::pumpMainThread()
++{
++    ASSERT(isMainThread());
++
++    m_pumpScheduled = false;
++
++    executeTasks();
++
++    int activeCount = 0;
++    while (m_curlMultiHandle->perform(activeCount) == CURLM_CALL_MULTI_PERFORM) { }
++
++    while (true) {
++        int messagesInQueue = 0;
++        CURLMsg* msg = m_curlMultiHandle->readInfo(messagesInQueue);
++        if (!msg)
++            break;
++
++        ASSERT(msg->msg == CURLMSG_DONE);
++        if (auto client = m_clientMaps.inlineGet(msg->easy_handle))
++            completeTransfer(client, msg->data.result);
++    }
++
++    bool moreWork;
++    {
++        Locker locker { m_mutex };
++        moreWork = m_activeJobs.size() || m_taskQueue.size() || activeCount;
++    }
++    if (moreWork)
++        startOrWakeUpThread();
+ }
++#endif
+ 
+ void CurlRequestScheduler::wakeUpThreadIfPossible()
+ {
+@@ -138,7 +206,9 @@ void CurlRequestScheduler::stopThread()
+ 
+ void CurlRequestScheduler::executeTasks()
+ {
++#if !defined(__EMSCRIPTEN__)
+     ASSERT(!isMainThread());
++#endif
+ 
+     Vector<Function<void()>> taskQueue;
+ 
+diff --git a/Source/WebCore/platform/network/curl/CurlRequestScheduler.h b/Source/WebCore/platform/network/curl/CurlRequestScheduler.h
+index fc5b225a8b..cb78582969 100644
+--- a/Source/WebCore/platform/network/curl/CurlRequestScheduler.h
++++ b/Source/WebCore/platform/network/curl/CurlRequestScheduler.h
+@@ -61,6 +61,13 @@ private:
+ 
+     void workerThread();
+ 
++#if defined(__EMSCRIPTEN__)
++    // PORT=Emscripten is single-threaded: the multi handle is pumped from
++    // the main RunLoop (one non-blocking pass per cycle) instead of a
++    // dedicated thread parked in poll(). See CurlRequestScheduler.cpp.
++    void pumpMainThread();
++#endif
++
+     void startTransfer(CurlRequestSchedulerClient*);
+     void completeTransfer(CurlRequestSchedulerClient*, CURLcode);
+     void cancelTransfer(CurlRequestSchedulerClient*);
+@@ -77,6 +84,10 @@ private:
+     Lock m_multiHandleMutex;
+     std::optional<CurlMultiHandle> m_curlMultiHandle;
+ 
++#if defined(__EMSCRIPTEN__)
++    bool m_pumpScheduled { false };
++#endif
++
+     long m_maxConnects;
+     long m_maxTotalConnections;
+     long m_maxHostConnections;
+diff --git a/Source/WebCore/platform/network/emscripten/CurlSSLHandleEmscripten.cpp b/Source/WebCore/platform/network/emscripten/CurlSSLHandleEmscripten.cpp
+new file mode 100644
+index 0000000000..493312c0cd
+--- /dev/null
++++ b/Source/WebCore/platform/network/emscripten/CurlSSLHandleEmscripten.cpp
+@@ -0,0 +1,53 @@
++/*
++ * PORT=Emscripten CurlSSLHandle platform half, cribbed from
++ * platform/network/win/CurlSSLHandleWin.cpp (cipher/curve lists) with a
++ * MEMFS CA bundle: the embedder --embed-files a Mozilla-style bundle at
++ * /etc/ssl/cacert.pem (see src/embedder/embedder.cmake). TLS terminates
++ * inside the engine — the Wisp transport below is a plain byte pipe.
++ */
++
++#include "config.h"
++#include "CurlSSLHandle.h"
++
++#include <wtf/FileSystem.h>
++
++namespace WebCore {
++
++void CurlSSLHandle::platformInitialize()
++{
++    constexpr auto cipherList =
++        "TLS_AES_128_GCM_SHA256:"
++        "TLS_CHACHA20_POLY1305_SHA256:"
++        "TLS_AES_256_GCM_SHA384:"
++        "ECDHE-ECDSA-AES128-GCM-SHA256:"
++        "ECDHE-RSA-AES128-GCM-SHA256:"
++        "ECDHE-ECDSA-CHACHA20-POLY1305:"
++        "ECDHE-RSA-CHACHA20-POLY1305:"
++        "ECDHE-ECDSA-AES256-GCM-SHA384:"
++        "ECDHE-RSA-AES256-GCM-SHA384:"
++        "ECDHE-ECDSA-AES256-SHA:"
++        "ECDHE-ECDSA-AES128-SHA:"
++        "ECDHE-RSA-AES128-SHA:"
++        "ECDHE-RSA-AES256-SHA:"
++        "AES128-GCM-SHA256:"
++        "AES256-GCM-SHA384:"
++        "AES128-SHA:"
++        "AES256-SHA";
++
++    constexpr auto ecCurves =
++        "X25519:"
++        "P-256:"
++        "P-384:"
++        "P-521";
++
++    setCipherList(cipherList);
++    setECCurves(ecCurves);
++
++    auto caBundlePath = "/etc/ssl/cacert.pem"_s;
++    if (FileSystem::fileExists(caBundlePath))
++        setCACertPath(String { caBundlePath });
++    else
++        WTFLogAlways("CurlSSLHandle: no CA bundle at /etc/ssl/cacert.pem — all TLS verification will fail");
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/platform/network/emscripten/NetworkStateNotifierEmscripten.cpp b/Source/WebCore/platform/network/emscripten/NetworkStateNotifierEmscripten.cpp
+new file mode 100644
+index 0000000000..f66a6fffe7
+--- /dev/null
++++ b/Source/WebCore/platform/network/emscripten/NetworkStateNotifierEmscripten.cpp
+@@ -0,0 +1,22 @@
++/*
++ * PORT=Emscripten network state notifier, cribbed from
++ * platform/network/playstation/NetworkStateNotifierPlayStation.cpp.
++ * The wasm guest is "online" whenever the host tab is; report always-on.
++ * (Mirroring navigator.onLine from the host is a later refinement.)
++ */
++
++#include "config.h"
++#include "NetworkStateNotifier.h"
++
++namespace WebCore {
++
++void NetworkStateNotifier::updateStateWithoutNotifying()
++{
++    m_isOnLine = true;
++}
++
++void NetworkStateNotifier::startObserving()
++{
++}
++
++} // namespace WebCore
 diff --git a/Source/WebCore/rendering/emscripten/RenderThemeEmscripten.cpp b/Source/WebCore/rendering/emscripten/RenderThemeEmscripten.cpp
 new file mode 100644
 index 0000000000..1486ed1c71
@@ -1329,10 +1683,10 @@ index 0000000000..1486ed1c71
 +} // namespace WebCore
 diff --git a/Source/cmake/OptionsEmscripten.cmake b/Source/cmake/OptionsEmscripten.cmake
 new file mode 100644
-index 0000000000..d6bf7a8539
+index 0000000000..75382f94ee
 --- /dev/null
 +++ b/Source/cmake/OptionsEmscripten.cmake
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,150 @@
 +# PORT=Emscripten: WebCore + JavaScriptCore compiled to WebAssembly with
 +# Emscripten. Single-process WebKit1-style embedder; no WebKit2, no tools.
 +#
@@ -1388,6 +1742,12 @@ index 0000000000..d6bf7a8539
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_SKIA_ENCODERS PRIVATE OFF)
 +
 +# Optional web features: everything OFF for first bring-up.
++# FTPDIR must be OFF: with it on, CurlHandle::enableAllowedProtocols passes
++# "file,ftp,ftps,http,https" to CURLOPT_PROTOCOLS_STR — our libcurl has no
++# ftp, and curl's protocol2num() zeroes the allowlist before failing
++# mid-parse, leaving ONLY "file" allowed => every http(s) load dies with
++# CURLE_UNSUPPORTED_PROTOCOL ("Protocol \"http\" disabled").
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_FTPDIR PRIVATE OFF)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_VIDEO PRIVATE OFF)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEB_AUDIO PRIVATE OFF)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBGL PRIVATE OFF)

@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "node tools/dev-server.mjs",
-    "wisp": "wisp-js-server --host 127.0.0.1 --port 5001 --logging INFO"
+    "wisp": "wisp-js-server --host 127.0.0.1 --port 5001 --logging INFO --options '{\"allow_loopback_ips\": true, \"allow_private_ips\": true}'"
   },
   "dependencies": {
     "@mercuryworkshop/wisp-js": "0.4.1"

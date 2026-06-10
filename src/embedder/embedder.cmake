@@ -45,7 +45,9 @@ target_link_options(BibEmbedder PRIVATE
     # ccall: browser.html marshals bib_key()'s string args. stringToUTF8/
     # lengthBytesUTF8: main.cpp reads Module.bibHTML inside EM_ASM — export
     # forces them into the runtime so the EM_ASM block can call them.
-    "SHELL:-sEXPORTED_RUNTIME_METHODS=FS,HEAPU8,ccall,stringToUTF8,lengthBytesUTF8"
+    # ENV: lets the host page set engine env vars in preRun (e.g.
+    # DEBUG_CURL=1 turns on libcurl verbose tracing -> printErr).
+    "SHELL:-sEXPORTED_RUNTIME_METHODS=FS,HEAPU8,ccall,stringToUTF8,lengthBytesUTF8,ENV"
     # Surface the COMPLETE undefined-symbol list per link attempt instead of
     # wasm-ld's default 20-error cutoff — each stub iteration costs minutes.
     "SHELL:-Wl,--error-limit=0"
@@ -68,4 +70,11 @@ endif ()
 if (BIB_FONTS_DIR)
     target_link_options(BibEmbedder PRIVATE
         "SHELL:--embed-file ${BIB_FONTS_DIR}@/usr/share/fonts")
+endif ()
+
+# CA bundle for in-engine TLS verification (Phase 4) — the path is
+# compiled into CurlSSLHandleEmscripten.cpp.
+if (BIB_CA_BUNDLE)
+    target_link_options(BibEmbedder PRIVATE
+        "SHELL:--embed-file ${BIB_CA_BUNDLE}@/etc/ssl/cacert.pem")
 endif ()

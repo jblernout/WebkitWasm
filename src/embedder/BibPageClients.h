@@ -19,17 +19,21 @@
 #pragma once
 
 #include "Document.h"
+#include "DocumentLoader.h"
 #include "Editor.h"
 #include "EditorClient.h"
 #include "EmptyClients.h"
+#include "EmptyFrameLoaderClient.h"
 #include "EventNames.h"
 #include "FrameDestructionObserverInlines.h" // inline FrameDestructionObserver::frame()
 #include "KeyboardEvent.h"
 #include "LocalFrame.h"
+#include "MIMETypeRegistry.h"
 #include "Node.h"
 #include "NodeDocument.h" // inline Node::document()
 #include "PlatformKeyboardEvent.h"
 #include "TextCheckerClient.h"
+#include "UserAgent.h"
 #include <wtf/text/WTFString.h>
 
 namespace BIB {
@@ -212,6 +216,56 @@ private:
     };
 
     BibTextCheckerClient m_textCheckerClient;
+};
+
+// BibFrameLoaderClient (Phase 4 networking): EmptyFrameLoaderClient with the
+// four "silently dead" load gates fixed (each relaxed final->override in
+// EmptyFrameLoaderClient.h, patch ledger):
+//   1. policy checks — the empty bodies DROP the FramePolicyFunction, so
+//      every navigation stalls forever waiting for a decision;
+//   2. canHandleRequest() == false — PolicyChecker refuses every URL;
+//   3. canShowMIMEType() == false — content policy rejects every response;
+//   4. committedLoad() empty — response bytes never reach the parser.
+class BibFrameLoaderClient final : public WebCore::EmptyFrameLoaderClient {
+public:
+    explicit BibFrameLoaderClient(WebCore::FrameLoader& frameLoader)
+        : WebCore::EmptyFrameLoaderClient(frameLoader)
+    {
+    }
+
+private:
+    void dispatchDecidePolicyForNavigationAction(const WebCore::NavigationAction&, const WebCore::ResourceRequest&, const WebCore::ResourceResponse&, WebCore::FormState*, const String&, std::optional<WebCore::NavigationIdentifier>, std::optional<WebCore::HitTestResult>&&, bool, WebCore::NavigationUpgradeToHTTPSBehavior, WebCore::SandboxFlags, WebCore::PolicyDecisionMode, WebCore::FramePolicyFunction&& function) final
+    {
+        function(WebCore::PolicyAction::Use);
+    }
+
+    void dispatchDecidePolicyForResponse(const WebCore::ResourceResponse&, const WebCore::ResourceRequest&, const String&, WebCore::FramePolicyFunction&& function) final
+    {
+        function(WebCore::PolicyAction::Use);
+    }
+
+    void dispatchDecidePolicyForNewWindowAction(const WebCore::NavigationAction&, const WebCore::ResourceRequest&, WebCore::FormState*, const String&, std::optional<WebCore::HitTestResult>&&, WebCore::FramePolicyFunction&& function) final
+    {
+        // Single-page embedder: no new windows.
+        function(WebCore::PolicyAction::Ignore);
+    }
+
+    bool canHandleRequest(const WebCore::ResourceRequest&) const final { return true; }
+
+    bool canShowMIMEType(const String& mimeType) const final
+    {
+        return WebCore::MIMETypeRegistry::canShowMIMEType(mimeType);
+    }
+
+    void committedLoad(WebCore::DocumentLoader* loader, const WebCore::SharedBuffer& data) final
+    {
+        loader->commitData(data);
+    }
+
+    String userAgent(const URL&) const final
+    {
+        return WebCore::standardUserAgent();
+    }
 };
 
 } // namespace BIB

@@ -22,6 +22,9 @@
   </p>
   <canvas id="screen" width="800" height="600" tabindex="0"></canvas>
   <pre id="log"></pre>
+  <!-- wisp-js client polyfill (global `wisp_client`), vendored from
+       node_modules/@mercuryworkshop/wisp-js@0.4.1/dist/wisp-client.js -->
+  <script src="vendor/wisp-client.js"></script>
   <script>
     document.getElementById("coi").textContent = String(globalThis.crossOriginIsolated);
     const logEl = document.getElementById("log");
@@ -41,7 +44,33 @@
     // verdict computed on frame 0 — used by gate2-browser-test.mjs).
     // Default is the interactive Phase 3 page (script ON, driven by
     // gate3-browser-test.mjs through real input).
-    const demo = new URLSearchParams(location.search).get("demo") ?? "interactive";
+    // ?url=http://... navigates to a REAL page over Wisp once the engine is
+    // live (Phase 4).
+    const params = new URLSearchParams(location.search);
+    const demo = params.get("demo") ?? "interactive";
+    const navigateURL = params.get("url");
+
+    // --- Wisp transport (Phase 4) ---------------------------------------
+    // The engine's BSD sockets surface as SOCKFS WebSockets. With
+    // Module.websocket.url = 'ws://', SOCKFS builds exactly
+    // 'ws://<host>:<port>/' — the destination hostname survives, because
+    // Emscripten maps its fake DNS IPs back via DNS.lookup_addr before
+    // connect. The dispatcher reroutes those URLs onto Wisp streams
+    // (one shared mux connection per wisp endpoint); everything else gets
+    // the page's native WebSocket. TLS terminates inside the engine — the
+    // Wisp stream is a plain byte pipe.
+    const wispServer = params.get("wisp") ?? "ws://127.0.0.1:5001/";
+    const NativeWebSocket = window.WebSocket;
+    const sockfsURL = /^ws:\/\/([^:/]+):(\d+)\/$/;
+    window.WebSocket = function (url, protocols) {
+      const m = sockfsURL.exec(url);
+      if (m) {
+        log(`wisp: stream -> ${m[1]}:${m[2]}`);
+        return new wisp_client.client.WispWebSocket(`${wispServer}${m[1]}:${m[2]}`);
+      }
+      return new NativeWebSocket(url, protocols);
+    };
+    window.WebSocket.prototype = NativeWebSocket.prototype;
 
     // MUST stay byte-identical to kTestHTML in src/embedder/main.cpp so the
     // browser pixel counts match the offscreen gate exactly.
@@ -205,9 +234,15 @@
     window.Module = {
       bibInteractive: true,
       bibHTML: demo === "hello" ? helloHTML : demo === "scripttest" ? scriptTestHTML : interactiveHTML,
+      // SOCKFS websocket config: bare prefix => 'ws://<host>:<port>/',
+      // which the dispatcher above reroutes onto Wisp streams.
+      websocket: { url: "ws://", subprotocol: "binary" },
       preRun: [function () {
         // fontconfig's compiled-in cache dir must exist in MEMFS.
         Module.FS.mkdirTree("/var/cache/fontconfig");
+        // ?curldebug=1 -> libcurl verbose tracing via printErr.
+        if (params.get("curldebug"))
+          Module.ENV.DEBUG_CURL = "1";
       }],
       // Called from C right before emscripten_exit_with_live_runtime() —
       // the engine page is loaded, laid out, and painted once.
@@ -217,6 +252,10 @@
         wireInput();
         canvas.focus();
         requestAnimationFrame(blitLoop);
+        if (navigateURL) {
+          statusEl.textContent = `loading ${navigateURL}`;
+          Module.ccall("bib_load_url", null, ["string"], [navigateURL]);
+        }
       },
       print: (s) => log("out: " + s),
       printErr: (s) => log("err: " + s),

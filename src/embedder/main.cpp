@@ -25,6 +25,7 @@
 #include "EmptyClients.h"
 #include "EventHandler.h"
 #include "FocusController.h"
+#include "FrameLoadRequest.h"
 #include "FrameLoader.h"
 #include "GraphicsContextSkia.h"
 #include "HandleUserInputEventResult.h"
@@ -37,6 +38,7 @@
 #include "PlatformMouseEvent.h"
 #include "PlatformWheelEvent.h"
 #include "RenderTreeAsText.h"
+#include "ResourceRequest.h"
 #include "ScriptController.h"
 #include "ScrollAnimator.h"
 #include "ScrollingCoordinatorTypes.h" // WheelEventProcessingSteps
@@ -253,6 +255,18 @@ EMSCRIPTEN_KEEPALIVE void bib_scroll_to(int y)
     g_engine->frameView->setScrollPosition(WebCore::ScrollPosition(0, y));
 }
 
+// Phase 4: real navigation. Drives FrameLoader::load -> DocumentLoader ->
+// CachedResourceLoader -> EmbedderLoaderStrategy -> CurlRequest -> Wisp.
+EMSCRIPTEN_KEEPALIVE void bib_load_url(const char* url)
+{
+    if (!g_engine)
+        return;
+    WebCore::ResourceRequest request { URL { String::fromUTF8(url) } };
+    WebCore::FrameLoadRequest frameLoadRequest { *g_engine->mainFrame, WTF::move(request) };
+    printf("EMBEDDER: loading %s\n", url);
+    g_engine->mainFrame->loader().load(WTF::move(frameLoadRequest));
+}
+
 // type: 0 = RawKeyDown, 1 = KeyUp, 2 = Char. Strings are UTF-8 (use ccall).
 // text is only meaningful for Char events.
 EMSCRIPTEN_KEEPALIVE int bib_key(int type, const char* key, const char* code, const char* text, int windowsVirtualKeyCode, int isAutoRepeat, int modifierBits)
@@ -296,8 +310,15 @@ int main()
     // blocking ALL script regardless of Settings::setScriptEnabled. Clear
     // them for the interactive embedder; gate mode keeps SVG semantics.
     if (interactive) {
-        if (auto* localParams = std::get_if<WebCore::PageConfiguration::LocalMainFrameCreationParameters>(&pageConfiguration.mainFrameCreationParameters))
+        if (auto* localParams = std::get_if<WebCore::PageConfiguration::LocalMainFrameCreationParameters>(&pageConfiguration.mainFrameCreationParameters)) {
             localParams->effectiveSandboxFlags = { };
+            // Phase 4: the empty frame client silently kills real loads four
+            // ways (dropped policy completions, canHandleRequest=false,
+            // canShowMIMEType=false, committedLoad no-op) — install ours.
+            localParams->clientCreator = [](auto&, auto& frameLoader) -> UniqueRef<WebCore::LocalFrameLoaderClient> {
+                return WTF::makeUniqueRefWithoutRefCountedCheck<BIB::BibFrameLoaderClient>(frameLoader);
+            };
+        }
     }
     auto page = WebCore::Page::create(WTF::move(pageConfiguration));
     // Script stays OFF in gate mode so the offscreen pixel gate is

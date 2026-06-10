@@ -39,10 +39,20 @@ if [ ! -f "$FSROOT/fonts/DejaVuSans.ttf" ] \
   echo "FONT STAGING: OK ($CONFD_COUNT conf.d files)"
 fi
 
+# CA bundle for in-engine TLS (Phase 4): curl/OpenSSL verify against
+# /etc/ssl/cacert.pem in MEMFS (CurlSSLHandleEmscripten.cpp). Staged from
+# the host's system bundle.
+if [ ! -f "$FSROOT/ssl/cacert.pem" ]; then
+  mkdir -p "$FSROOT/ssl"
+  cp -f /etc/ssl/certs/ca-certificates.crt "$FSROOT/ssl/cacert.pem"
+  echo "CA BUNDLE STAGING: OK ($(du -h "$FSROOT/ssl/cacert.pem" | cut -f1))"
+fi
+
 EMBEDDER_FLAGS=(
   -DEMSCRIPTEN_EMBEDDER_CMAKE="$ROOT/src/embedder/embedder.cmake"
   -DBIB_FONTCONFIG_ETC_DIR="$FSROOT/etc-fonts"
   -DBIB_FONTS_DIR="$FSROOT/fonts"
+  -DBIB_CA_BUNDLE="$FSROOT/ssl/cacert.pem"
 )
 
 if [ ! -f "$BUILD/build.ninja" ]; then
@@ -68,7 +78,9 @@ else
     entry="${flag#-D}" # NAME=VALUE
     name="${entry%%=*}"
     want="${entry#*=}"
-    have=$(rg -m1 "^${name}:" "$BUILD/CMakeCache.txt" 2>/dev/null | sed 's/^[^=]*=//')
+    # `|| true`: a flag NEW to the cache makes rg exit 1 on no-match, which
+    # set -e + pipefail would turn into a silent script death.
+    have=$(rg -m1 "^${name}:" "$BUILD/CMakeCache.txt" 2>/dev/null | sed 's/^[^=]*=//' || true)
     if [ "$have" != "$want" ]; then
       NEED_RECONFIG=1
       break

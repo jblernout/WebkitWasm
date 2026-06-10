@@ -1,25 +1,43 @@
-// PlatformStrategies for the Phase 2 embedder. WebCore requires one to be
-// installed before any load completes (FrameLoader::pageLoadCompleted and
+// PlatformStrategies for the embedder. WebCore requires one to be installed
+// before any load completes (FrameLoader::pageLoadCompleted and
 // CachedResourceLoader::servePendingRequests dereference the loader strategy
-// unconditionally). Everything here is offline: subresource loads fail
-// cleanly, the network is permanently "offline". The Wisp/curl-backed
-// strategy replaces the loader half in Phase 4.
+// unconditionally).
 //
-// Shape cribbed from WebKit/NetworkProcess/NetworkProcessPlatformStrategies
-// (the most minimal in-tree implementation), with a real LoaderStrategy
-// because ours actually gets called.
+// Phase 4: the loader strategy is REAL — every load is driven by
+// WebCore::CurlRequest (the engine that WebKit2's NetworkDataTaskCurl wraps;
+// there is no curl ResourceHandle in 2.52, its start() is
+// ASSERT_NOT_REACHED on USE(CURL) ports). Shape:
+//   loadResource -> SubresourceLoader::create -> BibResourceLoad(CurlRequest)
+//   CurlRequestClient callbacks -> ResourceLoader::didReceiveResponse /
+//   didReceiveBuffer / didFinishLoading / didFail — the same public feeding
+//   interface WebKit2's WebResourceLoader uses.
+// data: URLs go through loader->start(), which handles them before the
+// (unreachable-on-curl) ResourceHandle path.
+//
+// Not yet implemented (documented gaps, revisit with cookies/auth work):
+// cookies, HTTP auth challenges (401 renders as the error body), sync XHR,
+// ping loads, preconnect.
 
 #include "config.h"
 
+#include "CurlRequest.h"
+#include "CurlRequestClient.h"
+#include "CurlResponse.h"
+#include "HTTPHeaderNames.h"
 #include "LoaderStrategy.h"
 #include "MediaStrategy.h"
+#include "NetworkLoadMetrics.h"
+#include "NetworkStateNotifier.h"
 #include "PasteboardStrategy.h"
 #include "PlatformStrategies.h"
 #include "ResourceError.h"
+#include "ResourceLoader.h"
 #include "ResourceLoaderIdentifier.h"
 #include "ResourceRequest.h"
 #include "ResourceResponse.h"
 #include "SubresourceLoader.h"
+#include "UserAgent.h"
+#include <wtf/HashMap.h>
 #include <wtf/NeverDestroyed.h>
 
 namespace BIB {
@@ -32,22 +50,251 @@ static const String& embedderErrorDomain()
     return domain;
 }
 
-class EmbedderLoaderStrategy final : public LoaderStrategy {
-    void loadResource(LocalFrame&, CachedResource&, ResourceRequest&&, const ResourceLoaderOptions&, CompletionHandler<void(RefPtr<SubresourceLoader>&&)>&& completionHandler) final
+// Drives ONE ResourceLoader through one (or, across redirects, several)
+// CurlRequest. A stripped-down NetworkDataTaskCurl: no credential storage,
+// no cookie jar, no downloads, no auth restarts.
+class BibResourceLoad final : public RefCounted<BibResourceLoad>, public CurlRequestClient {
+public:
+    static Ref<BibResourceLoad> create(ResourceLoader& loader, Function<void(BibResourceLoad&)>&& doneCallback)
     {
-        completionHandler(nullptr);
+        return adoptRef(*new BibResourceLoad(loader, WTF::move(doneCallback)));
+    }
+
+    void ref() const final { RefCounted::ref(); }
+    void deref() const final { RefCounted::deref(); }
+
+    ResourceLoader* loader() const { return m_loader.get(); }
+
+    void start()
+    {
+        m_curlRequest = createCurlRequest(ResourceRequest { m_loader->request() });
+        m_curlRequest->resume();
+    }
+
+    // Idempotent; also reached re-entrantly via LoaderStrategy::remove()
+    // when didFinishLoading/didFail release the loader's resources.
+    void cancel()
+    {
+        m_loader = nullptr;
+        if (auto curlRequest = std::exchange(m_curlRequest, nullptr)) {
+            curlRequest->cancel();
+            curlRequest->invalidateClient();
+        }
+    }
+
+private:
+    BibResourceLoad(ResourceLoader& loader, Function<void(BibResourceLoad&)>&& doneCallback)
+        : m_loader(&loader)
+        , m_doneCallback(WTF::move(doneCallback))
+    {
+    }
+
+    Ref<CurlRequest> createCurlRequest(ResourceRequest&& request)
+    {
+        // No FrameLoaderClient supplies a UA on this embedder; sites
+        // misbehave badly with an empty one.
+        if (request.httpUserAgent().isEmpty())
+            request.setHTTPUserAgent(standardUserAgent());
+        return CurlRequest::create(request, *this);
+    }
+
+    void notifyDone()
+    {
+        if (auto doneCallback = std::exchange(m_doneCallback, nullptr))
+            doneCallback(*this);
+    }
+
+    bool shouldRedirect() const
+    {
+        auto statusCode = m_response.httpStatusCode();
+        if (statusCode < 300 || statusCode >= 400)
+            return false;
+        // Some 3xx status codes aren't actually redirects.
+        if (statusCode == 300 || statusCode == 304 || statusCode == 305 || statusCode == 306)
+            return false;
+        return !m_response.httpHeaderField(HTTPHeaderName::Location).isEmpty();
+    }
+
+    bool shouldRedirectAsGET(const ResourceRequest& request, bool crossOrigin) const
+    {
+        if (request.httpMethod() == "GET"_s || request.httpMethod() == "HEAD"_s)
+            return false;
+        if (!request.url().protocolIsInHTTPFamily())
+            return true;
+        if (m_response.isSeeOther())
+            return true;
+        if ((m_response.isMovedPermanently() || m_response.isFound()) && (request.httpMethod() == "POST"_s))
+            return true;
+        if (crossOrigin && (request.httpMethod() == "DELETE"_s))
+            return true;
+        return false;
+    }
+
+    void performRedirect()
+    {
+        static const int maxRedirects = 20;
+        if (m_redirectCount++ > maxRedirects) {
+            didFailInternal(ResourceError(CURLE_TOO_MANY_REDIRECTS, m_response.url()));
+            return;
+        }
+
+        URL redirectedURL { m_response.url(), m_response.httpHeaderField(HTTPHeaderName::Location) };
+        ResourceRequest request = m_loader->request();
+        if (!redirectedURL.hasFragmentIdentifier() && request.url().hasFragmentIdentifier())
+            redirectedURL.setFragmentIdentifier(request.url().fragmentIdentifier());
+
+        bool isCrossOrigin = !protocolHostAndPortAreEqual(request.url(), redirectedURL);
+        request.setURL(WTF::move(redirectedURL));
+
+        if (!equalLettersIgnoringASCIICase(request.httpMethod(), "get"_s)) {
+            if (!request.url().protocolIsInHTTPFamily() || shouldRedirectAsGET(request, isCrossOrigin)) {
+                request.setHTTPMethod("GET"_s);
+                request.setHTTPBody(nullptr);
+                request.clearHTTPContentType();
+            }
+        }
+
+        request.removeCredentials();
+        if (isCrossOrigin) {
+            request.clearHTTPAuthorization();
+            request.clearHTTPOrigin();
+        }
+
+        ResourceResponse redirectResponse { m_response };
+        m_loader->willSendRequest(WTF::move(request), redirectResponse, [this, protectedThis = Ref { *this }](ResourceRequest&& newRequest) {
+            if (newRequest.isNull() || !m_loader)
+                return;
+            if (auto curlRequest = std::exchange(m_curlRequest, nullptr)) {
+                curlRequest->cancel();
+                curlRequest->invalidateClient();
+            }
+            m_curlRequest = createCurlRequest(WTF::move(newRequest));
+            m_curlRequest->resume();
+        });
+    }
+
+    void didFailInternal(const ResourceError& error)
+    {
+        RefPtr loader = m_loader;
+        notifyDone(); // removes the registry ref; didFail re-enters remove() harmlessly
+        if (loader)
+            loader->didFail(error);
+    }
+
+    // CurlRequestClient — all callbacks arrive on the main thread via
+    // callOnMainThread (never from inside curl_multi_perform; see the
+    // CurlRequest::runOnMainThread Emscripten patch).
+    void curlDidSendData(CurlRequest&, unsigned long long bytesSent, unsigned long long totalBytesToBeSent) final
+    {
+        Ref protectedThis { *this };
+        if (m_loader)
+            m_loader->didSendData(bytesSent, totalBytesToBeSent);
+    }
+
+    void curlDidReceiveResponse(CurlRequest& request, CurlResponse&& curlResponse) final
+    {
+        Ref protectedThis { *this };
+        if (!m_loader || m_curlRequest != &request)
+            return;
+
+        m_response = ResourceResponse(curlResponse);
+
+        if (shouldRedirect()) {
+            performRedirect();
+            return;
+        }
+
+        m_loader->didReceiveResponse(ResourceResponse { m_response }, [this, protectedThis = Ref { *this }] {
+            if (m_curlRequest && m_loader)
+                m_curlRequest->completeDidReceiveResponse();
+        });
+    }
+
+    void curlDidReceiveData(CurlRequest& request, Ref<SharedBuffer>&& buffer) final
+    {
+        Ref protectedThis { *this };
+        if (!m_loader || m_curlRequest != &request)
+            return;
+        long long size = buffer->size();
+        m_loader->didReceiveBuffer(buffer.get(), size, DataPayloadBytes);
+    }
+
+    void curlDidComplete(CurlRequest& request, NetworkLoadMetrics&& metrics) final
+    {
+        Ref protectedThis { *this };
+        if (!m_loader || m_curlRequest != &request)
+            return;
+        RefPtr loader = m_loader;
+        notifyDone();
+        loader->didFinishLoading(metrics);
+    }
+
+    void curlDidFailWithError(CurlRequest& request, ResourceError&& error, CertificateInfo&&) final
+    {
+        Ref protectedThis { *this };
+        // Failures are easy to lose in a canvas-only embedder — always log.
+        WTFLogAlways("BIB: load failed curl=%d %s (%s)", error.errorCode(), error.failingURL().string().utf8().data(), error.localizedDescription().utf8().data());
+        if (!m_loader || m_curlRequest != &request)
+            return;
+        didFailInternal(error);
+    }
+
+    RefPtr<ResourceLoader> m_loader;
+    RefPtr<CurlRequest> m_curlRequest;
+    Function<void(BibResourceLoad&)> m_doneCallback;
+    ResourceResponse m_response;
+    int m_redirectCount { 0 };
+};
+
+class EmbedderLoaderStrategy final : public LoaderStrategy {
+public:
+    void scheduleLoad(ResourceLoader& loader)
+    {
+        // ResourceLoader::start() handles data: URLs internally, before the
+        // ResourceHandle path (which is unreachable on curl ports).
+        if (loader.request().url().protocolIsData()) {
+            loader.start();
+            return;
+        }
+
+        auto load = BibResourceLoad::create(loader, [this](BibResourceLoad& load) {
+            if (auto* loader = load.loader())
+                m_loads.remove(loader);
+        });
+        m_loads.set(&loader, load.copyRef());
+        load->start();
+    }
+
+private:
+    void loadResource(LocalFrame& frame, CachedResource& resource, ResourceRequest&& request, const ResourceLoaderOptions& options, CompletionHandler<void(RefPtr<SubresourceLoader>&&)>&& completionHandler) final
+    {
+        SubresourceLoader::create(frame, resource, WTF::move(request), options, [this, completionHandler = WTF::move(completionHandler)](RefPtr<SubresourceLoader>&& loader) mutable {
+            if (loader)
+                scheduleLoad(*loader);
+            completionHandler(WTF::move(loader));
+        });
     }
 
     void loadResourceSynchronously(FrameLoader&, ResourceLoaderIdentifier, const ResourceRequest& request, ClientCredentialPolicy, const FetchOptions&, const HTTPHeaderMap&, ResourceError& error, ResourceResponse&, Vector<uint8_t>&) final
     {
-        error = ResourceError(embedderErrorDomain(), 0, request.url(), "Offline embedder: no synchronous loads"_s);
+        // Single-threaded build cannot block on the network. Sync XHR fails.
+        error = ResourceError(embedderErrorDomain(), 0, request.url(), "Synchronous loads are not supported in this embedder"_s);
     }
 
     void pageLoadCompleted(Page&) final { }
     void browsingContextRemoved(LocalFrame&) final { }
 
-    void remove(ResourceLoader*) final { }
-    void setDefersLoading(ResourceLoader&, bool) final { }
+    void remove(ResourceLoader* loader) final
+    {
+        if (auto load = m_loads.take(loader))
+            load->cancel();
+    }
+
+    void setDefersLoading(ResourceLoader&, bool) final
+    {
+        // CurlRequest has no pause-after-start; defers is best-effort here.
+    }
+
     void crossOriginRedirectReceived(ResourceLoader*, const URL&) final { }
 
     void servePendingRequests(ResourceLoadPriority) final { }
@@ -57,23 +304,30 @@ class EmbedderLoaderStrategy final : public LoaderStrategy {
     void startPingLoad(LocalFrame&, ResourceRequest& request, const HTTPHeaderMap&, const FetchOptions&, ContentSecurityPolicyImposition, PingLoadCompletionHandler&& completionHandler) final
     {
         if (completionHandler)
-            completionHandler(ResourceError(embedderErrorDomain(), 0, request.url(), "Offline embedder: no ping loads"_s), { });
+            completionHandler(ResourceError(embedderErrorDomain(), 0, request.url(), "Ping loads are not supported yet"_s), { });
     }
 
     void preconnectTo(FrameLoader&, ResourceRequest&& request, StoredCredentialsPolicy, ShouldPreconnectAsFirstParty, PreconnectCompletionHandler&& completionHandler) final
     {
         if (completionHandler)
-            completionHandler(ResourceError(embedderErrorDomain(), 0, request.url(), "Offline embedder: no preconnect"_s));
+            completionHandler(ResourceError(embedderErrorDomain(), 0, request.url(), "Preconnect is not supported yet"_s));
     }
 
     void setCaptureExtraNetworkLoadMetricsEnabled(bool) final { }
 
-    bool isOnLine() const final { return false; }
-    void addOnlineStateChangeListener(Function<void(bool)>&&) final { }
-
-    void isResourceLoadFinished(CachedResource&, CompletionHandler<void(bool)>&& callback) final
+    bool isOnLine() const final { return true; }
+    void addOnlineStateChangeListener(Function<void(bool)>&& listener) final
     {
-        callback(true);
+        NetworkStateNotifier::singleton().addListener(WTF::move(listener));
+    }
+
+    void isResourceLoadFinished(CachedResource& resource, CompletionHandler<void(bool)>&& callback) final
+    {
+        if (!resource.loader()) {
+            callback(true);
+            return;
+        }
+        callback(!m_loads.contains(resource.loader()));
     }
 
     ResourceError cancelledError(const ResourceRequest& request) const final
@@ -116,6 +370,8 @@ class EmbedderLoaderStrategy final : public LoaderStrategy {
     {
         return ResourceError(embedderErrorDomain(), 0, response.url(), "Plugin will handle load"_s);
     }
+
+    HashMap<ResourceLoader*, Ref<BibResourceLoad>> m_loads;
 };
 
 class EmbedderMediaStrategy final : public MediaStrategy {
@@ -143,7 +399,7 @@ class EmbedderPlatformStrategies final : public PlatformStrategies {
 
     BlobRegistry* createBlobRegistry() final
     {
-        // No blob URLs in the offline gate; revisit with networking (Phase 4).
+        // No blob URLs yet; revisit with fetch/XHR hardening.
         return nullptr;
     }
 };

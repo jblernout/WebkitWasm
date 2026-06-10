@@ -1,0 +1,90 @@
+# Handoff — Phase 5: browser chrome + Phase 4 leftovers (the ONE active handoff)
+
+**Written**: 2026-06-10 ~04:55 EDT, right after Phase 4 core completed.
+**Supersedes**: handoff-2026-06-10-phase4-networking.md (→ docs/archive/).
+
+## State (Phase 4 core COMPLETE — all gates green)
+- **THE ENGINE BROWSES THE REAL WEB.** GATE 4 3/3 + MODERN-SITE SMOKE 4/4:
+  https://news.ycombinator.com fetched live over Wisp, TLS terminated
+  in-engine (OpenSSL + CA bundle), CSS subresource applied (#ff6600
+  header), full page painted. Proof: build/smoke-modern-site.png,
+  build/https-test.png (example.com). Offscreen/gate2/gate3 unregressed.
+- **Load pipeline**: bib_load_url(url) → FrameLoader::load →
+  BibFrameLoaderClient (policy Use, committedLoad→commitData) →
+  CachedResource → BibLoaderStrategy::loadResource → SubresourceLoader →
+  BibResourceLoad (CurlRequestClient; redirects ≤20, GET-conversion,
+  cross-origin header stripping) → CurlRequest → CurlRequestScheduler
+  (main-thread pump under __EMSCRIPTEN__) → SOCKFS → page WebSocket
+  dispatcher → WispWebSocket (web/vendor/wisp-client.js, wisp-js 0.4.1)
+  → wisp server. data: URLs → loader->start() (pre-ResourceHandle path).
+- **Run the stack** (three processes):
+  - `node tools/dev-server.mjs web --mount /engine=build/webcore/bin`
+  - `npm run wisp` (wisp-js-server on 5001, loopback/private allowed — DEV
+    ONLY setting, an SSRF hole on anything public)
+  - open `http://127.0.0.1:8080/browser.html?url=https://...`
+    (`&curldebug=1` → libcurl verbose to the page log… NOTE: only in
+    non-NDEBUG builds; release ignores it)
+- Gates: tools/run-embedder.cjs, gate2/gate3/gate4-browser-test.mjs,
+  smoke-modern-site.mjs (parameterized: `node tools/smoke-modern-site.mjs
+  https://any-site/`).
+- WebKit patch ledger 1851 lines (src/patches/webkit-emscripten.patch),
+  includes: CurlRequestScheduler pump, CurlRequest::runOnMainThread defer,
+  EmptyFrameLoaderClient.h final→override ×5, ENABLE_FTPDIR=OFF
+  (OptionsEmscripten), CurlSSLHandle/NetworkStateNotifier/UserAgent
+  Emscripten platform files, EmptyClients.h scroll-damage overrides,
+  ScrollAnimator guard-join, PlatformKeyboardEvent half.
+
+## Phase 4 root causes (memory playbook "Networking root causes" has detail)
+1. EmptyFrameLoaderClient: policy completions DROPPED, canHandleRequest
+   false, canShowMIMEType false, committedLoad no-op → 4 silent kills.
+2. ENABLE_FTPDIR=ON → CURLOPT_PROTOCOLS_STR "file,ftp,…" → curl
+   protocol2num zeroes allowlist, fails mid-parse on unbuilt ftp → only
+   "file" allowed → http "Unsupported protocol". Port option now OFF
+   (cache override needed on existing build dirs: -DENABLE_FTPDIR=OFF).
+3. curl ResourceHandle does not exist in 2.52 (start() asserts) — loader
+   strategies MUST intercept; ResourceLoader's public feeding interface
+   is the supported WK2-style path.
+
+## NEXT: Phase 5 — browser chrome (plain web dev)
+1. URL bar + go button + loading state in web/browser.html (bib_load_url
+   already exported; add bib_stop/bib_reload? FrameLoader has
+   stopAllLoaders/reload).
+2. Title/URL/progress callbacks: BibFrameLoaderClient overrides
+   (dispatchDidReceiveTitle, dispatchDidStartProvisionalLoad,
+   dispatchDidFinishLoad...) → EM_ASM → host page events. Note: most
+   dispatch* on EmptyFrameLoaderClient are final — relax as needed
+   (established pattern).
+3. Link navigation policy: clicks already navigate same-frame? (policy
+   Use). New-window actions are Ignored — decide target=_blank handling.
+4. History (back/forward): BackForwardClient is EmptyBackForwardClient
+   (capacity 0) — needs a real in-memory BackForwardList for back/forward.
+
+## Phase 4 leftovers (pick up opportunistically)
+- Images: decoders linked + loader live — verify <img> renders, add to a
+  gate (HN renders its gif arrows? grayarrow2x.gif didn't obviously show).
+- Cookies: CookieJarDB (sqlite, linked) — NetworkStorageSession wiring +
+  persistence later (OPFS). Many sites need cookies to behave.
+- HTTP auth (401/407), sync XHR (blocked on single-thread — document as
+  unsupported), ping/preconnect completions are error-stubs.
+- WebSocket-in-page: CurlStreamScheduler::createThreadIfNoCurrentThread
+  spawns a Thread — will trap/misbehave; needs the same main-thread-pump
+  treatment if/when needed.
+- Scheduler pump idles at rAF cadence (~60 pumps/s during load) — fine
+  for now; event-driven wakeup (socket callbacks) is a perf-phase item.
+
+## Known traps (carried forward)
+- Empty-client semantics bite SILENTLY. Before suspecting wasm, check
+  what pageConfigurationWithEmptyClients installed (sandbox flags, final
+  no-op methods, false gates, dropped completion handlers). Seven root
+  causes so far were all this family.
+- WTFLogAlways probes (printErr) inside WebCore/embedder beat static
+  tracing for "handled but nothing happened" — REVERT before
+  export-webkit-patches.sh.
+- WEBKIT_OPTION_DEFAULT_PORT_VALUE only affects FRESH CMake caches —
+  existing build dirs need -D<OPT>=… override once.
+- Wide ninja rebuilds can OOM-kill em++ silently ("FAILED" with only
+  warnings) — just re-run ninja.
+- bash `have=$(rg …)` under set-e/pipefail dies silently on no-match —
+  `|| true`.
+- NEVER rm -rf build/webcore. Every WebKit edit → export-webkit-patches.
+  Local git only. Codex review before presenting non-trivial code.
