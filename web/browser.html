@@ -33,12 +33,26 @@
     const ticksEl = document.getElementById("ticks");
     const blitsEl = document.getElementById("blits");
     function log(line) {
-      logEl.textContent += line + "\n";
+      // Keep the on-page log bounded — engine stderr can be chatty and
+      // textContent += is O(n^2) on an ever-growing string.
+      logEl.textContent = (logEl.textContent + line + "\n").slice(-20000);
       console.log("[bib] " + line);
     }
 
     const canvas = document.getElementById("screen");
     const ctx = canvas.getContext("2d");
+
+    // A live engine instance is huge (256 MB wasm heap + compiled code for
+    // an ~89 MB module). NEVER let this page enter the back/forward cache:
+    // a bfcached page retains the whole instance, so every same-URL
+    // navigation/reload ratchets ~0.5-1 GB that is never freed (the
+    // Firefox lockup of 2026-06-10). An unload listener makes the page
+    // bfcache-ineligible; pagehide additionally drops the Module root so
+    // GC can reclaim the instance promptly.
+    window.addEventListener("unload", () => {});
+    window.addEventListener("pagehide", () => {
+      window.Module = null;
+    });
 
     // ?demo=hello loads the Phase 2 gate page (pixel-stable, script-free,
     // verdict computed on frame 0 — used by gate2-browser-test.mjs).

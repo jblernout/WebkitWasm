@@ -60,7 +60,12 @@ const inRoot = (p, root) => p === root || p.startsWith(root + sep);
 const server = createServer(async (req, res) => {
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
-  res.setHeader("Cache-Control", "no-store");
+  // no-cache (NOT no-store): the browser may store but must revalidate, so
+  // unchanged artifacts answer 304 and the browsers' wasm machine-code
+  // caches stay usable. no-store forced a full re-download AND a full
+  // recompile of the ~88 MB engine module on EVERY reload — in Firefox
+  // that's a multi-GB transient compile spike per reload.
+  res.setHeader("Cache-Control", "no-cache");
 
   try {
     const url = new URL(req.url, "http://localhost");
@@ -95,10 +100,18 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // Weak validator from size+mtime — enough for local build artifacts.
+    const etag = `W/"${s.size}-${Math.floor(s.mtimeMs)}"`;
+    if (req.headers["if-none-match"] === etag) {
+      res.writeHead(304, { ETag: etag }).end();
+      return;
+    }
+
     // stream instead of buffering: .wasm/.data artifacts can be huge
     res.writeHead(200, {
       "Content-Type": MIME[extname(file)] ?? "application/octet-stream",
       "Content-Length": s.size,
+      ETag: etag,
     });
     const stream = createReadStream(file);
     stream.on("error", () => res.destroy());

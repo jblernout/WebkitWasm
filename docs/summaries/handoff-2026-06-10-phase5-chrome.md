@@ -56,6 +56,31 @@ ed77c77) — all findings fixed, all gates re-verified green.
    strategies MUST intercept; ResourceLoader's public feeding interface
    is the supported WK2-style path.
 
+## Memory investigation (2026-06-10 evening — user's Firefox lockup)
+**Verdict: NO leak. The lockup was rapid-reload instance stacking in
+Firefox.** Evidence (tools/memwatch.mjs, tools/reloadwatch.mjs — keep both):
+- Steady-state CLEAN in Chromium AND Firefox: wasm heap flat at 256 MB
+  through 60s idle + 60s input storm + 6 renavigations; 0 idle blits;
+  JS heap flat; dev/wisp servers tiny after hours.
+- Reload behavior: each browser.html load = ~1 GB (256 MB wasm heap +
+  compiled code for the 89 MB module; Firefox tab baseline ~1.5 GB).
+  Firefox reclaims old instances LAZILY (~30-60s+): reloads spaced 60s
+  apart stay bounded (~2.4 GB peak); reloads every ~3s STACK old
+  instances (4+ GB after 3 reloads) → swap-thrash → lockup (2 GB swap).
+  Chromium tears down within a cycle or two (bounded ~1.8 GB).
+- Fixes landed: dev-server `no-cache` + ETag/304 (was `no-store` — full
+  89 MB re-download + full recompile per reload; real-profile Firefox
+  and Chromium now revalidate; NOTE Playwright's ephemeral FF profile
+  has no http cache, so reloadwatch still shows 85M transfers there);
+  browser.html log capped at 20 KB; unload/pagehide handlers (bfcache
+  block + Module root drop — bfcache was NOT the retention mechanism,
+  kept as hygiene).
+- RULE for memory tests: ALWAYS run browser memory tests inside
+  `systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0 --` —
+  an uncapped reload test locked up the host machine once.
+- Dev workflow advice: space engine-page reloads ~30s+ in Firefox, or
+  test in Chromium.
+
 ## NEXT: Phase 5 — browser chrome (plain web dev)
 1. URL bar + go button + loading state in web/browser.html (bib_load_url
    already exported; add bib_stop/bib_reload? FrameLoader has
