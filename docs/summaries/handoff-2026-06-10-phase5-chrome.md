@@ -1,47 +1,72 @@
 # Handoff — Phase 5: browser chrome + Phase 4 leftovers (the ONE active handoff)
 
 **Written**: 2026-06-10 ~04:55 EDT, right after Phase 4 core completed.
-**Updated**: 2026-06-10 ~14:50 EDT after the site-support session. Day's
-commits: 95fe79c → ed77c77 → fdadeff → 8b46572 (memory/no-leak +
-dev-server 304s) → 2ea0200 (abort fixes + images + URL bar) → c3c6052
-(Codex round-2 fixes) → aa5cda7 (cookies; gate6 4/4) → 7edbe2f →
-9c9e8ef (site support: thread aborts, guest console, web storage,
-iframes; suite 8/8).
+**Updated**: 2026-06-10 ~17:20 EDT after the IDB + diagnostics + rAF
+session. Day's commits: … → aa5cda7 (cookies) → 9c9e8ef (site support) →
+4db3dbf (recaps) → cc7794a (IndexedDB + gate7) → ff6ff82 (network
+diagnostics) → 810bdfd (diagnose-tool fix) → rAF/RIC/bib_eval chunk
+(git log tip; suite 9/9 throughout).
 **Supersedes**: handoff-2026-06-10-phase4-networking.md (→ docs/archive/).
 
-## ⟶ NEXT SESSION STARTS HERE: discord IDB + login polish + perf
-1. Root cause #13 (discord.com/login still blank): guest JS touching
-   window.indexedDB hits EmptyDatabaseProvider::
-   idbConnectionToServerForSession → RELEASE_ASSERT_NOT_REACHED
-   ("unreachable" trap unwinds through CLoop, page script dies). Fix:
-   real DatabaseProvider on PageConfiguration returning an
-   InProcessIDBServer connection (WebKitLegacy's WebDatabaseProvider is
-   the recipe; sqlite backing can be MEMFS/in-memory). The
-   IDBBindingUtilities serialization thread is ALREADY inlined for
-   single-thread (9c9e8ef) — the server side should ride the existing
-   WorkQueue→main-RunLoop mapping. Note discord will STILL not fully
-   work (needs WebAssembly-in-JSC + Web Workers — both out of scope);
-   goal is "page renders", not "discord works".
-2. Google login leftover bug: Material floating label never floats —
-   stays inline, shrinks the editable area, typed email shows only its
-   tail ("e.com") + label overlaps text. Repro:
-   tools/google-login-repro.mjs 600 133 (screenshots in build/).
-   Suspect CSS transform/transition/:class-toggle gap — needs DOM-state
-   dump (the post-Enter flow WORKS now: real "Couldn't find your
-   Google Account" response renders — iframe fix unblocked the
-   CheckConnection dance).
-3. curl=35 "SSL connect error" pattern (ogads-pa.clients6.google.com,
-   static.cloudflareinsights.com, router.parklogic.com,
-   api.consentjs.datagrail.io) + curl=92 H2 framing (rinici.de) —
-   subresource TLS failures across many sites; investigate TLS feature
-   gap (DEBUG_CURL=1 env exists for verbose curl traces).
-4. Performance (user item 3): input latency + slow loads. Untouched so
-   far. Profile pump/raster/network. WebGL is intentionally null
-   (velzie.rip's gl.viewport error is the site not null-checking).
-5. Phase 5 chrome (was the previous top priority, still pending):
-   title/URL/progress callbacks; back/forward history
+## ⟶ NEXT SESSION STARTS HERE: PERFORMANCE + site-support wave 2
+Root causes #13–16 are DONE this session: IndexedDB (in-process server),
+RequestIdleCallbackEnabled (yaml default false), and the big one — guest
+requestAnimationFrame NEVER fired (no DisplayRefreshMonitor; bib_tick now
+drives Page::updateRendering() + finalizeRenderingUpdate({}) per host
+frame). That one fix made the 2captcha reCAPTCHA widget render (api.js
+live from www.google.com), fixed google login's floating label (#28
+CLOSED), and unstuck everything animation/rAF-shaped.
+
+1. **PERFORMANCE (top priority — user-flagged again at wrap-up)**:
+   input latency, slow loads, "slow after click" on the reCAPTCHA.
+   RE-BASELINE FIRST: the rAF fix changed the profile (rendering-update
+   steps now run every tick — check updateRendering isn't doing wasted
+   style/layout per frame on idle pages). Then profile the pump:
+   bib_tick (RunLoop::cycle + updateRendering) vs paintFrame raster vs
+   curl pump cadence. Tools: __bib.eval(js) for guest-side timing
+   (performance.now deltas, long tasks), ?curldebug=1 for network
+   timing, host-side devtools profiling (wasm frames have names).
+2. **reCAPTCHA fallback (#34 tail, user observation at wrap-up)**: the
+   widget works but is SLOW after click and serves a *partially*
+   working FALLBACK v2 variant, not the regular one — Google downgrades
+   on missing features/timing. Find the downgrade trigger via bib_eval.
+   May be the same story as item 1 (slowness IS the trigger).
+3. **Site support wave 2 (#30)**: re-sweep the day's problem sites —
+   the rAF fix likely changed verdicts everywhere (anything "stuck" may
+   work now). site-diagnose over: fal.ai, velzie.rip, google login full
+   flow, old.reddit, others from user browsing. Remaining deliberate
+   gaps: SharedWorker, WebAssembly, caches, serviceWorker.
+4. **Phase 5 chrome**: title/URL/progress callbacks; back/forward
    (EmptyBackForwardClient capacity 0 = next silent gate); optional
-   OPFS persistence for cookies AND the new in-memory web storage.
+   OPFS persistence for cookies + web storage.
+5. **Parked**: guest-wasm epic (wasm3/WAMR interpreter +
+   window.WebAssembly bridge + pseudo-workers) unlocks discord-renders
+   + Turnstile-runs (not necessarily -passes; adversarial). Multi-week;
+   decision doc first. curl=35/92 CLOSED-ENVIRONMENTAL: LAN ad-block
+   DNS blackholes tracking hosts to 0.0.0.0 (verify any "SSL connect
+   error" with getent + the new wisp CLOSED-reason log lines before
+   suspecting the engine); rinici.de bot-filters curl-family clients.
+
+## rAF/diagnostics session (2026-06-10 ~15:00–17:20)
+- **IDB (#13)**: BibIDBServer.{h,cpp} = WebKitLegacy InProcessIDBServer
+  carried into the embedder + BibDatabaseProvider; IDBBackingStore.h
+  ctor/dtor RELEASE_ASSERT(!isMainThread()) guarded out (ledger).
+  gate7-idb 4/4. Trap: new embedder .cpp MUST start with config.h.
+  Discord: script survives to late bootstrap; page blank = libdiscore
+  needs guest wasm (epic). Turnstile demo page renders; widget
+  correctly self-reports unsupported (same boundary).
+- **DEBUG_CURL was dead three ways** (all fixed): NDEBUG guards in
+  CurlContext.{h,cpp}; CurlRequest's CURLOPT_DEBUGFUNCTION swallowed
+  verbose output (re-emits CURLINFO_TEXT now); env must be set via
+  setenv at TOP of main() (CurlContext singleton reads it once during
+  installEmbedderStrategies). ?curldebug=1 → full TLS/h2 traces.
+- **bib_eval(js)** export + __bib.eval() helper: guest-world JS probes,
+  output via console forwarder. No more rebuilds for DOM questions.
+- **Probe pages**: web/probe/{features,modules,vitepreload}.html.
+  site-diagnose prints head+tail of guest console (810bdfd — head-only
+  cap faked a "hang" and burned an hour; trust but verify the TOOLS).
+- **Host OOM 16:30**: zellige-ai's next-server (15GB anon-rss, kernel
+  log) — NOT this project. Cap external dev servers with systemd-run.
 
 ## Site-support session (2026-06-10 ~14:00–14:50) — commit 9c9e8ef
 Diagnosis loop: --profiling-funcs (name section, +12MB wasm; abort

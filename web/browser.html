@@ -185,6 +185,11 @@
         const heap = Module.HEAPU8;
         return [heap[i], heap[i + 1], heap[i + 2]];
       },
+      // Diagnostic: run JS in the GUEST page's main world. Results come
+      // back via the guest-console forwarder (wrap in console.log).
+      eval(code) {
+        return Module.ccall("bib_eval", "number", ["string"], [code]);
+      },
     });
 
     // Same region assertions as the offscreen gate (hello demo only).

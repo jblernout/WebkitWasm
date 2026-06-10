@@ -172,6 +172,19 @@ EMSCRIPTEN_KEEPALIVE int bib_frame_height() { return kHeight; }
 EMSCRIPTEN_KEEPALIVE void bib_tick()
 {
     WTF::RunLoop::cycle();
+    // Drive WebCore's "update the rendering" steps. This port has no
+    // DisplayRefreshMonitor, so nothing else ever runs them — guest
+    // requestAnimationFrame callbacks NEVER fired (root cause #16), which
+    // silently stalled everything rAF-shaped: CSS/JS animations,
+    // IntersectionObserver delivery, and rAF-deferred commits (react-helmet
+    // batches <script> head insertions through rAF — 2captcha's reCAPTCHA
+    // loader died exactly there). The host page calls bib_tick from its own
+    // rAF loop, so this runs once per display frame; updateRendering is
+    // cheap when no steps are scheduled.
+    if (g_engine) {
+        g_engine->page->updateRendering();
+        g_engine->page->finalizeRenderingUpdate({ });
+    }
 }
 
 // Returns the RGBA frame buffer (kWidth*kHeight*4) after repainting, or 0.
@@ -273,6 +286,19 @@ EMSCRIPTEN_KEEPALIVE void bib_scroll_to(int y)
         return;
     if (RefPtr view = mainFrameView())
         view->setScrollPosition(WebCore::ScrollPosition(0, y));
+}
+
+// Diagnostic: run a script string in the guest main world. Output channel
+// is the guest console (wrap probes in console.log(...) — the forwarder
+// puts them on stderr as "BIB: console log: ..."). Returns 0 if the engine
+// is not up. Drives DOM/computed-style probes that are otherwise
+// impossible from the host side.
+EMSCRIPTEN_KEEPALIVE int bib_eval(const char* source)
+{
+    if (!g_engine || !source)
+        return 0;
+    g_engine->mainFrame->script().executeScriptIgnoringException(String::fromUTF8(source), JSC::SourceTaintedOrigin::Untainted);
+    return 1;
 }
 
 // Phase 4: real navigation. Drives FrameLoader::load -> DocumentLoader ->
@@ -387,6 +413,11 @@ int main()
     // too). The window properties are IDL-gated behind these settings.
     page->settings().setLocalStorageEnabled(true);
     page->settings().setSessionStorageEnabled(true);
+    // requestIdleCallback defaults FALSE at every preferences layer (same
+    // family as root cause #11) although WebCore fully implements it.
+    // Lazy-hydration/scheduler libraries feature-detect it; a missing
+    // global silently strands their deferred work.
+    page->settings().setRequestIdleCallbackEnabled(true);
 
     RefPtr localMainFrame = page->localMainFrame();
     if (!localMainFrame) {
