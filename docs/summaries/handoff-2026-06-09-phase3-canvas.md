@@ -1,9 +1,12 @@
 # Handoff — Phase 3: canvas blit + interactivity (the ONE active handoff)
 
 **Written**: 2026-06-09 ~23:50 EDT, minutes after the Phase 2 gate passed.
+**Finalized**: ~23:57 after the Codex review (0 crit / 0 high / 2 med /
+3 low — ALL FIXED in c8fbf59; gate re-verified with strict assertions:
+exactBlue=20000, redGlyph=1541).
 **Supersedes**: handoff-2026-06-09-phase2-embedder.md (→ docs/archive/).
 
-## State (commits a680190 → da01669; Codex review of embedder IN FLIGHT)
+## State (commits a680190 → c8fbf59, tree clean, review done)
 - **PHASE 2 GATE PASSED**: WebKit-in-wasm painted `<h1>hello</h1>` + a
   styled div, 800×600, pixel-exact, under node. Proof: `build/out.png`.
   Full stack live: HTML parser → style → layout → fontconfig/FreeType/
