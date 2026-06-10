@@ -4,7 +4,7 @@
 **Updated**: 2026-06-10 ~14:00 EDT after the cookies session. Day's
 commits: 95fe79c → ed77c77 → fdadeff → 8b46572 (memory/no-leak +
 dev-server 304s) → 2ea0200 (abort fixes + images + URL bar) → c3c6052
-(Codex round-2 fixes) → 96c7d8e (cookies; gate6 4/4).
+(Codex round-2 fixes) → aa5cda7 (cookies; gate6 4/4).
 **Supersedes**: handoff-2026-06-10-phase4-networking.md (→ docs/archive/).
 
 ## ⟶ NEXT SESSION STARTS HERE: Phase 5 chrome
