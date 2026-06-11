@@ -1,0 +1,66 @@
+<!doctype html>
+<!-- 2x2 web-font matrix probe: {CSS @font-face, JS FontFace} x {woff2, ttf}.
+     Completes the missing cells from webfont.html: the original evidence
+     conflated declaration mechanism with font format (CSS+woff2 failed,
+     JS+ttf worked). Each face renders the same string; a cell PASSes when
+     its width differs >20px from the sans-serif fallback rendering.
+     Output: BIBMATRIX: lines on the guest console. -->
+<html>
+<head>
+  <style>
+    @font-face {
+      font-family: "CssWoff2";
+      src: url("./pacifico.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "CssTtf";
+      src: url("./probe-serif.ttf") format("truetype");
+    }
+    /* Same glyph data as pacifico.woff2, woff2 container stripped — isolates
+       container handling from the font itself. */
+    @font-face {
+      font-family: "CssPacTtf";
+      src: url("./pacifico-decompressed.ttf") format("truetype");
+    }
+    body { background: #ffffff; margin: 0; font-size: 16px; }
+    .row span { font-size: 40px; display: inline-block; white-space: nowrap; }
+    #cell-css-woff2 { font-family: "CssWoff2", sans-serif; }
+    #cell-css-ttf { font-family: "CssTtf", sans-serif; }
+    #cell-css-pacttf { font-family: "CssPacTtf", sans-serif; }
+    #cell-js-woff2 { font-family: "JsWoff2", sans-serif; }
+    #cell-js-ttf { font-family: "JsTtf", sans-serif; }
+    #cell-fallback { font-family: sans-serif; }
+  </style>
+</head>
+<body>
+  <div class="row"><span id="cell-css-woff2">Hamburgefonstiv 123</span></div>
+  <div class="row"><span id="cell-css-ttf">Hamburgefonstiv 123</span></div>
+  <div class="row"><span id="cell-css-pacttf">Hamburgefonstiv 123</span></div>
+  <div class="row"><span id="cell-js-woff2">Hamburgefonstiv 123</span></div>
+  <div class="row"><span id="cell-js-ttf">Hamburgefonstiv 123</span></div>
+  <div class="row"><span id="cell-fallback">Hamburgefonstiv 123</span></div>
+  <script>
+    const cells = ["css-woff2", "css-ttf", "css-pacttf", "js-woff2", "js-ttf"];
+    const report = (tag) => {
+      const fw = document.getElementById("cell-fallback").offsetWidth;
+      for (const c of cells) {
+        const w = document.getElementById("cell-" + c).offsetWidth;
+        console.log("BIBMATRIX: [" + tag + "] " + c + " width=" + w +
+          " fallback=" + fw + " verdict=" + (Math.abs(w - fw) > 20 ? "PASS" : "FAIL"));
+      }
+      document.fonts.forEach((f) =>
+        console.log("BIBMATRIX: [" + tag + "] face " + f.family + " status=" + f.status));
+    };
+    new FontFace("JsWoff2", 'url("./pacifico.woff2") format("woff2")')
+      .load()
+      .then((f) => { document.fonts.add(f); console.log("BIBMATRIX: JsWoff2 load OK"); })
+      .catch((e) => console.log("BIBMATRIX: JsWoff2 load FAILED " + e));
+    new FontFace("JsTtf", 'url("./probe-serif.ttf") format("truetype")')
+      .load()
+      .then((f) => { document.fonts.add(f); console.log("BIBMATRIX: JsTtf load OK"); })
+      .catch((e) => console.log("BIBMATRIX: JsTtf load FAILED " + e));
+    document.fonts.ready.then(() => report("ready"));
+    setTimeout(() => { report("t5s"); console.log("BIBMATRIX: done"); }, 5000);
+  </script>
+</body>
+</html>
