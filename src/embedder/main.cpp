@@ -151,9 +151,16 @@ static bool paintFrameRect(const WebCore::IntRect& dirty)
     WebCore::GraphicsContextSkia context(*canvas, WebCore::RenderingMode::Unaccelerated, WebCore::RenderingPurpose::Unspecified);
     view->paint(context, dirty);
     canvas->restore();
+    return true;
+}
+
+// Callers snapshot-and-clear the dirty state BEFORE painting: damage
+// reported DURING view->paint (paint-triggered invalidations) must
+// accumulate for the NEXT frame, not be wiped post-paint (Codex 2026-06-11).
+static void clearDamage()
+{
     BIB::g_frameDirty = false;
     BIB::g_dirtyRect = { };
-    return true;
 }
 
 // Layout + paint the FULL frame (boot/gate path; bib_render drives the
@@ -163,6 +170,7 @@ static bool paintFrame()
     if (!mainFrameView())
         return false;
     g_engine->mainFrame->protectedDocument()->updateLayoutIgnorePendingStylesheets();
+    clearDamage();
     return paintFrameRect(WebCore::IntRect(0, 0, kWidth, kHeight));
 }
 
@@ -256,18 +264,22 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
     g_engine->mainFrame->protectedDocument()->updateLayoutIgnorePendingStylesheets();
     const WebCore::IntRect frameRect(0, 0, kWidth, kHeight);
     WebCore::IntRect dirty = force ? frameRect : WebCore::intersection(BIB::g_dirtyRect, frameRect);
+    clearDamage(); // BEFORE paint — paint-time damage belongs to the next frame
     if (dirty.isEmpty()) {
         // All damage was outside the viewport — nothing visible changed.
-        BIB::g_frameDirty = false;
-        BIB::g_dirtyRect = { };
         return nullptr;
     }
     if (!paintFrameRect(dirty))
         return nullptr;
     auto dstInfo = SkImageInfo::Make(dirty.width(), dirty.height(), kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
     uint8_t* dst = g_blitPixels + (dirty.y() * kWidth + dirty.x()) * 4;
-    if (!g_engine->surface->readPixels(SkPixmap(dstInfo, dst, kWidth * 4), dirty.x(), dirty.y()))
+    if (!g_engine->surface->readPixels(SkPixmap(dstInfo, dst, kWidth * 4), dirty.x(), dirty.y())) {
+        // Failed readback: the surface now has newer pixels than
+        // g_blitPixels — re-dirty so the next frame repaints and retries
+        // instead of losing the damage (Codex 2026-06-11).
+        BIB::addDamage(dirty);
         return nullptr;
+    }
     g_dirtyBox[0] = dirty.x();
     g_dirtyBox[1] = dirty.y();
     g_dirtyBox[2] = dirty.width();

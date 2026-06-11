@@ -1,7 +1,7 @@
 # Decision 004 — Web Workers: scope, cost, and phasing (task #40)
 
-Date: 2026-06-11. Status: **PROPOSED** (scoping deliverable; no build flip
-performed). Evidence base: wave-2 sweep (task #39) — Workers is the only
+Date: 2026-06-11. Status: **W-A IMPLEMENTED** (same day, task #41 — see
+"W-A implementation results" at the bottom; W-B remains HOLD). Evidence base: wave-2 sweep (task #39) — Workers is the only
 engine-gap error repeated across all five real sites
 (`NotSupportedError: Web Workers are not supported in this single-threaded
 engine`, fired by 2captcha/reCAPTCHA on load AND +2.3s post-click).
@@ -246,3 +246,47 @@ required, or a target site needs real worker threads):**
 
 **Not in scope either phase:** SharedWorker, ServiceWorker, OffscreenCanvas,
 guest WebAssembly (separate epic; the actual gate for Turnstile/Discord).
+
+## W-A implementation results (2026-06-11, task #41)
+
+Shipped as SIX WebKit hunks (the planned four plus two from the
+implementation-time Codex review):
+1. `Worker.cpp` — all-workers throw removed; **module workers stay gated**
+   (`type:"module"` → catchable NotSupportedError): WorkerThread startup
+   runs `loadModuleSynchronously` → `runInMode` spin over ASYNC module
+   fetches — the same doomed shape as importScripts (Codex high #5).
+2. `WorkerMessagingProxy.cpp` — `UseMainThread` under `__EMSCRIPTEN__`.
+3. `WorkerThreadableLoader.cpp` — sync loads fail fast
+   (importScripts → catchable NetworkError; verified live).
+4. `WorkerGlobalScope.cpp` — crypto wrap/unwrap nullopt fail-fast.
+5. `WorkerRunLoop.cpp` — **upstream landmine found empirically**:
+   `WorkerMainRunLoop::postTaskForMode` silently DROPS tasks dispatched
+   before the bootstrap sets the global scope, and
+   `WorkerMessagingProxy::startWorkerGlobalScope` flushes queued early
+   page→worker messages BEFORE `thread->start()` enqueues that bootstrap
+   (main-loop FIFO ran them first, scope null). Every pre-boot postMessage
+   vanished: echo tests timed out while self-posting workers worked.
+   Port fix: requeue instead of drop while not terminated.
+6. `WebSocket.cpp` — `new WebSocket` in a worker → catchable
+   NotSupportedError (`Bridge::initialize` posts-then-semaphore-waits =
+   same-thread deadlock, Codex high #4). Real worker WS arrives with W-B.
+
+Codex-flagged paths verified unreachable, no patch needed: worker
+Notification permission (`ENABLE_NOTIFICATIONS` hard OFF), OPFS
+sync-access-handle waits (empty-clients Page uses `DummyStorageProvider`,
+whose connection rejects everything — no handle can ever exist).
+`WorkerMessagingProxy::setAppBadge`'s `ASSERT(!isMainThread())` is
+debug-only (Release: compiled out); guard it if a debug build ever runs.
+
+**Validation:** worker smoke (web/probe/worker.html): blob-worker echo
+pong PASS, network-served worker echo PASS (script loaded through
+curl/wisp), importScripts → catchable NetworkError PASS. reCAPTCHA probe:
+**zero Worker errors** (was 2), click→visual response **0.42s**, 4×4
+image challenge fully rendered + interactive. 5-site sweep: all paint
+metrics at baseline, zero aborts, NotSupportedError gone everywhere.
+Node gate pixel-exact.
+
+**W-B verdict after W-A data: stays HOLD.** Nothing in the sweep demanded
+real threads — no hang, no importScripts dependency surfaced on target
+sites yet. Re-open W-B when a target site's worker needs importScripts /
+module workers / WebSocket-in-worker / real parallelism.

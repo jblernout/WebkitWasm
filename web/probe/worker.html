@@ -1,0 +1,83 @@
+<!doctype html>
+<!-- Worker smoke test (Phase W-A, decision-004): exercises main-thread
+     dedicated workers. Results go to the DOM (visible in the framebuffer)
+     AND console.log lines prefixed WTEST (forwarded to the host console by
+     the engine's guest-console bridge) for build/worker-smoke.mjs. -->
+<html>
+<body>
+  <h1>Worker smoke</h1>
+  <pre id="log" style="font-size:16px"></pre>
+  <script>
+    const logEl = document.getElementById("log");
+    function report(line) {
+      logEl.textContent += line + "\n";
+      console.log("WTEST " + line);
+    }
+
+    report("typeof Worker = " + typeof Worker);
+
+    // Test 1: blob-URL classic worker, postMessage echo.
+    try {
+      const src = "onmessage = function (e) { postMessage('pong:' + e.data); };";
+      const w1 = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+      const t1 = setTimeout(() => report("blob-worker: TIMEOUT"), 8000);
+      w1.onmessage = (e) => { clearTimeout(t1); report("blob-worker: " + e.data); };
+      w1.onerror = (e) => { clearTimeout(t1); report("blob-worker: ERROR " + e.message); };
+      w1.postMessage("42");
+    } catch (err) {
+      report("blob-worker: THREW " + err.name + " " + err.message);
+    }
+
+    // Test 2: network-served classic worker (loads through the engine's
+    // curl/wisp stack).
+    try {
+      const w2 = new Worker("/probe/worker-child.js");
+      const t2 = setTimeout(() => report("file-worker: TIMEOUT"), 8000);
+      w2.onmessage = (e) => { clearTimeout(t2); report("file-worker: " + e.data); };
+      w2.onerror = (e) => { clearTimeout(t2); report("file-worker: ERROR " + e.message); };
+      w2.postMessage("7");
+    } catch (err) {
+      report("file-worker: THREW " + err.name + " " + err.message);
+    }
+
+    // Test 3: importScripts inside a worker — expected to FAIL FAST with a
+    // catchable NetworkError (sync loads are stubbed on this port), not hang.
+    try {
+      // Absolute URL: a path resolved against the blob: base would throw
+      // SyntaxError before ever reaching the loader fail-fast under test.
+      const src3 =
+        "try { importScripts('http://127.0.0.1:8080/probe/worker-child.js'); postMessage('importScripts: UNEXPECTED OK'); }" +
+        "catch (e) { postMessage('importScripts threw ' + e.name); }";
+      const w3 = new Worker(URL.createObjectURL(new Blob([src3], { type: "text/javascript" })));
+      const t3 = setTimeout(() => report("import-worker: TIMEOUT"), 8000);
+      w3.onmessage = (e) => { clearTimeout(t3); report("import-worker: " + e.data); };
+      w3.onerror = (e) => { clearTimeout(t3); report("import-worker: ERROR " + e.message); };
+    } catch (err) {
+      report("import-worker: THREW " + err.name + " " + err.message);
+    }
+
+    // Test 4: module workers must fail FAST and CATCHABLY (module graph
+    // load would deadlock the shared main thread — gated in Worker::create).
+    try {
+      new Worker("/probe/worker-child.js", { type: "module" });
+      report("module-worker: UNEXPECTED OK");
+    } catch (err) {
+      report("module-worker: threw " + err.name);
+    }
+
+    // Test 5: WebSocket inside a worker must fail FAST and CATCHABLY
+    // (Bridge::initialize semaphore — gated in WebSocket::create).
+    try {
+      const src5 =
+        "try { new WebSocket('wss://example.com/'); postMessage('ws: UNEXPECTED OK'); }" +
+        "catch (e) { postMessage('ws threw ' + e.name); }";
+      const w5 = new Worker(URL.createObjectURL(new Blob([src5], { type: "text/javascript" })));
+      const t5 = setTimeout(() => report("ws-worker: TIMEOUT"), 8000);
+      w5.onmessage = (e) => { clearTimeout(t5); report("ws-worker: " + e.data); };
+      w5.onerror = (e) => { clearTimeout(t5); report("ws-worker: ERROR " + e.message); };
+    } catch (err) {
+      report("ws-worker: THREW " + err.name + " " + err.message);
+    }
+  </script>
+</body>
+</html>

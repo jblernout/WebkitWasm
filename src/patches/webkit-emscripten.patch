@@ -429,6 +429,31 @@ index f90708bddc..6f88c5a831 100644
  };
  
  } // namespace IDBServer
+diff --git a/Source/WebCore/Modules/websockets/WebSocket.cpp b/Source/WebCore/Modules/websockets/WebSocket.cpp
+index d6483e73d3..940aed9375 100644
+--- a/Source/WebCore/Modules/websockets/WebSocket.cpp
++++ b/Source/WebCore/Modules/websockets/WebSocket.cpp
+@@ -177,6 +177,20 @@ ExceptionOr<Ref<WebSocket>> WebSocket::create(ScriptExecutionContext& context, c
+     if (url.isNull())
+         return Exception { ExceptionCode::SyntaxError };
+ 
++#if defined(__EMSCRIPTEN__)
++    // PORT=Emscripten Phase W-A (decision-004): workers share the main
++    // thread, and WorkerThreadableWebSocketChannel::Bridge::initialize
++    // posts to the loader then BinarySemaphore-waits — a same-thread
++    // deadlock now that workers actually construct (Codex review
++    // 2026-06-11). Deferring the peer instead would leave sockets silently
++    // CONNECTING forever (connect() no-ops without a peer). Fail the
++    // constructor catchably; page-level WebSockets keep their existing
++    // clean-error behavior (CurlStream stub). Real worker WebSockets come
++    // with Phase W-B threads, where the semaphore wait is legal.
++    if (is<WorkerGlobalScope>(context))
++        return Exception { ExceptionCode::NotSupportedError, "WebSocket inside workers is not supported in this single-threaded engine"_s };
++#endif
++
+     auto socket = adoptRef(*new WebSocket(context));
+     socket->suspendIfNeeded();
+ 
 diff --git a/Source/WebCore/PAL/pal/PlatformEmscripten.cmake b/Source/WebCore/PAL/pal/PlatformEmscripten.cmake
 new file mode 100644
 index 0000000000..0fc6a680f4
@@ -965,6 +990,38 @@ index 5ebee25c41..83440872e6 100644
      RefPtr<Widget> createPlugin(HTMLPlugInElement&, const URL&, const Vector<AtomString>&, const Vector<AtomString>&, const String&, bool) final;
  
      ObjectContentType objectContentType(const URL&, const String&) final;
+diff --git a/Source/WebCore/loader/WorkerThreadableLoader.cpp b/Source/WebCore/loader/WorkerThreadableLoader.cpp
+index 34cce58217..716a0c3472 100644
+--- a/Source/WebCore/loader/WorkerThreadableLoader.cpp
++++ b/Source/WebCore/loader/WorkerThreadableLoader.cpp
+@@ -72,6 +72,19 @@ WorkerThreadableLoader::~WorkerThreadableLoader()
+ 
+ void WorkerThreadableLoader::loadResourceSynchronously(WorkerOrWorkletGlobalScope& workerOrWorkletGlobalScope, ResourceRequest&& request, ThreadableLoaderClient& client, const ThreadableLoaderOptions& options)
+ {
++#if defined(__EMSCRIPTEN__)
++    // PORT=Emscripten Phase W-A (decision-004): workers share the main
++    // thread (WorkerThreadMode::UseMainThread), where the wait loop below
++    // becomes WorkerMainRunLoop::runInMode -> RunLoop::cycle() spinning —
++    // but response bytes arrive via host JS WebSocket events that can never
++    // fire while wasm spins. Guaranteed hang (same root as the port-wide
++    // sync-XHR limitation). Fail fast and catchably: importScripts() gets
++    // a NetworkError, sync XHR in a worker errors out.
++    UNUSED_PARAM(workerOrWorkletGlobalScope);
++    client.didFail(std::nullopt, ResourceError { errorDomainWebKitInternal, 0, request.url(),
++        "Synchronous loads inside workers are unsupported in this single-threaded engine"_s });
++    return;
++#else
+     WorkerRunLoop& runLoop = workerOrWorkletGlobalScope.workerOrWorkletThread()->runLoop();
+ 
+     // Create a unique mode just for this synchronous resource load.
+@@ -84,6 +97,7 @@ void WorkerThreadableLoader::loadResourceSynchronously(WorkerOrWorkletGlobalScop
+ 
+     if (!loader->done() && !success)
+         loader->cancel();
++#endif
+ }
+ 
+ void WorkerThreadableLoader::cancel()
 diff --git a/Source/WebCore/platform/Pasteboard.h b/Source/WebCore/platform/Pasteboard.h
 index 11cef75ac7..07c2bf511f 100644
 --- a/Source/WebCore/platform/Pasteboard.h
@@ -2372,26 +2429,132 @@ index 0000000000..1486ed1c71
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/workers/Worker.cpp b/Source/WebCore/workers/Worker.cpp
-index a74247d0ad..8f716b24f6 100644
+index a74247d0ad..1027406e30 100644
 --- a/Source/WebCore/workers/Worker.cpp
 +++ b/Source/WebCore/workers/Worker.cpp
-@@ -101,6 +101,16 @@ Worker::Worker(ScriptExecutionContext& context, JSC::RuntimeFlags runtimeFlags,
+@@ -101,6 +101,24 @@ Worker::Worker(ScriptExecutionContext& context, JSC::RuntimeFlags runtimeFlags,
  
  ExceptionOr<Ref<Worker>> Worker::create(ScriptExecutionContext& context, JSC::RuntimeFlags runtimeFlags, Variant<RefPtr<TrustedScriptURL>, String>&& url, WorkerOptions&& options)
  {
++    // PORT=Emscripten note (Phase W-A, decision-004): CLASSIC dedicated
++    // workers run COOPERATIVELY ON THE MAIN THREAD via
++    // WorkerThreadMode::UseMainThread (see
++    // WorkerMessagingProxy::startWorkerGlobalScope) — no Thread::create,
++    // no pthread. Synchronous worker APIs that would deadlock the shared
++    // thread (importScripts/sync XHR via WorkerThreadableLoader, crypto key
++    // wrap/unwrap, in-worker WebSocket) fail fast at their own sites.
 +#if defined(__EMSCRIPTEN__)
-+    // PORT=Emscripten is single-threaded: WorkerThread::start ->
-+    // Thread::create -> pthread_create(ENOTSUP) -> RELEASE_ASSERT would
-+    // abort() the whole engine the moment a page calls `new Worker(...)`
-+    // (Cloudflare Turnstile, most modern bundles). Fail the constructor
-+    // with a catchable exception instead — pages that feature-test or
-+    // try/catch keep running without their worker.
-+    return Exception { ExceptionCode::NotSupportedError, "Web Workers are not supported in this single-threaded engine"_s };
++    // Module workers stay gated: WorkerThread startup runs
++    // loadModuleSynchronously -> runInMode spinning until the module graph
++    // resolves, but the fetches are async and their bytes arrive via host
++    // JS events that can't fire while wasm spins — guaranteed deadlock on
++    // the shared main thread (Codex review 2026-06-11). Catchable throw,
++    // same contract as the old all-workers gate.
++    if (options.type == WorkerType::Module)
++        return Exception { ExceptionCode::NotSupportedError, "Module workers are not supported in this single-threaded engine"_s };
 +#endif
 +
      auto compliantScriptURLString = trustedTypeCompliantString(context, WTF::move(url), "Worker constructor"_s);
      if (compliantScriptURLString.hasException())
          return compliantScriptURLString.releaseException();
+diff --git a/Source/WebCore/workers/WorkerGlobalScope.cpp b/Source/WebCore/workers/WorkerGlobalScope.cpp
+index e1a8096208..9b614a4237 100644
+--- a/Source/WebCore/workers/WorkerGlobalScope.cpp
++++ b/Source/WebCore/workers/WorkerGlobalScope.cpp
+@@ -511,6 +511,16 @@ void WorkerGlobalScope::addMessage(MessageSource source, MessageLevel level, con
+ 
+ std::optional<Vector<uint8_t>> WorkerGlobalScope::serializeAndWrapCryptoKey(CryptoKeyData&& keyData)
+ {
++#if defined(__EMSCRIPTEN__)
++    // PORT=Emscripten Phase W-A (decision-004): workers share the main
++    // thread, so post-to-loader-then-BinarySemaphore-wait is a same-thread
++    // deadlock. Unreachable TODAY (WebCrypto is link-stubbed: no algorithms
++    // register, no CryptoKey can exist) but a live deadlock the day the
++    // real OpenSSL backend lands — fail the wrap instead (Codex cross-check
++    // finding, 2026-06-11). Same below in unwrapCryptoKey.
++    UNUSED_PARAM(keyData);
++    return std::nullopt;
++#else
+     Ref protectedThis { *this };
+     auto* workerLoaderProxy = thread()->workerLoaderProxy();
+     if (!workerLoaderProxy)
+@@ -524,10 +534,16 @@ std::optional<Vector<uint8_t>> WorkerGlobalScope::serializeAndWrapCryptoKey(Cryp
+     });
+     semaphore.wait();
+     return wrappedKey;
++#endif
+ }
+ 
+ std::optional<Vector<uint8_t>> WorkerGlobalScope::unwrapCryptoKey(const Vector<uint8_t>& wrappedKey)
+ {
++#if defined(__EMSCRIPTEN__)
++    // Same-thread semaphore deadlock — see serializeAndWrapCryptoKey above.
++    UNUSED_PARAM(wrappedKey);
++    return std::nullopt;
++#else
+     Ref protectedThis { *this };
+     auto* workerLoaderProxy = thread()->workerLoaderProxy();
+     if (!workerLoaderProxy)
+@@ -541,6 +557,7 @@ std::optional<Vector<uint8_t>> WorkerGlobalScope::unwrapCryptoKey(const Vector<u
+     });
+     semaphore.wait();
+     return key;
++#endif
+ }
+ 
+ Crypto& WorkerGlobalScope::crypto()
+diff --git a/Source/WebCore/workers/WorkerMessagingProxy.cpp b/Source/WebCore/workers/WorkerMessagingProxy.cpp
+index 0cade10717..2fcca96c9a 100644
+--- a/Source/WebCore/workers/WorkerMessagingProxy.cpp
++++ b/Source/WebCore/workers/WorkerMessagingProxy.cpp
+@@ -159,7 +159,19 @@ void WorkerMessagingProxy::startWorkerGlobalScope(const URL& scriptURL, PAL::Ses
+ 
+     m_scriptURL = scriptURL;
+ 
+-    WorkerParameters params { scriptURL, scriptExecutionContext->url(), name, identifier, WTF::move(initializationData.userAgent), isOnline, contentSecurityPolicyResponseHeaders, shouldBypassMainWorldContentSecurityPolicy, crossOriginEmbedderPolicy, timeOrigin, referrerPolicy, workerType, credentials, scriptExecutionContext->settingsValues(), WorkerThreadMode::CreateNewThread, sessionID,
++#if defined(__EMSCRIPTEN__)
++    // PORT=Emscripten Phase W-A (decision-004): no pthreads in this build —
++    // Thread::create would RELEASE_ASSERT. Run dedicated workers
++    // cooperatively on the main thread instead: WorkerMainRunLoop + shared
++    // commonVM, the same upstream mode service workers use for in-process
++    // testing. Constraints handled elsewhere: synchronous worker loads
++    // fail fast (WorkerThreadableLoader), crypto key wrap/unwrap fails
++    // fast (WorkerGlobalScope) — both would deadlock the shared thread.
++    constexpr auto bibWorkerThreadMode = WorkerThreadMode::UseMainThread;
++#else
++    constexpr auto bibWorkerThreadMode = WorkerThreadMode::CreateNewThread;
++#endif
++    WorkerParameters params { scriptURL, scriptExecutionContext->url(), name, identifier, WTF::move(initializationData.userAgent), isOnline, contentSecurityPolicyResponseHeaders, shouldBypassMainWorldContentSecurityPolicy, crossOriginEmbedderPolicy, timeOrigin, referrerPolicy, workerType, credentials, scriptExecutionContext->settingsValues(), bibWorkerThreadMode, sessionID,
+         WTF::move(initializationData.serviceWorkerData),
+         initializationData.clientIdentifier,
+         scriptExecutionContext->advancedPrivacyProtections(),
+diff --git a/Source/WebCore/workers/WorkerRunLoop.cpp b/Source/WebCore/workers/WorkerRunLoop.cpp
+index 1b4f47b117..32d0ee3910 100644
+--- a/Source/WebCore/workers/WorkerRunLoop.cpp
++++ b/Source/WebCore/workers/WorkerRunLoop.cpp
+@@ -468,8 +468,21 @@ void WorkerMainRunLoop::postTaskForMode(ScriptExecutionContext::Task&& task, con
+             if (!checkedThis || checkedThis->m_terminated)
+                 return;
+             scope = checkedThis->m_workerOrWorkletGlobalScope.get();
+-            if (!scope)
++            if (!scope) {
++#if defined(__EMSCRIPTEN__)
++                // PORT=Emscripten Phase W-A (decision-004): tasks posted
++                // before the bootstrap dispatch has run setGlobalScope land
++                // here with a null scope — upstream's silent drop loses
++                // every page->worker postMessage queued during startup
++                // (WorkerMessagingProxy flushes early tasks BEFORE
++                // thread->start() enqueues the bootstrap; main-loop FIFO
++                // then runs them first). Requeue instead: the bootstrap is
++                // already in the queue, so this self-limits. Termination
++                // (m_terminated / proxy teardown) stops the requeue loop.
++                checkedThis->postTaskForMode(WTF::move(task), WorkerRunLoop::defaultMode());
++#endif
+                 return;
++            }
+         }
+         task.performTask(*scope);
+     });
 diff --git a/Source/cmake/OptionsEmscripten.cmake b/Source/cmake/OptionsEmscripten.cmake
 new file mode 100644
 index 0000000000..e74f5413af
