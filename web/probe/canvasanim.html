@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<!-- Canvas-throughput probe (G3 canvas-acceleration experiment): draws 600
+     stroked arcs per rAF frame into a 600x400 2D canvas for 5 seconds, then
+     reports frames + ms/frame via the guest-console forwarder (CANVASFPS
+     marker). MotionMark-Arcs-shaped workload, small enough to run in-engine.
+     A/B: ?gpu=1 vs ?gpu=1&canvasgpu=1 in the host URL. -->
+<html>
+<body style="margin:0">
+<canvas id="c" width="600" height="400"></canvas>
+<script>
+  var ctx = document.getElementById("c").getContext("2d");
+  var frames = 0, t0 = 0;
+  function frame(now) {
+    if (!t0) t0 = now;
+    for (var i = 0; i < 600; i++) {
+      ctx.beginPath();
+      var x = (i * 97) % 600, y = (i * 61) % 400;
+      ctx.strokeStyle = "hsl(" + ((i * 7 + frames * 3) % 360) + ",80%,50%)";
+      ctx.lineWidth = 1 + (i % 8);
+      ctx.arc(x, y, 6 + (i % 40), 0, 4 + (frames % 2));
+      ctx.stroke();
+    }
+    frames++;
+    if (now - t0 < 5000) requestAnimationFrame(frame);
+    else {
+      var dt = now - t0;
+      console.log("CANVASFPS frames=" + frames + " in " + dt.toFixed(0) +
+        "ms (" + (dt / frames).toFixed(2) + "ms/frame)");
+    }
+  }
+  requestAnimationFrame(frame);
+</script>
+</body>
+</html>

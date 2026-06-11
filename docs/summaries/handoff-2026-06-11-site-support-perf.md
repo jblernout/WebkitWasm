@@ -21,34 +21,41 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: Skia-GPU G2 — M2 (measure) then G3
+## ⟶ NEXT SESSION STARTS HERE: guest-wasm IPInt scoping (#53), then G4
 
-**G2 M1 SHIPPED 2026-06-11 ~15:15 (task #45).** The engine paints through
-Ganesh under `browser.html?gpu=1` — GPU gate PASS with readback
-PIXEL-IDENTICAL to CPU raster (exactBlue=20000 redGlyph=1962
-nonWhite=22414); raster gates unchanged and green; wasm +0.7MB. Full
-implementation record in decision-005 "G2 M1 results". Verify any GPU
-work with `BIB_CHANNEL=chromium node build/gpu-gate-probe.mjs` (full
-Chromium REQUIRED — headless-shell loses WebGL contexts).
+**M2 MEASURED + G3 SHIPPED 2026-06-11 ~17:15 (tasks #51, #52).** GPU is
+now DEFAULT-ON for humans on plain browser.html (?gpu=0 escapes;
+automation/webdriver defaults raster so all existing gates kept their
+semantics). Numbers: old.reddit force-frame 32.60→9.60ms (3.4×),
+wikipedia 34.2→13.30ms, scroll 5.62→1.91ms, canvas anim
+51.97/29.08/18.73 ms/frame cpu/gpu/canvasgpu, guest getImageData
+unregressed; zero engine-side GPU readbacks (driver "ReadPixels stall"
+lines in probe logs = headless compositor artifact). Guest 2D canvases
+are texture-backed by default in GPU mode (canvasUsesAcceleratedDrawing
+— was FALSE-by-default for WebCore-direct embedders; ?canvasgpu=0
+escapes). __bib.probe()/gates work in both modes via the new
+bib_render_readback() export; tools/gate8-gpu-test.mjs is the committed
+GPU smoke gate (channel chromium); context loss → auto-reload, second
+loss → raster fallback. Full record: decision-005 "M2 results" + "G3
+results". **Ask the user to re-run MotionMark** (32 was scored BEFORE
+canvas acceleration — expect higher now).
 
 Next, in order:
-1. **M2 — measure GPU mode on real content**: perf-probe/scroll-cost on
-   ?gpu=1 (old.reddit force-frame was 32.6ms CPU; G1 spike said ~1-3ms),
-   image-heavy pages (texture upload/cache behavior, OQ3 tail), watch for
-   paths that read pixels mid-paint (risk #1: filters, getImageData).
-2. **G3 — probe/gate compat**: __bib.probe()/bib_render(force) GPU
-   readback path (surface->readPixels — probes only), GPU smoke gate in
-   the gate suite, decide default-on vs opt-in.
-3. Context-loss recreate handler (risk #3) — headless-shell is a free
-   repro rig. Then G4 validation sweep.
-4. **Guest-wasm scoping pass (task #53, after G3)**: JSC IPInt (in-place
-   wasm interpreter, no JIT needed — Lockdown Mode's path) may unblock
+1. **Guest-wasm scoping pass (task #53)**: JSC IPInt (in-place wasm
+   interpreter, no JIT needed — Lockdown Mode's path) may unblock
    Discord-class sites ("WebAssembly is undefined"). Go/no-go doc only
    (decision-006), modeled on the Workers scoping; likely kill criterion
    is whether IPInt exists under the offlineasm cloop backend. JS-speed
    verdict on record (2026-06-11): CLoop is permanent; only research-grade
    paths (weval-style specialization) give 2×+; blocklist remains the
-   best real-site JS lever. MotionMark under ?gpu=1: 2-3 → 32.
+   best real-site JS lever.
+2. **G4 — in-place context-loss recreate** (no reload: recreate WebGL2
+   context + GrDirectContext + surfaces, re-point the GLContext facades —
+   they hold the boot handle by value) + full validation sweep (5-site,
+   gates, memwatch) on the GPU default.
+3. Backlog unchanged: request blocklist (best real-site JS lever), #32
+   guest WebGL (cheap post-G2 — can share the live context), wave-3
+   sweeps, Phase 5 chrome, cookie OPFS, HTTP auth, W-B pthreads HOLD.
 
 **G1 PASSED 2026-06-11 ~14:30 (task #44).** The full Ganesh→GLES3→WebGL2
 stack works against our exact libSkia.a: gradient/AA/texture-upload/path

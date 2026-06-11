@@ -476,6 +476,28 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
     return g_blitPixels;
 }
 
+// Probe/gate path ONLY (G3, decision-005): force a repaint and return CPU
+// pixels in BOTH modes. CPU mode is bib_render(1) verbatim; GPU mode adds a
+// full-frame Ganesh readback into g_blitPixels — a deliberate GPU sync that
+// must never run per-frame (the render loop uses bib_render).
+EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render_readback()
+{
+    const uint8_t* ptr = bib_render(1);
+    if (!g_gpu)
+        return ptr;
+    if (!g_engine || !g_engine->surface)
+        return nullptr;
+    // bib_render(1) painted into the texture surface and presented; read the
+    // surface (not FBO 0 — its content is undefined after composite with
+    // preserveDrawingBuffer off). presentGPU left our context current, but
+    // re-assert defensively like every other GPU entry point.
+    WebCore::PlatformDisplay::sharedDisplay().skiaGLContext()->makeContextCurrent();
+    auto dstInfo = SkImageInfo::Make(kWidth, kHeight, kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
+    if (!g_engine->surface->readPixels(SkPixmap(dstInfo, g_blitPixels, kWidth * 4), 0, 0))
+        return nullptr;
+    return g_blitPixels;
+}
+
 // --- Input forwarding (canvas events -> WebCore EventHandler) ---
 
 EMSCRIPTEN_KEEPALIVE void bib_mouse_move(double x, double y, int modifierBits)
@@ -655,6 +677,12 @@ int main()
             g_gpu = display.skiaGLContext() && display.skiaGrContext();
         }
         printf("EMBEDDER: gpu=%s\n", g_gpu ? "on" : "REQUESTED-BUT-UNAVAILABLE (cpu fallback)");
+        // The host committed to GPU mode (no 2d context, ignores bib_render
+        // pointers) before the engine could fail — an engine-only fallback
+        // would leave the canvas permanently blank (Codex HIGH, G3). Tell
+        // the host so it can reload with ?gpu=0.
+        if (!g_gpu)
+            EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
     }
 
     printf("EMBEDDER: init OK\n");
@@ -805,6 +833,10 @@ int main()
             g_fbo0Surface = nullptr;
             surface = nullptr;
             g_gpu = false;
+            // Same split-brain hazard as the boot-init fallback above: the
+            // host is in GPU mode with no blit path — engine CPU raster
+            // would never reach the screen (Codex HIGH, G3).
+            EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
         }
     }
     if (!g_gpu)
@@ -819,6 +851,17 @@ int main()
     // moot (no g_blitPixels mirror) — a null hook makes ChromeClient::scroll
     // fall back to addDamage(clip), i.e. a clipped GPU repaint.
     BIB::g_scrollBlit = g_gpu ? nullptr : bibScrollBlit;
+
+    // G3: guest 2D canvases on Ganesh (host defaults this ON with GPU after
+    // the A/B — 600-arc anim 51.97/29.08/18.73 ms per frame cpu/gpu/this,
+    // getImageData unregressed; ?canvasgpu=0 escapes).
+    // CanvasUsesAcceleratedDrawing defaults FALSE for WebCore-direct
+    // embedders, so without this guest canvases paint CPU-raster and
+    // re-upload per draw even under GPU. Gated on the SURVIVING g_gpu
+    // (after the surface fallback above): texture canvases drawn into a
+    // raster window surface would read back on every draw.
+    if (g_gpu && EM_ASM_INT({ return Module.bibCanvasGPU ? 1 : 0; }))
+        g_engine->page->settings().setCanvasUsesAcceleratedDrawing(true);
 
     if (!paintFrame()) {
         printf("EMBEDDER: FAIL paint\n");

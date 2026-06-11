@@ -53,11 +53,16 @@
     }
 
     const canvas = document.getElementById("screen");
-    // GPU mode (?gpu=1): the ENGINE owns the canvas through its own WebGL2
-    // context (Ganesh renders straight into it). Touching getContext("2d")
-    // here would lock the canvas to 2d and the engine's context creation
-    // would fail — so in GPU mode there is no 2d context and no blit at all.
-    const gpuMode = !!new URLSearchParams(location.search).get("gpu");
+    // GPU mode: the ENGINE owns the canvas through its own WebGL2 context
+    // (Ganesh renders straight into it). Touching getContext("2d") here
+    // would lock the canvas to 2d and the engine's context creation would
+    // fail — so in GPU mode there is no 2d context and no blit at all.
+    // Default-on (G3, M2-measured 2.6-3.4×) for humans; automation
+    // (navigator.webdriver) defaults to raster because Playwright's
+    // headless-shell loses WebGL contexts at first composite — GPU probes
+    // opt in with ?gpu=1 + BIB_CHANNEL=chromium. ?gpu=0 forces raster.
+    const gpuParam = new URLSearchParams(location.search).get("gpu");
+    const gpuMode = gpuParam !== null ? gpuParam !== "0" : !navigator.webdriver;
     const ctx = gpuMode ? null : canvas.getContext("2d");
 
     // --- Event-driven engine pump (perf) --------------------------------
@@ -234,7 +239,9 @@
       // unpremultiplied RGBA buffer (NOT canvas getImageData — the canvas
       // premul round-trip is lossy).
       probe(x, y) {
-        const ptr = Module._bib_render(1);
+        // bib_render_readback is bib_render(1) in CPU mode; in GPU mode it
+        // adds a full-frame Ganesh readback (probe-only GPU sync — G3).
+        const ptr = Module._bib_render_readback();
         if (!ptr) return null;
         const w = Module._bib_frame_width();
         const h = Module._bib_frame_height();
@@ -252,13 +259,16 @@
     });
 
     // Same region assertions as the offscreen gate (hello demo only).
-    function judgeHelloFrame(pixels, w, h) {
+    // tol=0 (CPU) keeps the blue test pixel-exact; GPU passes tol=2 so the
+    // gate doesn't fail on driver-level rounding (shading has matched the
+    // CPU raster exactly so far — M1 readback was pixel-identical).
+    function judgeHelloFrame(pixels, w, h, tol = 0) {
       let exactBlue = 0, redGlyph = 0;
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
           const i = (y * w + x) * 4;
           const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
-          if (r === 0x00 && g === 0x66 && b === 0xcc) exactBlue++;
+          if (r <= tol && Math.abs(g - 0x66) <= tol && Math.abs(b - 0xcc) <= tol) exactBlue++;
           if (y < 76 && r > 0x90 && g < 0x60 && b < 0x60) redGlyph++;
         }
       }
@@ -281,6 +291,25 @@
       pendingMove = null;
     }
 
+    // GPU context loss (G3 minimal recovery): the engine cannot recreate its
+    // Ganesh world in place yet (G4) — recover by reloading. Loss state
+    // rides the URL (?gpulost=1), NOT sessionStorage: opaque-origin /
+    // privacy-hardened contexts throw on storage access, which would kill
+    // the handler after preventDefault and leave the page dead (Codex, G3).
+    // A second loss means this GPU/driver can't hold a context → ?gpu=0.
+    if (gpuMode) {
+      canvas.addEventListener("webglcontextlost", (e) => {
+        e.preventDefault();
+        const u = new URL(location.href);
+        const second = u.searchParams.get("gpulost") === "1";
+        if (second) u.searchParams.set("gpu", "0");
+        else u.searchParams.set("gpulost", "1");
+        log(`WebGL context lost — reloading${second ? " in raster mode" : ""}`);
+        statusEl.textContent = "GPU context lost — reloading";
+        location.replace(u.href);
+      });
+    }
+
     function blitLoop() {
       flushPendingMove();
       Module._bib_tick();
@@ -289,8 +318,21 @@
       const ptr = Module._bib_render(bib.frames === 0 ? 1 : 0);
       if (gpuMode) {
         // GPU present happens engine-side; bib_render returns null by
-        // design. Count the forced first frame so force=1 fires only once.
-        if (bib.frames === 0) bib.frames++;
+        // design. Count the forced first frame so force=1 fires only once,
+        // and judge the hello gate through the G3 readback path (one-time
+        // GPU sync — never per-frame).
+        if (bib.frames === 0) {
+          if (demo === "hello") {
+            const rb = Module._bib_render_readback();
+            if (rb) {
+              const w = Module._bib_frame_width();
+              const h = Module._bib_frame_height();
+              judgeHelloFrame(new Uint8ClampedArray(Module.HEAPU8.buffer, rb, w * h * 4), w, h, 2);
+            }
+          }
+          bib.frames++;
+          blitsEl.textContent = bib.frames;
+        }
       } else if (ptr) {
         const w = Module._bib_frame_width();
         const h = Module._bib_frame_height();
@@ -407,9 +449,27 @@
     // global scope `var Module` re-declares without clobbering the value.
     window.Module = {
       bibInteractive: true,
-      // ?gpu=1 -> Ganesh-over-WebGL2 paint path (decision-005 G2). Opt-in;
-      // the engine falls back to CPU raster if context/caps setup fails.
+      // Ganesh-over-WebGL2 paint path (decision-005 G2/G3). Default-on for
+      // humans, ?gpu=0 to force raster; the engine falls back to CPU raster
+      // if context/caps setup fails.
       bibGPU: gpuMode,
+      // Guest 2D canvases texture-backed (CanvasUsesAcceleratedDrawing) —
+      // default-on with GPU since the G3 A/B: 600-arc canvas anim 51.97
+      // (cpu) / 29.08 (gpu) / 18.73 (this) ms/frame, and guest getImageData
+      // showed NO readback penalty (2.70ms vs 3.14 cpu — CLoop dominates).
+      // Bonus: canvas buffers leave the 4GB wasm heap. ?canvasgpu=0 escapes.
+      bibCanvasGPU: gpuMode && params.get("canvasgpu") !== "0",
+      // Engine GPU boot failed AFTER the host committed to GPU mode (no 2d
+      // context, bib_render pointers ignored) — engine-side CPU fallback
+      // alone would never reach the screen. Reload in raster mode
+      // (?gpu=0 skips the GPU boot entirely, so this cannot loop).
+      bibGpuFallback: () => {
+        if (!gpuMode) return;
+        log("engine GPU setup failed — reloading in raster mode");
+        const u = new URL(location.href);
+        u.searchParams.set("gpu", "0");
+        location.replace(u.href);
+      },
       bibHTML: demo === "hello" ? helloHTML : demo === "scripttest" ? scriptTestHTML : interactiveHTML,
       // SOCKFS websocket config: bare prefix => 'ws://<host>:<port>/',
       // which the dispatcher above reroutes onto Wisp streams. The

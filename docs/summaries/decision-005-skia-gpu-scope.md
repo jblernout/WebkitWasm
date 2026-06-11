@@ -1,8 +1,11 @@
 # Decision 005 — Skia GPU backend (WebGL2/Ganesh) scope + acceleration ladder
 
-Date: 2026-06-11. Status: **G2 M1 PASSED + M2 MEASURED 2026-06-11 — engine
-paints through Ganesh under ?gpu=1, 2.6-3.4× frame-cost wins on real sites,
-zero engine-side GPU readbacks (see "M2 results"); next: G3.**
+Date: 2026-06-11. Status: **G3 SHIPPED 2026-06-11 — GPU is DEFAULT-ON for
+humans (?gpu=0 escapes), probes/gates work in both modes via
+bib_render_readback, guest canvases are texture-backed by default in GPU
+mode, context loss auto-recovers (see "G3 results"); next: G4 (in-place
+context recreate, full validation).** M2: 2.6-3.4× frame-cost wins on real
+sites, zero engine-side GPU readbacks (see "M2 results").
 Motivation: heavy visual+JS sites drop to a few fps. Measured anatomy:
 full-viewport Skia CPU paint **32.09ms** (old.reddit, >1 frame budget
 before any JS), CLoop JS 10–100× slower than JIT (unfixable — no JIT in
@@ -328,6 +331,65 @@ paint raster then upload per frame. G3 experiment: set
 canvasUsesAcceleratedDrawing=true (GPU mode only) and re-measure MotionMark
 — upside on canvas suites, watch getImageData-heavy sites for new sync
 stalls (the cost would become real GPU readback instead of memcpy).
+
+## G3 results (2026-06-11) — probe compat, default-on, canvas acceleration
+
+Embedder-only changes (NO WebKit-tree edits — no patch re-export needed):
+
+- **bib_render_readback() export** (main.cpp): bib_render(1) verbatim in CPU
+  mode; GPU mode adds a full-frame surface->readPixels into g_blitPixels.
+  Probe/gate ONLY — never per-frame. __bib.probe() now routes through it and
+  works identically in both modes (gate3's exact-pixel asserts pass via the
+  same path in CPU mode).
+- **GPU default-on** (browser.html): `?gpu` absent → GPU for humans, raster
+  under automation (navigator.webdriver) because Playwright's headless-shell
+  drops WebGL contexts at first composite — all 18 existing gate/probe
+  scripts keep their raster semantics untouched. ?gpu=0 forces raster
+  anywhere; GPU probes pass ?gpu=1 + BIB_CHANNEL=chromium.
+- **GPU hello judge**: judgeHelloFrame gained a tolerance param (CPU stays
+  tol=0 pixel-exact; GPU uses tol=2) and runs once on the first GPU frame
+  through the readback export.
+- **Context-loss recovery (minimal)**: webglcontextlost → preventDefault +
+  reload; a second loss in the same session reloads with ?gpu=0. In-place
+  Ganesh recreate (no reload) is G4.
+- **Guest canvas acceleration — DEFAULT-ON in GPU mode** (the M2 finding
+  closed): main.cpp sets canvasUsesAcceleratedDrawing when g_gpu survives
+  boot AND Module.bibCanvasGPU (host default: on with GPU; ?canvasgpu=0
+  escapes). A/B on web/probe/canvasanim.html (600 stroked arcs/rAF, 5s,
+  MotionMark-Arcs-shaped): **51.97 (cpu) → 29.08 (gpu) → 18.73
+  (gpu+canvasgpu) ms/frame** — 2.8× over CPU, 1.55× over plain GPU. Guest
+  getImageData 300×150: cpu 3.76ms / gpu 3.07 / canvasgpu **2.70ms** — the
+  feared GPU-readback penalty does not materialize (CLoop overhead
+  dominates); bonus: canvas backing stores leave the 4GB wasm32 heap.
+- **gate8** (tools/gate8-gpu-test.mjs, committed): GPU smoke gate — requires
+  gpu=on, no fallback, no context loss, judge PASS, probe ≈ #0066cc ±2.
+  Launches channel "chromium" (real GL); raster gates keep headless-shell.
+
+**Codex review (1 HIGH + 2 LOW, all fixed):** (1) HIGH — split-brain
+fallback: if the engine's GPU boot fails (either stage: boot init →
+REQUESTED-BUT-UNAVAILABLE, or late surface/FBO-wrap failure after gpu=on),
+the host has already committed to GPU mode — no 2d context, bib_render
+pointers ignored — so the engine's internal CPU fallback would paint into a
+buffer nobody displays: black screen for real users under default-on. Fix:
+both engine fallback sites now call Module.bibGpuFallback(), which reloads
+with ?gpu=0 (cannot loop — gpu=0 skips the GPU boot entirely). (2) LOW —
+gate8 now also fails on the late-fallback log strings, not just
+REQUESTED-BUT-UNAVAILABLE. (3) LOW — context-loss handler no longer touches
+sessionStorage (throws in opaque-origin/privacy-hardened contexts, which
+would have killed recovery after preventDefault): loss state rides the URL
+(?gpulost=1; second loss → ?gpu=0).
+
+**Verification (all green, BIB_CHANNEL=chromium for GPU rows):** gate8 PASS
+(exactBlue=20000 redGlyph=1962 — still pixel-identical even at tol 2; probe
+[0,102,204] exact); raster gate2 + gate3 PASS under headless-shell (webdriver
+default held, blits=1 CPU path); imagebitmap cpu+gpu PASS; canvas-readback
+cpu/gpu/canvasgpu PASS with correct pixels; final artifact re-run after the
+canvasgpu default flip: plain gpu canvas anim **16.95ms/frame** (295 frames
+in 5s), canvas getImageData 2.11ms.
+
+User-facing summary: plain http://localhost:8080/browser.html now runs the
+GPU path with accelerated canvases; MotionMark re-run (vs the 32 scored
+pre-canvas-acceleration) is the outstanding real-world datapoint.
 
 ## Open questions (as originally scoped; OQ1/OQ2 resolved, OQ3 partial — see G1 results)
 
