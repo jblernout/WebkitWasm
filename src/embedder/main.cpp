@@ -168,7 +168,7 @@ static bool paintFrameRect(const WebCore::IntRect& dirty)
 static void clearDamage()
 {
     BIB::g_frameDirty = false;
-    BIB::g_dirtyRect = { };
+    BIB::g_damageCount = 0;
     BIB::g_uploadRect = { };
 }
 
@@ -185,12 +185,6 @@ static void bibScrollBlit(const WebCore::IntSize& delta, const WebCore::IntRect&
         BIB::addDamage(clipRect);
         return;
     }
-    // Pending unpainted damage means the surface holds stale pixels —
-    // shifting stale content and painting only the strips would smear.
-    if (BIB::g_frameDirty) {
-        BIB::addDamage(scrollRect);
-        return;
-    }
     const int dx = delta.width(), dy = delta.height();
     WebCore::IntRect dst = scrollRect;
     dst.move(dx, dy);
@@ -201,6 +195,52 @@ static void bibScrollBlit(const WebCore::IntSize& delta, const WebCore::IntRect&
     }
     WebCore::IntRect src = dst;
     src.move(-dx, -dy);
+
+    // Pending unpainted damage: WebCore invalidates scrollbars/content
+    // BEFORE calling ChromeClient::scroll, so bailing out here tripped on
+    // EVERY scroll tick and kept blit-shift dormant (2026-06-11 scroll
+    // probe: 40/40 full-viewport repaints). Damage tracks the content it
+    // marks — translate the part inside the scrolled clip by the delta
+    // (the Windows port offsets its backing-store dirty region the same
+    // way). Stale pixels can only land where the shift writes (dst);
+    // damage shifted beyond dst is overwritten or clipped away with them.
+    // Fixed/sticky elements are NOT a smear hazard: scrollContentsFastPath
+    // invalidates their old+new rects AFTER this callback returns.
+    if (BIB::g_frameDirty) {
+        // A pending rect covering the whole scroll region means the blit
+        // preserves nothing worth keeping.
+        for (size_t i = 0; i < BIB::g_damageCount; ++i) {
+            if (BIB::g_damageRects[i].contains(scrollRect)) {
+                BIB::addDamage(scrollRect);
+                return;
+            }
+        }
+        // Per rect: damage outside the clip stays put; damage straddling
+        // the clip edge stays in place in FULL and gains a translated copy
+        // (repaints a little extra, never smears); fully-inside damage
+        // rides the scroll. Translated copies clip to dst — stale pixels
+        // can only land where the shift writes.
+        WebCore::IntRect pending[BIB::kMaxDamageRects * 2];
+        size_t pendingCount = 0;
+        for (size_t i = 0; i < BIB::g_damageCount; ++i) {
+            const WebCore::IntRect r = BIB::g_damageRects[i];
+            WebCore::IntRect moving = WebCore::intersection(r, scrollRect);
+            if (moving.isEmpty()) {
+                pending[pendingCount++] = r;
+                continue;
+            }
+            if (moving != r)
+                pending[pendingCount++] = r;
+            moving.move(dx, dy);
+            moving.intersect(dst);
+            if (!moving.isEmpty())
+                pending[pendingCount++] = moving;
+        }
+        BIB::g_damageCount = 0;
+        BIB::g_frameDirty = false;
+        for (size_t i = 0; i < pendingCount; ++i)
+            BIB::addDamage(pending[i]); // re-merges + re-arms g_frameDirty
+    }
 
     // Overlap-safe row walk over g_blitPixels (memmove handles x overlap).
     const size_t rowBytes = static_cast<size_t>(dst.width()) * 4;
@@ -341,29 +381,51 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
     // Two regions, two meanings: `dirty` = WebCore repaints + we read back;
     // `upload` = pixels bibScrollBlit already shifted in BOTH mirrors — the
     // host just re-uploads them, nothing repaints (a force frame is both).
-    WebCore::IntRect dirty = force ? frameRect : WebCore::intersection(BIB::g_dirtyRect, frameRect);
+    WebCore::IntRect dirty[BIB::kMaxDamageRects];
+    size_t dirtyCount = 0;
+    if (force)
+        dirty[dirtyCount++] = frameRect;
+    else {
+        for (size_t i = 0; i < BIB::g_damageCount; ++i) {
+            WebCore::IntRect r = WebCore::intersection(BIB::g_damageRects[i], frameRect);
+            if (!r.isEmpty())
+                dirty[dirtyCount++] = r;
+        }
+    }
     WebCore::IntRect upload = force ? WebCore::IntRect() : WebCore::intersection(BIB::g_uploadRect, frameRect);
     clearDamage(); // BEFORE paint — paint-time damage belongs to the next frame
-    if (dirty.isEmpty() && upload.isEmpty()) {
+    if (!dirtyCount && upload.isEmpty()) {
         // All damage was outside the viewport — nothing visible changed.
         return nullptr;
     }
-    if (!dirty.isEmpty()) {
-        if (!paintFrameRect(dirty))
-            return nullptr;
-        auto dstInfo = SkImageInfo::Make(dirty.width(), dirty.height(), kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
-        uint8_t* dst = g_blitPixels + (static_cast<size_t>(dirty.y()) * kWidth + dirty.x()) * 4;
-        if (!g_engine->surface->readPixels(SkPixmap(dstInfo, dst, kWidth * 4), dirty.x(), dirty.y())) {
-            // Failed readback: the surface now has newer pixels than
-            // g_blitPixels — re-dirty so the next frame repaints and retries
-            // instead of losing the damage (Codex 2026-06-11). Re-arm the
-            // upload region too: it was snapshot-cleared above.
-            BIB::addDamage(dirty);
+    WebCore::IntRect paintedBounds;
+    for (size_t i = 0; i < dirtyCount; ++i) {
+        const WebCore::IntRect& r = dirty[i];
+        bool painted = paintFrameRect(r);
+        bool readBack = painted;
+        if (painted) {
+            auto dstInfo = SkImageInfo::Make(r.width(), r.height(), kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
+            uint8_t* dst = g_blitPixels + (static_cast<size_t>(r.y()) * kWidth + r.x()) * 4;
+            readBack = g_engine->surface->readPixels(SkPixmap(dstInfo, dst, kWidth * 4), r.x(), r.y());
+        }
+        if (!painted || !readBack) {
+            // Failed paint/readback: re-dirty THIS rect and every rect not
+            // yet painted so the next frame retries instead of losing the
+            // damage (Codex 2026-06-11). Re-arm the upload region too: it
+            // was snapshot-cleared above. (A failed readback leaves the
+            // surface newer than g_blitPixels until the retry lands.)
+            for (size_t j = i; j < dirtyCount; ++j)
+                BIB::addDamage(dirty[j]);
             BIB::g_uploadRect.unite(upload);
+            // Rects painted BEFORE the failure are correct in both mirrors
+            // but were never reported — without this the host canvas stays
+            // stale there until unrelated damage covers it (Codex).
+            BIB::g_uploadRect.unite(paintedBounds);
             return nullptr;
         }
+        paintedBounds.unite(r);
     }
-    WebCore::IntRect box = dirty;
+    WebCore::IntRect box = paintedBounds;
     box.unite(upload);
     g_dirtyBox[0] = box.x();
     g_dirtyBox[1] = box.y();

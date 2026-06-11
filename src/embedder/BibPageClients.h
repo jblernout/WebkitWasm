@@ -46,6 +46,8 @@
 #include "ResourceRequest.h"
 #include "TextCheckerClient.h"
 #include "UserAgent.h"
+#include <cstdint>
+#include <limits>
 #include <wtf/RunLoop.h>
 #include <wtf/UniqueRef.h>
 #include <wtf/text/WTFString.h>
@@ -55,11 +57,17 @@ namespace BIB {
 // Set by BibChromeClient on any damage report; cleared by paintFrame().
 inline bool g_frameDirty = true;
 
-// Union of every damage rect reported since the last paint (root-view
-// coords). bib_render snapshots it AFTER layout (layout adds damage),
-// clamps to the frame, paints/reads back only that region, then resets it.
-// Starts huge so the first paint covers the whole frame whatever its size.
-inline WebCore::IntRect g_dirtyRect { 0, 0, 1 << 20, 1 << 20 };
+// Damage LIST, not a single union rect (root-view coords). Scrolling leaves
+// two small but DISTANT damages every tick — the exposed strip at the bottom
+// and the scrollbar at the right edge — and their single-rect union covered
+// ~80% of the frame, so repaint cost stayed ~25ms even with blit-shift
+// active (2026-06-11 scroll probe). Disjoint damage must stay disjoint.
+// bib_render snapshots the list AFTER layout (layout adds damage), clamps
+// each rect to the frame, paints/reads back each region, then resets.
+// Slot 0 starts huge so the first paint covers the whole frame.
+inline constexpr size_t kMaxDamageRects = 4;
+inline WebCore::IntRect g_damageRects[kMaxDamageRects] = { { 0, 0, 1 << 20, 1 << 20 } };
+inline size_t g_damageCount = 1;
 
 // Region the HOST canvas must re-upload WITHOUT WebCore repainting it:
 // blit-shifted scroll pixels already updated in g_blitPixels + the surface
@@ -72,8 +80,39 @@ inline void (*g_scrollBlit)(const WebCore::IntSize&, const WebCore::IntRect&, co
 
 inline void addDamage(const WebCore::IntRect& rect)
 {
-    g_dirtyRect.unite(rect);
+    if (rect.isEmpty())
+        return;
     g_frameDirty = true;
+    // Overlapping (or contained) damage merges in place; a later merge can
+    // make two slots overlap each other — harmless, painting is idempotent.
+    for (size_t i = 0; i < g_damageCount; ++i) {
+        if (g_damageRects[i].contains(rect))
+            return;
+        if (g_damageRects[i].intersects(rect)) {
+            g_damageRects[i].unite(rect);
+            return;
+        }
+    }
+    if (g_damageCount < kMaxDamageRects) {
+        g_damageRects[g_damageCount++] = rect;
+        return;
+    }
+    // List full: unite into the slot whose union grows the least.
+    auto area = [](const WebCore::IntRect& r) {
+        return static_cast<int64_t>(r.width()) * r.height();
+    };
+    size_t best = 0;
+    int64_t bestGrowth = std::numeric_limits<int64_t>::max();
+    for (size_t i = 0; i < g_damageCount; ++i) {
+        WebCore::IntRect u = g_damageRects[i];
+        u.unite(rect);
+        int64_t growth = area(u) - area(g_damageRects[i]);
+        if (growth < bestGrowth) {
+            bestGrowth = growth;
+            best = i;
+        }
+    }
+    g_damageRects[best].unite(rect);
 }
 
 // Set by BibChromeClient::scheduleRenderingUpdate (WebCore requested the
@@ -86,7 +125,17 @@ public:
     BibChromeClient() = default;
 
 private:
-    void invalidateRootView(const WebCore::IntRect& rect) final { addDamage(rect); }
+    // invalidateRootView = "push the backing store to the window": the
+    // backing store (SkSurface + g_blitPixels) is NOT stale — only the host
+    // canvas needs a re-upload. ScrollView::scrollContents fires this with
+    // the FULL visible rect on EVERY scroll tick BEFORE ChromeClient::
+    // scroll(), so mapping it to addDamage() forced a full-viewport repaint
+    // per tick — the REAL blit-shift dormancy root cause (the g_frameDirty
+    // guard was just where it surfaced). The Win port maps this to its
+    // window-only dirty region the same way (WebView::repaint with
+    // contentChanged=false). Content damage arrives separately via
+    // invalidateContentsAndRootView / invalidateContentsForSlowScroll.
+    void invalidateRootView(const WebCore::IntRect& rect) final { g_uploadRect.unite(rect); }
     void invalidateContentsAndRootView(const WebCore::IntRect& rect) final { addDamage(rect); }
     void invalidateContentsForSlowScroll(const WebCore::IntRect& rect) final { addDamage(rect); }
     // scroll() is the fast-scroll path: the embedder blit-shifts the

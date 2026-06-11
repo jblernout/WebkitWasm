@@ -59,5 +59,8 @@ for (const delta of [3, 5, 7, 10]) {
   await shot(`4-after-enter-${elapsed}s`);
   console.log(`  screenshot at +${elapsed}s`);
 }
-await browser.close();
 console.log("done — see build/google-login-*.png");
+// COOP/COEP engine page: browser.close() can hang forever (2026-06-11,
+// zombie probe trees) -- race it against a timeout, then hard-exit.
+await Promise.race([browser.close(), new Promise((r) => setTimeout(r, 5000))]);
+process.exit(process.exitCode ?? 0);

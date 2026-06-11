@@ -104,4 +104,7 @@ for (let i = 0; i <= reloads; i++) {
   );
 }
 console.log(`\nglobal peak RSS: ${mb(globalPeak)}`);
-await browser.close();
+// COOP/COEP engine page: browser.close() can hang forever (2026-06-11,
+// zombie probe trees) -- race it against a timeout, then hard-exit.
+await Promise.race([browser.close(), new Promise((r) => setTimeout(r, 5000))]);
+process.exit(process.exitCode ?? 0);

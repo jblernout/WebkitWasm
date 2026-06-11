@@ -107,4 +107,7 @@ console.log(
   `SMOKE-MODERN-SITE: ${failed === 0 ? "PASS" : "FAIL"} (${checks.length - failed}/${checks.length}) target=${target}`
 );
 if (failed) process.exitCode = 1;
-await browser.close();
+// COOP/COEP engine page: browser.close() can hang forever (2026-06-11,
+// zombie probe trees) -- race it against a timeout, then hard-exit.
+await Promise.race([browser.close(), new Promise((r) => setTimeout(r, 5000))]);
+process.exit(process.exitCode ?? 0);

@@ -16,11 +16,45 @@ workers (main-thread mode), event-driven pump, dirty-rect rendering.
 Wave-2 sweep: old.reddit real front page, google login full flow ≤3s,
 reCAPTCHA 0.42s click-feel + interactive 4×4 image challenge, velzie.rip
 near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
-0.38ms, setTimeout 6.93ms, fetch 44ms, **dirty frame 0.35ms (was
-32.09ms)**, idle bib_tick 0.005ms. The TWO repeated engine gaps from the
+0.38ms, setTimeout 6.93ms, fetch 44ms, **dirty frame 0.32ms (was
+32.09ms)**, **scroll frame 5.62ms (was 24.09ms)**, idle bib_tick
+0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: blit-shift guard fix, then Skia-GPU G1
+## ⟶ NEXT SESSION STARTS HERE: Skia-GPU G1 context spike (decision-005)
+
+**BLIT-SHIFT LIVE 2026-06-11 ~13:10 (task #43 complete).** Scroll cost
+**24.09ms → 5.62ms mean / 7.28ms p95** (build/scroll-cost.mjs on
+probe/tall.html) — inside the 16.6ms 60fps budget. Gate2 pixel-exact,
+dirty-cost 0.32ms, reddit force-frame 32.60ms (unchanged, expected),
+5-site sweep at baseline, scroll screenshot smear-free. TWO root causes
+were stacked under the "guard trips" theory; both fixed:
+1. **invalidateRootView ≠ content damage.** ScrollView::scrollContents
+   fires `invalidateRootView(full visible rect)` on EVERY scroll BEFORE
+   ChromeClient::scroll — it means "push backing store to window" (Win
+   port: window-only dirty region). We mapped it to addDamage → full
+   repaint per tick. Now: `g_uploadRect.unite(rect)` (host re-upload
+   only, no WebCore repaint). BibPageClients.h.
+2. **Single-rect damage union is structurally wrong for scroll.** Each
+   tick leaves the exposed strip (bottom, 793x120) + scrollbar (right
+   edge, 7x600); their union ≈ 80% of frame (~25.7ms measured ≈ the
+   prediction). Replaced with **damage LIST** (g_damageRects[4],
+   merge-on-overlap, least-growth eviction, per-rect paint+readPixels in
+   bib_render, per-rect translation in bibScrollBlit). Probe confirmed
+   `paint[1/2] 0,480 793x120` + `paint[2/2] 793,0 7x600`.
+Codex reviewed twice (translation math clean; one MEDIUM partial-failure
+stranding found and fixed: painted-before-failure rects now unite into
+g_uploadRect). Probe armor SHIPPED: all 18 tools/probes now
+`Promise.race([browser.close(), 5s])` + `process.exit(process.exitCode
+?? 0)`; paint-cost.mjs had NO close at all (the 1h38m hang).
+
+**Up next: Skia-GPU G1** — unambiguously the top perf item. Scroll is
+fixed; full-viewport paint (32.6ms) is the remaining wall and SIMD did
+nothing for it. See decision-005 for G1→G4 phases (Ganesh GL is already
+compiled into libSkia.a; integration = PlatformDisplay::skiaGrContext +
+WebGL2 context via emscripten_GetProcAddress; fold #32 WebGL into G2+).
+
+## (superseded) Previous opener: blit-shift guard fix
 
 **RUNG 1 VALIDATED 2026-06-11 ~12:30 (task #42 complete) — honest mixed
 verdict; build is HEALTHY and stays:**

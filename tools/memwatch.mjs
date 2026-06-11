@@ -195,4 +195,7 @@ console.log(
 const idleBlits = idle.length >= 2 ? (idle[idle.length - 1].frames - idle[0].frames) : 0;
 console.log(`idle dirty-frame blits: ${idleBlits} over ${idleSecs}s (should be ~0)`);
 
-await browser.close();
+// COOP/COEP engine page: browser.close() can hang forever (2026-06-11,
+// zombie probe trees) -- race it against a timeout, then hard-exit.
+await Promise.race([browser.close(), new Promise((r) => setTimeout(r, 5000))]);
+process.exit(process.exitCode ?? 0);

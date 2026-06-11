@@ -73,4 +73,7 @@ console.log(
   `PERF-PROBE: ${lines.length >= 4 ? "COMPLETE" : "INCOMPLETE"} (${lines.length}/4) target=${target}`
 );
 if (lines.length < 4) process.exitCode = 1;
-await browser.close();
+// COOP/COEP engine page: browser.close() can hang forever (2026-06-11,
+// zombie probe trees) -- race it against a timeout, then hard-exit.
+await Promise.race([browser.close(), new Promise((r) => setTimeout(r, 5000))]);
+process.exit(process.exitCode ?? 0);
