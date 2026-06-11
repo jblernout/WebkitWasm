@@ -21,6 +21,7 @@ FSROOT="$ROOT/build/embedder-fs"
 # present, configs missing) must re-stage, and staging that produces an
 # empty conf.d must FAIL, not print OK (Codex review).
 if [ ! -f "$FSROOT/fonts/DejaVuSans.ttf" ] \
+   || [ ! -f "$FSROOT/fonts/DejaVuSansMono.ttf" ] \
    || [ ! -f "$FSROOT/etc-fonts/fonts.conf" ] \
    || [ -z "$(ls "$FSROOT/etc-fonts/conf.d" 2>/dev/null)" ]; then
   rm -rf "$FSROOT"
@@ -30,7 +31,14 @@ if [ ! -f "$FSROOT/fonts/DejaVuSans.ttf" ] \
     cp -f "$SYSROOT/share/fontconfig/conf.avail/$(basename "$link")" \
       "$FSROOT/etc-fonts/conf.d/" 2>/dev/null || true
   done
-  cp -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf "$FSROOT/fonts/"
+  # Full text-fidelity set (2026-06-10): sans alone meant fake bold/italic,
+  # serif mapped to sans, and code blocks rendered proportional. ~3.7MB of
+  # MEMFS for real bold/italic faces + serif + monospace.
+  for face in DejaVuSans DejaVuSans-Bold DejaVuSans-Oblique DejaVuSans-BoldOblique \
+              DejaVuSerif DejaVuSerif-Bold DejaVuSerif-Italic \
+              DejaVuSansMono DejaVuSansMono-Bold; do
+    cp -f "/usr/share/fonts/truetype/dejavu/$face.ttf" "$FSROOT/fonts/"
+  done
   CONFD_COUNT=$(ls "$FSROOT/etc-fonts/conf.d" | wc -l)
   if [ "$CONFD_COUNT" -lt 1 ]; then
     echo "FONT STAGING FAILED: conf.d is empty (sysroot fontconfig broken?)"

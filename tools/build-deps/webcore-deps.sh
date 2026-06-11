@@ -71,12 +71,25 @@ if [ ! -f "$SYSROOT/lib/libwebp.a" ]; then
 fi
 
 echo "=== freetype (no harfbuzz first pass) ==="
+# Brotli REQUIRED (2026-06-10): FT_CONFIG_OPTION_USE_BROTLI gives FreeType
+# native WOFF2 decoding, which WebKit's WOFF2Checks detects and exposes as
+# HAVE_WOFF_SUPPORT — that's how web fonts (woff2 = what every modern site
+# serves) work on the Skia+FreeType font path. Brotli libs come from the
+# curl tier; build order is safe because this script runs after it (and
+# brotli is already in the sysroot of every existing checkout).
 if [ ! -f "$SYSROOT/lib/libfreetype.a" ]; then
   fetch https://github.com/freetype/freetype/archive/refs/tags/VER-2-13-3.tar.gz freetype.tar.gz
   unpack freetype.tar.gz freetype
+  # FT_DISABLE_BROTLI=OFF must be EXPLICIT: an existing freetype-build dir
+  # carries the old ON in its CMakeCache, which silently wins over REQUIRE
+  # and reinstalls a brotli-less library (cost one no-op rebuild to learn).
+  rm -rf freetype-build
   cmake_build freetype freetype-build \
-    -DFT_DISABLE_HARFBUZZ=ON -DFT_DISABLE_BZIP2=ON -DFT_DISABLE_BROTLI=ON \
-    -DFT_REQUIRE_ZLIB=ON -DFT_REQUIRE_PNG=ON -DZLIB_ROOT="$SYSROOT"
+    -DFT_DISABLE_HARFBUZZ=ON -DFT_DISABLE_BZIP2=ON \
+    -DFT_DISABLE_BROTLI=OFF -DFT_REQUIRE_BROTLI=ON \
+    -DFT_REQUIRE_ZLIB=ON -DFT_REQUIRE_PNG=ON -DZLIB_ROOT="$SYSROOT" \
+    -DBROTLIDEC_INCLUDE_DIRS="$SYSROOT/include" \
+    -DBROTLIDEC_LIBRARIES="$SYSROOT/lib/libbrotlidec.a;$SYSROOT/lib/libbrotlicommon.a"
 fi
 
 echo "=== harfbuzz ==="

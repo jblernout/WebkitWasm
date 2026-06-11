@@ -28,6 +28,7 @@
 #include "EventNames.h"
 #include "FrameDestructionObserverInlines.h" // inline FrameDestructionObserver::frame()
 #include "FrameIdentifier.h"
+#include "FrameLoadRequest.h"
 #include "FrameLoader.h"
 #include "FrameTree.h"
 #include "FrameTreeSyncData.h"
@@ -41,8 +42,10 @@
 #include "Node.h"
 #include "NodeDocument.h" // inline Node::document()
 #include "PlatformKeyboardEvent.h"
+#include "ResourceRequest.h"
 #include "TextCheckerClient.h"
 #include "UserAgent.h"
+#include <wtf/RunLoop.h>
 #include <wtf/UniqueRef.h>
 #include <wtf/text/WTFString.h>
 
@@ -288,9 +291,23 @@ private:
         function(WebCore::PolicyAction::Use);
     }
 
-    void dispatchDecidePolicyForNewWindowAction(const WebCore::NavigationAction&, const WebCore::ResourceRequest&, WebCore::FormState*, const String&, std::optional<WebCore::HitTestResult>&&, WebCore::FramePolicyFunction&& function) final
+    void dispatchDecidePolicyForNewWindowAction(const WebCore::NavigationAction&, const WebCore::ResourceRequest& request, WebCore::FormState*, const String&, std::optional<WebCore::HitTestResult>&&, WebCore::FramePolicyFunction&& function) final
     {
-        // Single-page embedder: no new windows.
+        // Single-page embedder: no window can ever open — but the old plain
+        // Ignore made every target=_blank link a silent no-op (a very common
+        // dead end: login flows, docs links). Retarget the navigation into
+        // the MAIN frame instead, asynchronously so the loader re-enters
+        // from a clean stack, not from inside this policy callback.
+        if (request.url().protocolIsInHTTPFamily()) {
+            WTF::RunLoop::mainSingleton().dispatch([frame = Ref { m_frameLoader->frame() }, url = request.url().isolatedCopy()]() mutable {
+                RefPtr page = frame->page();
+                RefPtr mainFrame = page ? page->localMainFrame() : nullptr;
+                if (!mainFrame)
+                    return;
+                WebCore::FrameLoadRequest loadRequest { *mainFrame, WebCore::ResourceRequest { WTF::move(url) } };
+                mainFrame->loader().load(WTF::move(loadRequest));
+            });
+        }
         function(WebCore::PolicyAction::Ignore);
     }
 

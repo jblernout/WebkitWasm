@@ -96,6 +96,82 @@ Ref<WebCore::StorageSessionProvider> createEmbedderStorageSessionProvider()
     return EmbedderStorageSessionProvider::create();
 }
 
+// Cookie attach shared by document loads (BibResourceLoad) and pings —
+// the NetworkDataTaskCurl::appendCookieHeader recipe.
+static void appendEmbedderCookieHeader(ResourceRequest& request)
+{
+    auto includeSecureCookies = request.url().protocolIs("https"_s) ? IncludeSecureCookies::Yes : IncludeSecureCookies::No;
+    auto cookieHeaderField = embedderStorageSession().cookieRequestHeaderFieldValue(request.firstPartyForCookies(), SameSiteInfo::create(request), request.url(), std::nullopt, std::nullopt, includeSecureCookies, ApplyTrackingPrevention::Yes, ShouldRelaxThirdPartyCookieBlocking::No, IsKnownCrossSiteTracker::No).first;
+    if (!cookieHeaderField.isEmpty())
+        request.addHTTPHeaderField(HTTPHeaderName::Cookie, cookieHeaderField);
+}
+
+// Fire-and-forget ping (navigator.sendBeacon, <a ping>, CSP reports): a
+// minimal CurlRequestClient that owns itself for one request's lifetime.
+// The BibResourceLoad machinery needs a ResourceLoader; pings have none by
+// design. Headers are enough — we finish on response (no body read) and
+// don't follow redirects (rare for beacon endpoints; documented gap).
+class BibPingLoad final : public RefCounted<BibPingLoad>, public CurlRequestClient {
+public:
+    static void start(ResourceRequest&& request, LoaderStrategy::PingLoadCompletionHandler&& completionHandler)
+    {
+        Ref ping = adoptRef(*new BibPingLoad(WTF::move(completionHandler)));
+        ping->m_selfRef = ping.copyRef(); // released in finish()
+        if (request.httpUserAgent().isEmpty())
+            request.setHTTPUserAgent(standardUserAgent());
+        appendEmbedderCookieHeader(request);
+        ping->m_curlRequest = CurlRequest::create(request, ping.get());
+        ping->m_curlRequest->resume();
+    }
+
+    void ref() const final { RefCounted::ref(); }
+    void deref() const final { RefCounted::deref(); }
+
+private:
+    explicit BibPingLoad(LoaderStrategy::PingLoadCompletionHandler&& completionHandler)
+        : m_completionHandler(WTF::move(completionHandler))
+    {
+    }
+
+    // Idempotent: the cancel() below invalidates the client, so no second
+    // curl callback arrives after the first finish.
+    void finish(const ResourceError& error)
+    {
+        if (auto handler = std::exchange(m_completionHandler, nullptr))
+            handler(error, m_response);
+        if (auto curlRequest = std::exchange(m_curlRequest, nullptr)) {
+            curlRequest->cancel();
+            curlRequest->invalidateClient();
+        }
+        m_selfRef = nullptr;
+    }
+
+    void curlDidSendData(CurlRequest&, unsigned long long, unsigned long long) final { }
+
+    void curlDidReceiveResponse(CurlRequest& request, CurlResponse&& curlResponse) final
+    {
+        m_response = ResourceResponse(curlResponse);
+        // Beacon endpoints set cookies; store them like a real load would.
+        static constexpr auto setCookieHeader = "set-cookie:"_s;
+        for (const auto& header : curlResponse.headers) {
+            if (header.startsWithIgnoringASCIICase(setCookieHeader)) {
+                String setCookieString = header.right(header.length() - setCookieHeader.length()).trim(isASCIIWhitespace<char16_t>);
+                embedderStorageSession().setCookiesFromHTTPResponse(request.resourceRequest().firstPartyForCookies(), curlResponse.url, setCookieString);
+            }
+        }
+        finish({ });
+    }
+
+    void curlDidReceiveData(CurlRequest&, Ref<SharedBuffer>&&) final { }
+    void curlDidComplete(CurlRequest&, NetworkLoadMetrics&&) final { finish({ }); }
+    void curlDidFailWithError(CurlRequest&, ResourceError&& error, CertificateInfo&&) final { finish(error); }
+
+    LoaderStrategy::PingLoadCompletionHandler m_completionHandler;
+    RefPtr<CurlRequest> m_curlRequest;
+    RefPtr<BibPingLoad> m_selfRef;
+    ResourceResponse m_response;
+};
+
 // Drives ONE ResourceLoader through one (or, across redirects, several)
 // CurlRequest. A stripped-down NetworkDataTaskCurl: no credential storage,
 // no downloads, no auth restarts. Cookies use the NetworkDataTaskCurl
@@ -152,10 +228,7 @@ private:
     // header, so hops can't accumulate stale Cookie values.
     void appendCookieHeader(ResourceRequest& request)
     {
-        auto includeSecureCookies = request.url().protocolIs("https"_s) ? IncludeSecureCookies::Yes : IncludeSecureCookies::No;
-        auto cookieHeaderField = embedderStorageSession().cookieRequestHeaderFieldValue(request.firstPartyForCookies(), SameSiteInfo::create(request), request.url(), std::nullopt, std::nullopt, includeSecureCookies, ApplyTrackingPrevention::Yes, ShouldRelaxThirdPartyCookieBlocking::No, IsKnownCrossSiteTracker::No).first;
-        if (!cookieHeaderField.isEmpty())
-            request.addHTTPHeaderField(HTTPHeaderName::Cookie, cookieHeaderField);
+        appendEmbedderCookieHeader(request);
     }
 
     // NetworkDataTaskCurl::handleCookieHeaders. Runs on EVERY response,
@@ -409,14 +482,21 @@ private:
 
     void startPingLoad(LocalFrame&, ResourceRequest& request, const HTTPHeaderMap&, const FetchOptions&, ContentSecurityPolicyImposition, PingLoadCompletionHandler&& completionHandler) final
     {
-        if (completionHandler)
-            completionHandler(ResourceError(embedderErrorDomain(), 0, request.url(), "Ping loads are not supported yet"_s), { });
+        // sendBeacon / <a ping> / CSP reports. Fire-and-forget through a
+        // self-owning curl client — erroring these out made beacon-gated
+        // code paths fail and spammed the console on every analytics-bearing
+        // site. originalRequestHeaders/CORS are not applied (documented gap).
+        BibPingLoad::start(ResourceRequest { request }, WTF::move(completionHandler));
     }
 
-    void preconnectTo(FrameLoader&, ResourceRequest&& request, StoredCredentialsPolicy, ShouldPreconnectAsFirstParty, PreconnectCompletionHandler&& completionHandler) final
+    void preconnectTo(FrameLoader&, ResourceRequest&&, StoredCredentialsPolicy, ShouldPreconnectAsFirstParty, PreconnectCompletionHandler&& completionHandler) final
     {
+        // Succeed as a no-op: curl manages its own connection pool and a
+        // warm-up dial isn't worth the stream churn over wisp. Reporting an
+        // ERROR here (the old behavior) just generated console noise for
+        // every <link rel=preconnect>.
         if (completionHandler)
-            completionHandler(ResourceError(embedderErrorDomain(), 0, request.url(), "Preconnect is not supported yet"_s));
+            completionHandler({ });
     }
 
     void setCaptureExtraNetworkLoadMetricsEnabled(bool) final { }

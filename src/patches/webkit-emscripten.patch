@@ -2394,10 +2394,10 @@ index a74247d0ad..8f716b24f6 100644
          return compliantScriptURLString.releaseException();
 diff --git a/Source/cmake/OptionsEmscripten.cmake b/Source/cmake/OptionsEmscripten.cmake
 new file mode 100644
-index 0000000000..75382f94ee
+index 0000000000..e74f5413af
 --- /dev/null
 +++ b/Source/cmake/OptionsEmscripten.cmake
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,163 @@
 +# PORT=Emscripten: WebCore + JavaScriptCore compiled to WebAssembly with
 +# Emscripten. Single-process WebKit1-style embedder; no WebKit2, no tools.
 +#
@@ -2515,6 +2515,19 @@ index 0000000000..75382f94ee
 +
 +    # Provided by third_party/wasm-sysroot (found via CMAKE_FIND_ROOT_PATH).
 +    find_package(Freetype 2.9.0 REQUIRED)
++
++    # Web fonts (GTK idiom): the sysroot FreeType is built with brotli
++    # (FT_CONFIG_OPTION_USE_BROTLI), so it decodes WOFF2 natively — no
++    # libwoff2 needed (USE_WOFF2 stays OFF). HAVE_WOFF_SUPPORT gates
++    # FontCustomPlatformData's format acceptance; without it every
++    # woff/woff2 @font-face (i.e. all modern web fonts, all icon fonts)
++    # was silently rejected and text fell back to DejaVu.
++    include(WOFF2Checks)
++    if (FREETYPE_WOFF2_SUPPORT_IS_AVAILABLE)
++        SET_AND_EXPOSE_TO_BUILD(HAVE_WOFF_SUPPORT ON)
++    else ()
++        message(FATAL_ERROR "Sysroot FreeType lacks brotli/WOFF2 — rerun tools/build-deps/webcore-deps.sh (freetype section)")
++    endif ()
 +    find_package(JPEG REQUIRED)
 +    find_package(LibXml2 2.9.7 REQUIRED)
 +    find_package(PNG REQUIRED)

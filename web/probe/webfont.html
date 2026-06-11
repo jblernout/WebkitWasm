@@ -1,0 +1,60 @@
+<!doctype html>
+<!-- Web-font probe: does a woff2 @font-face actually load and apply?
+     (HAVE_WOFF_SUPPORT via FreeType+brotli — before 2026-06-10 every
+     woff/woff2 source was silently rejected by supportsFormat and text
+     fell back to DejaVu.)
+     Verdict via guest console (BIBFONT: lines):
+       check  — document.fonts.check() after fonts.ready
+       widths — Pacifico (cursive, wide) must differ from the DejaVu
+                fallback rendering of the same string
+     Visual: the headline switches to an unmistakable cursive face. -->
+<html>
+<head>
+  <style>
+    @font-face {
+      font-family: "ProbeFont";
+      src: url("./pacifico.woff2") format("woff2");
+    }
+    body { background: #ffffff; margin: 0; font-size: 16px; }
+    #probe, #fallback {
+      font-size: 40px;
+      display: inline-block;
+      white-space: nowrap;
+    }
+    #probe { font-family: "ProbeFont", sans-serif; }
+    #fallback { font-family: sans-serif; }
+  </style>
+</head>
+<body>
+  <div><span id="probe">Hamburgefonstiv 123</span></div>
+  <div><span id="fallback">Hamburgefonstiv 123</span></div>
+  <script>
+    const report = () => {
+      const ok = document.fonts.check('40px "ProbeFont"');
+      const pw = document.getElementById("probe").offsetWidth;
+      const fw = document.getElementById("fallback").offsetWidth;
+      document.fonts.forEach((f) =>
+        console.log("BIBFONT: face family=" + f.family + " status=" + f.status));
+      console.log("BIBFONT: check=" + ok + " probeWidth=" + pw +
+        " fallbackWidth=" + fw + " differs=" + (pw !== fw));
+      // Width delta must be substantial: Pacifico is a wide cursive; a
+      // couple of px is just fallback jitter, not the real face.
+      console.log("BIBFONT: VERDICT " + (ok && Math.abs(pw - fw) > 20 ? "PASS" : "FAIL"));
+    };
+    // Explicit load with catch — a parse/decode failure surfaces here as a
+    // rejection with a reason, where the declarative path just falls back.
+    new FontFace("ProbeExplicit", 'url("./pacifico.woff2") format("woff2")')
+      .load()
+      .then((f) => console.log("BIBFONT: explicit load OK status=" + f.status))
+      .catch((e) => console.log("BIBFONT: explicit load FAILED " + e));
+    if (document.fonts && document.fonts.ready)
+      document.fonts.ready.then(report);
+    else
+      console.log("BIBFONT: VERDICT FAIL (no document.fonts)");
+    // Belt and braces: report again after 5s in case fonts.ready resolved
+    // before the face finished (spec says it shouldn't, but a stalled load
+    // would otherwise look like a hang instead of a FAIL).
+    setTimeout(report, 5000);
+  </script>
+</body>
+</html>

@@ -1,14 +1,78 @@
 # Handoff — Phase 5: browser chrome + Phase 4 leftovers (the ONE active handoff)
 
 **Written**: 2026-06-10 ~04:55 EDT, right after Phase 4 core completed.
-**Updated**: 2026-06-10 ~17:20 EDT after the IDB + diagnostics + rAF
-session. Day's commits: … → aa5cda7 (cookies) → 9c9e8ef (site support) →
-4db3dbf (recaps) → cc7794a (IndexedDB + gate7) → ff6ff82 (network
-diagnostics) → 810bdfd (diagnose-tool fix) → rAF/RIC/bib_eval chunk
-(git log tip; suite 9/9 throughout).
+**Updated**: 2026-06-10 ~22:30 EDT after the perf-sweep / event-driven-pump
+/ Chunk-B-fonts session. Day's commits: … → cc7794a (IndexedDB) → ff6ff82
+(network diagnostics) → 810bdfd (diagnose fix) → b4ee171 (rAF #16) →
+**ff8c524 (event-driven pump #17)** → Chunk B fonts/_blank/ping (git tip).
 **Supersedes**: handoff-2026-06-10-phase4-networking.md (→ docs/archive/).
 
-## ⟶ NEXT SESSION STARTS HERE: PERFORMANCE + site-support wave 2
+## Honest phase status (user-set framing, 2026-06-10 22:30)
+**Phase 4 is NOT done.** The core pipeline browses the real web (TLS,
+cookies, storage, IDB, images, iframes, rAF), but "browses" ≠ "usable":
+performance on real sites and breadth of site support ARE the remaining
+bulk of Phase 4. The pump fix (#17) is one large step, not the finish —
+nothing below is done until real sites feel usable and the wave-2 sweep
+verdicts flip. Phase 5 chrome (title/back-forward/etc.) stays SECONDARY
+to that.
+
+## ⟶ NEXT SESSION STARTS HERE: woff2 glyph mystery + perf re-verify
+
+1. **WOFF2 glyphs (#37 tail — ONE step from root cause)**. State: woff2
+   DECODE works end-to-end (FT+brotli; FontCustomPlatformData::create →
+   typeface=1 family=Pacifico; FontFace status=loaded; LINE METRICS applied
+   — probe line height 70 vs 46 fallback) but GLYPHS render as DejaVu
+   per-glyph fallback. TTF custom fonts apply PERFECTLY (Gentium probe) →
+   woff2-specific, downstream of decode. EXONERATED with evidence:
+   hb fast path (correctly rejects wOF2, faceCount=0), hb tables path
+   (WORKS — cmap 444b/head/maxp/GSUB/GPOS served via Skia copyTableData),
+   sub-font parent wiring, FontPlatformData ctors (BOTH variants run
+   platformDataInit → m_hbFont set). FINAL FINDING (22:30): BIBGPDBG shows
+   GlyphPage::fill is NEVER called for Pacifico — only for "DejaVu Serif"
+   (= fontconfig's system match for the unknown family name) — even though
+   the Pacifico FontPlatformData + SkiaHarfBuzzFont WERE fully constructed
+   (the BIBHBDBG tables-path logs ARE its platformDataInit). A healthy
+   custom Font object exists and the cascade never consults it for glyphs
+   ⇒ skip is at FontRanges/cascade level. NEXT PROBES (one rebuild): log
+   FontCascadeFonts::glyphDataForCharacter realize/fallback decisions +
+   CSSFontFaceSource::font() return for the woff2 face + Font interstitial
+   state (text paints VISIBLE DejaVu, so not the invisible interim font).
+   TTF via the SAME JS FontFace path applies fine — diff the two flows.
+   Tools: web/probe/webfont.html (BIBFONT verdict lines),
+   build/font-debug{,2}.mjs runners. THREE TEMP DIAGNOSTIC
+   blocks live in the tree (BIBFONTDBG FontCustomPlatformDataSkia.cpp,
+   BIBHBDBG SkiaHarfBuzzFont.cpp, BIBGPDBG GlyphPageSkia.cpp) — NOT in the
+   committed ledger; remove + re-export before next ledger commit.
+   Fallback plan if hb-side is unfixable-cheap: build libwoff2dec (brotli
+   in sysroot) + USE_WOFF2 ON + HAVE_WOFF_SUPPORT OFF → WOFFFileFormat
+   converts woff/woff2 → plain sfnt BEFORE Skia/HB (Chrome approach;
+   conversion code verified present behind USE(WOFF2)).
+   NOTE a narrow regression risk while broken: sites serving woff2+ttf
+   dual sources now pick woff2 (supportsFormat accepts it) and get
+   fallback where they previously got the ttf. Most sites are woff2-only
+   (same fallback before/after).
+2. **Perf #17 LANDED — re-verify on real sites**: MessageChannel hop
+   16.48→0.38ms (43×, the React-scheduler/"slow after click" path),
+   setTimeout(0) 13.92→6.93ms (spec-clamp bound), fetch 93→44ms. Re-test
+   reCAPTCHA click feel + the fallback-v2 variant; NEW LEAD: 2captcha logs
+   "Web Workers are not supported" — the downgrade trigger may be Workers
+   (parked epic), not timing. tools/perf-probe.mjs = the measurement
+   harness.
+3. **Chunk B landed (verify on real sites)**: 9 DejaVu faces (bold/italic/
+   serif/mono — code blocks now monospace), target=_blank retargets into
+   main frame, sendBeacon/ping fire-and-forget (BibPingLoad), preconnect
+   no-op success. Re-sweep wave-2 sites (fal.ai, velzie.rip, google login
+   full flow, old.reddit) — pump + fonts likely changed verdicts.
+4. **Then**: dirty-rect paint/blit (deferred — full 800×600 repaint +
+   1.92MB readPixels/putImageData per dirty frame); page-WebSocket
+   main-thread CurlStream rework (same pump pattern as CurlRequestScheduler,
+   unlocks chat/live sites); Phase 5 chrome (title/URL/progress callbacks,
+   back/forward capacity-0); host devtools CPU profile of bib_tick if real
+   sites still feel slow.
+5. **Parked**: guest-wasm epic (discord/Turnstile AND likely the reCAPTCHA
+   fallback trigger via Workers). curl=35/92 closed-environmental.
+
+## Previous session (rAF #16): PERFORMANCE + site-support wave 2
 Root causes #13–16 are DONE this session: IndexedDB (in-process server),
 RequestIdleCallbackEnabled (yaml default false), and the big one — guest
 requestAnimationFrame NEVER fired (no DisplayRefreshMonitor; bib_tick now
