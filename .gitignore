@@ -10,6 +10,8 @@ dist/
 *.a
 *.wasm
 *.wasm.map
+# gate9 fixture: 53-byte test module served to the guest engine
+!web/probe/probe-test.wasm
 
 # Node / web tooling
 node_modules/

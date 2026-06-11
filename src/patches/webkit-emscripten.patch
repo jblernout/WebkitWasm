@@ -939,7 +939,7 @@ index 09a23e649b..b196b347dd 100644
      IntPoint screenToRootView(const IntPoint& p) const final { return p; }
      IntPoint rootViewToScreen(const IntPoint& p) const final { return p; }
 diff --git a/Source/WebCore/loader/EmptyFrameLoaderClient.h b/Source/WebCore/loader/EmptyFrameLoaderClient.h
-index 5ebee25c41..83440872e6 100644
+index 5ebee25c41..70e12f58dc 100644
 --- a/Source/WebCore/loader/EmptyFrameLoaderClient.h
 +++ b/Source/WebCore/loader/EmptyFrameLoaderClient.h
 @@ -99,9 +99,14 @@ private:
@@ -988,7 +988,7 @@ index 5ebee25c41..83440872e6 100644
  
      void didRestoreFromBackForwardCache() final;
  
-@@ -166,7 +171,7 @@ private:
+@@ -166,14 +171,14 @@ private:
  
      void saveViewStateToItem(HistoryItem&) final;
      bool canCachePage() const final;
@@ -997,6 +997,14 @@ index 5ebee25c41..83440872e6 100644
      RefPtr<Widget> createPlugin(HTMLPlugInElement&, const URL&, const Vector<AtomString>&, const Vector<AtomString>&, const String&, bool) final;
  
      ObjectContentType objectContentType(const URL&, const String&) final;
+     AtomString overrideMediaType() const final;
+ 
+     void redirectDataToPlugin(Widget&) final;
+-    void dispatchDidClearWindowObjectInWorld(DOMWrapperWorld&) final;
++    void dispatchDidClearWindowObjectInWorld(DOMWrapperWorld&) override;
+ 
+ #if PLATFORM(COCOA)
+     RemoteAXObjectRef accessibilityRemoteObject() final;
 diff --git a/Source/WebCore/loader/WorkerThreadableLoader.cpp b/Source/WebCore/loader/WorkerThreadableLoader.cpp
 index 34cce58217..716a0c3472 100644
 --- a/Source/WebCore/loader/WorkerThreadableLoader.cpp

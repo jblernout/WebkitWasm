@@ -21,7 +21,22 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: shim epic S-A OR G4 (spike = GO)
+## ⟶ NEXT SESSION STARTS HERE: G4 or Discord Audio gap (S-A SHIPPED)
+
+**#55 S-A SHIPPED 2026-06-11 ~19:30 — guest WebAssembly polyfill live
+(decision-006 "Phase S-A").** Guest pages now get a working WebAssembly
+global: bytes → __bibWasm2js (JSC host fn, per-window via
+dispatchDidClearWindowObjectInWorld) → host-page binaryen.js wasm2js
+(setFeatures(All) — MVP default hard-aborts binaryen on bulk-memory,
+playbook entry) → factory JS eval'd in guest. gate9 12/12 PASS, gate2 +
+gate8 PASS, Codex 0H/2M/1L all fixed. **discord.com/login wasm death is
+GONE** — boots deep into app init; libdiscore (multi-table Rust)
+correctly degrades via Discord's own fallback. New top Discord blockers
+(NOT wasm): `Can't find variable: Audio` (ENABLE_VIDEO=OFF — no
+HTMLAudioElement constructor) + one NetworkError; page still paints
+white. S-B backlog: translation cache, Memory/Table shared-growth
+emulation, Module.imports/exports metadata, worker-scope injection,
+CSP unsafe-eval fallback.
 
 **#54 SPIKE RUN 2026-06-11 ~18:20 — wasm2js shim is a GO
 (decision-006 "Option C feasibility spike").** All 103 .wasm modules
@@ -69,19 +84,19 @@ results". **Ask the user to re-run MotionMark** (32 was scored BEFORE
 canvas acceleration — expect higher now).
 
 Next, pick one:
-1. **Shim epic Phase S-A — WebAssembly API polyfill + host translation
-   bridge** (decision-006 "Shim epic shape"): guest-page `WebAssembly`
-   global, module bytes → host-side Binaryen wasm2js → translated-JS
-   factory eval in guest. Acceptance: Discord login passes its
-   wasmSupported probe; a tree-sitter grammar loads and highlights.
-   Phase S-B after: translation cache, Memory/Table emulation classes,
-   graceful CompileError on multi-table modules.
+1. **Discord Audio gap** (new top blocker post-S-A): `Can't find
+   variable: Audio` — HTMLAudioElement's named constructor needs
+   ENABLE(VIDEO); scope whether a stub constructor / partial enable is
+   sane, plus the remaining login NetworkError. Goal: login page paints.
 2. **G4 — in-place context-loss recreate** (no reload: recreate WebGL2
    context + GrDirectContext + surfaces, re-point the GLContext facades —
    they hold the boot handle by value) + full validation sweep (5-site,
    gates, memwatch) on the GPU default. MotionMark ladder on record:
    2-3 → 32 (G2) → **109.87 @ 144fps** (G3, user-run).
-3. Backlog unchanged: request blocklist (best real-site JS lever), #32
+3. **Shim S-B** (only if a real site demands it before then):
+   translation cache, Memory/Table shared growth, import/export
+   metadata, worker-scope injection, CSP unsafe-eval fallback.
+4. Backlog unchanged: request blocklist (best real-site JS lever), #32
    guest WebGL (cheap post-G2 — can share the live context), wave-3
    sweeps, Phase 5 chrome, cookie OPFS, HTTP auth, W-B pthreads HOLD.
 

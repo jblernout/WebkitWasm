@@ -148,3 +148,74 @@ Shim epic shape (phased, all embedder/host-side, no WebKit surgery):
 Known limits to record up front: CLoop-speed execution, avg ×3.5 JS
 size in guest heap (lazy per-module, acceptable), multi-table
 wasm-bindgen modules unsupported.
+
+## Phase S-A — SHIPPED 2026-06-11 (task #55)
+
+Implementation (all embedder/host-side; ONE one-word WebKit relax):
+- **Injection point**: `BibFrameLoaderClient::dispatchDidClearWindowObjectInWorld`
+  (EmptyFrameLoaderClient.h relaxes the method final→override — same
+  family as the four Phase-4 loader-client kills; patch ledger updated).
+  Fires once per new document window including subframes, before any
+  author script. Main world only.
+- **Engine pipes (src/embedder/main.cpp)**: `bibWasm2jsHostFunction`
+  (JSC_DEFINE_HOST_FUNCTION, C++ linkage outside the extern "C" export
+  block) — installs as `__bibWasm2js` on the guest global; synchronously
+  round-trips base64 module bytes → EM_ASM → `Module.bibWasm2js` (host
+  realm, same thread) → translated JS string back into the guest.
+  `wasmPolyfillSource()` reads `Module.bibWasmPolyfill` once
+  (NeverDestroyed cache). `bib_wasm_alloc` (KEEPALIVE malloc) services
+  EM_ASM string returns.
+- **Guest polyfill (web/wasm-polyfill.js)**: full WebAssembly namespace
+  (Module/Instance/Memory/Table/Global/Tag/Exception + 3 error classes,
+  validate/compile/instantiate/instantiateStreaming). Captures+deletes
+  `__bibWasm2js` before any early return. Sync `new Module()` works
+  (Discord's wasmSupported probe). Untranslatable → CompileError.
+- **Host translator (web/browser.html)**: binaryen.js v130 (vendored,
+  web/vendor/binaryen.js, 13.4 MB) readBinary →
+  **setFeatures(Features.All)** → emitAsmjs → rewrap ES6 output as
+  `(function(imports){...; return asmFunc(imports);})` (import lines →
+  `var local = imports["name"]`, auto-instantiation tail cut at
+  column-0 `var memasmFunc|retasmFunc`). Engine boot is GATED: the
+  embedder.js script tag is appended only after binaryen.js + polyfill
+  text settle, so Module.bibWasmPolyfill is set before first injection.
+
+Hard-won traps (recorded in the porting playbook too):
+- **binaryen.js defaults to MVP features** — a bulk-memory module then
+  hard-aborts binaryen's own wasm instance (C-level assert), which in
+  the host page would brick the shim for the session. setFeatures(All)
+  immediately after readBinary. The CLI's `-all` masked this; only the
+  binaryen.js parity run exposed it.
+- Codex review (0 HIGH / 2 MED / 1 LOW, all fixed): tail-cut regex must
+  be column-0 anchored (verified only-unindented across the 102-module
+  corpus); import-local regex must accept `$` ([A-Za-z_$][\w$]*);
+  bridge deletion must precede every polyfill early-return path.
+
+Validation:
+- **gate9 (NEW, tools/gate9-wasm-test.mjs + web/probe/wasmprobe.html):
+  12/12 PASS** — typeof/classes/Exception presence, validate good+bad,
+  the EXACT sync Discord probe sequence, async instantiate with import
+  object, exported-memory reads, Memory class grow, bad-bytes
+  CompileError rejection, instantiateStreaming over the engine's
+  curl→Wisp network stack.
+- **gate2 (raster) PASS, gate8 (GPU) PASS** — no regression from the
+  engine rebuild or the dynamic boot gate.
+- **discord.com/login in the engine: the wasm death is GONE.** Boot now
+  proceeds deep into app init (DatabaseManager, MediaEngineWebRTC,
+  OverlayRenderStore, crash reporter). libdiscore (the multi-table Rust
+  module) gets CompileError → Discord's own graceful skip
+  ("Unsupported browser, skipping libdiscore"). New top blockers are
+  NOT wasm: `ReferenceError: Can't find variable: Audio` (we build with
+  ENABLE_VIDEO=OFF — no HTMLAudioElement named constructor) and one
+  NetworkError. Page still paints white — next root-cause is the Audio
+  gap, backlog item.
+- **binaryen.js↔CLI parity over the full 103-module corpus: 101 OK /
+  2 FAIL** (build/spike-wasm2js/parity-binaryenjs.mjs — chunked child
+  processes; binaryen.js's wasm heap grows monotonically across
+  translations and OOMs a single process). FAIL 1 = the multi-table
+  Rust module (expected, matches CLI). FAIL 2 = tree_sitter_vim
+  (8f278c…, 1.1 MB — the CLI's slowest module at 109 s): "Maximum call
+  stack size exceeded" inside binaryen.js — a binaryen.js-vs-native
+  divergence, browser host pages have the same JS stack limits, so vim
+  code blocks degrade to unhighlighted via clean CompileError. S-B
+  candidate: retry translation in a host Worker or pre-translate a
+  cache.

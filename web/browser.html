@@ -445,6 +445,70 @@
       if (e.key === "Enter") navigateEngine();
     });
 
+    // ---- guest wasm shim, host side (decision-006 S-A) ----
+    // The engine's polyfill ships guest module bytes here; Binaryen's
+    // wasm2js (binaryen.js, same v130 as the spike CLI) translates them to
+    // plain JS. Synchronous by design: the whole engine is single-threaded,
+    // so __bibWasm2js -> EM_ASM -> this function is one same-thread call
+    // chain and sync `new WebAssembly.Module()` probes (Discord's
+    // wasmSupported) just work.
+    let binaryen = null;
+    const wasmShimReady = Promise.allSettled([
+      import("./vendor/binaryen.js").then((m) => { binaryen = m.default; }),
+      fetch("wasm-polyfill.js").then((r) => (r.ok ? r.text() : "")),
+    ]).then(([, polyfill]) => {
+      const text = polyfill.status === "fulfilled" ? polyfill.value : "";
+      if (!binaryen || !text) {
+        log("wasm shim unavailable" + (binaryen ? "" : " (binaryen.js failed to load)"));
+        return "";
+      }
+      return text;
+    });
+    function bibWasm2js(payload, mode) {
+      if (!binaryen)
+        return null; // guest sees CompileError
+      let mod = null;
+      try {
+        const bin = atob(payload);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        mod = binaryen.readBinary(bytes); // throws on invalid bytes, instance survives
+        // Same feature set as the spike CLI's `wasm2js -all`. Without this,
+        // binaryen.js defaults to MVP and a bulk-memory module trips a
+        // C-level assert that ABORTS the binaryen instance — bricking the
+        // shim for the rest of the session (parity run, 2026-06-11).
+        mod.setFeatures(binaryen.Features.All);
+        if (mode === "validate")
+          return "1";
+        let js = mod.emitAsmjs();
+        // Output form: `import * as env from 'env';` lines, the asmFunc
+        // declaration, then an auto-instantiation tail (`var memasmFunc...
+        // var retasmFunc = asmFunc({...}); export var x = ...`). Rebuild as
+        // a factory expression over the guest's importObject.
+        const importLines = [];
+        js = js.replace(/^import \* as ([A-Za-z_$][\w$]*) from '([^']*)';\s*$/gm, (_, local, name) => {
+          importLines.push([local, name]);
+          return "";
+        });
+        // Column-0 anchored: the auto-instantiation tail is the only place
+        // these names appear unindented (verified across the 102-module
+        // corpus; function-body vars are always indented — Codex MED).
+        const tail = js.search(/\nvar (mem|ret)asmFunc/);
+        if (tail >= 0) js = js.slice(0, tail);
+        const header = importLines
+          .map(([local, name]) => `var ${local} = imports[${JSON.stringify(name)}] || {};\n`)
+          .join("");
+        return "(function(imports){\n" + header + js + "\n;return asmFunc(imports);})";
+      } catch (e) {
+        if (mode === "validate")
+          return "0";
+        log("wasm2js translate failed: " + (e && e.message ? e.message : e));
+        return null;
+      } finally {
+        try { mod && mod.dispose(); } catch { }
+      }
+    }
+
     // Classic (non-modularized) Emscripten output picks this up: in browser
     // global scope `var Module` re-declares without clobbering the value.
     window.Module = {
@@ -471,6 +535,11 @@
         location.replace(u.href);
       },
       bibHTML: demo === "hello" ? helloHTML : demo === "scripttest" ? scriptTestHTML : interactiveHTML,
+      // Guest wasm shim: the engine reads the polyfill source once at first
+      // window-object setup and calls bibWasm2js per module (see shim block
+      // above). bibWasmPolyfill is filled in by the boot gate below.
+      bibWasm2js,
+      bibWasmPolyfill: "",
       // SOCKFS websocket config: bare prefix => 'ws://<host>:<port>/',
       // which the dispatcher above reroutes onto Wisp streams. The
       // subprotocol is the dispatcher's engine-socket marker.
@@ -514,7 +583,18 @@
         log("abort: " + r);
       },
     };
+
+    // Engine boot gate: the polyfill text must be on Module before the
+    // engine's first window-object setup (it is read ONCE and cached), so
+    // the engine script is appended only after the shim prep settles. If
+    // binaryen or the polyfill failed to load, bibWasmPolyfill stays "" and
+    // the engine skips injection — today's no-wasm behavior.
+    wasmShimReady.then((polyfillText) => {
+      Module.bibWasmPolyfill = polyfillText;
+      const s = document.createElement("script");
+      s.src = "engine/embedder.js";
+      document.body.appendChild(s);
+    });
   </script>
-  <script src="engine/embedder.js"></script>
 </body>
 </html>

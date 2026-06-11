@@ -55,7 +55,11 @@
 #include "Settings.h"
 #include "SharedBuffer.h"
 #include "StorageSessionProvider.h"
+#include "DOMWrapperWorld.h"
+#include "JSDOMGlobalObject.h"
 #include <JavaScriptCore/InitializeThreading.h>
+#include <JavaScriptCore/JSCInlines.h>
+#include <JavaScriptCore/JSFunction.h>
 #include <emscripten.h>
 #include <pal/SessionID.h>
 #include <wtf/MainThread.h>
@@ -593,6 +597,107 @@ EMSCRIPTEN_KEEPALIVE int bib_eval(const char* source)
     g_engine->mainFrame->script().executeScriptIgnoringException(String::fromUTF8(source), JSC::SourceTaintedOrigin::Untainted);
     return 1;
 }
+
+// ---------------------------------------------------------------------------
+// Guest WebAssembly shim (decision-006 S-A). JSC's wasm tiers are all
+// unavailable on the CLoop port (IPInt has no cloop lowering — NO-GO), so
+// guest pages get a polyfill instead: the host page translates module bytes
+// to plain JS with Binaryen's wasm2js and the polyfill evals the result.
+// Engine side is two dumb pipes, both installed per new window object by
+// BibFrameLoaderClient::dispatchDidClearWindowObjectInWorld:
+//   1. __bibWasm2js(payload, mode) — native fn on the guest global; ships a
+//      base64 module to Module.bibWasm2js in the host realm (same thread:
+//      the whole stack is single-threaded, EM_ASM is a synchronous call into
+//      the page realm) and returns the host's string, or null.
+//   2. the polyfill source (web/wasm-polyfill.js) — provided by the host as
+//      Module.bibWasmPolyfill, evaluated before any author script. Hosts
+//      that define neither (node gate runner) keep today's no-wasm behavior.
+
+EMSCRIPTEN_KEEPALIVE char* bib_wasm_alloc(int size)
+{
+    // EM_ASM blocks below allocate engine-heap buffers for returned strings;
+    // malloc itself is not in the JS export set, KEEPALIVE exports are.
+    return static_cast<char*>(malloc(size));
+}
+
+// The JSC host function and the WTF/JSC-typed helpers below need C++
+// linkage — step outside the export block (reopened after them).
+} // extern "C"
+
+JSC_DEFINE_HOST_FUNCTION(bibWasm2jsHostFunction, (JSC::JSGlobalObject* globalObject, JSC::CallFrame* callFrame))
+{
+    JSC::VM& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    String payload = callFrame->argument(0).toWTFString(globalObject);
+    RETURN_IF_EXCEPTION(scope, { });
+    String mode = callFrame->argument(1).toWTFString(globalObject);
+    RETURN_IF_EXCEPTION(scope, { });
+    CString payloadUTF8 = payload.utf8();
+    CString modeUTF8 = mode.utf8();
+    char* out = static_cast<char*>(EM_ASM_PTR({
+        let result = null;
+        try {
+            if (Module.bibWasm2js)
+                result = Module.bibWasm2js(UTF8ToString($0), UTF8ToString($1));
+        } catch (e) {
+            (Module.printErr || console.error)("bibWasm2js host error: " + e);
+        }
+        if (typeof result !== "string")
+            return 0;
+        const len = lengthBytesUTF8(result) + 1;
+        const buf = _bib_wasm_alloc(len);
+        stringToUTF8(result, buf, len);
+        return buf;
+    }, payloadUTF8.data(), modeUTF8.data()));
+    if (!out)
+        return JSC::JSValue::encode(JSC::jsNull());
+    JSC::JSString* result = JSC::jsString(vm, String::fromUTF8(out));
+    free(out);
+    return JSC::JSValue::encode(result);
+}
+
+static const String& wasmPolyfillSource()
+{
+    static NeverDestroyed<String> source = [] {
+        char* text = static_cast<char*>(EM_ASM_PTR({
+            const text = Module.bibWasmPolyfill;
+            if (typeof text !== "string" || !text.length)
+                return 0;
+            const len = lengthBytesUTF8(text) + 1;
+            const buf = _bib_wasm_alloc(len);
+            stringToUTF8(text, buf, len);
+            return buf;
+        }));
+        if (!text)
+            return String();
+        String result = String::fromUTF8(text);
+        free(text);
+        return result;
+    }();
+    return source;
+}
+
+void BIB::injectWasmPolyfill(WebCore::LocalFrame& frame, WebCore::DOMWrapperWorld& world)
+{
+    if (&world != &WebCore::mainThreadNormalWorldSingleton())
+        return;
+    const String& polyfill = wasmPolyfillSource();
+    if (polyfill.isEmpty())
+        return;
+    auto* globalObject = frame.script().globalObject(world);
+    if (!globalObject)
+        return;
+    JSC::VM& vm = globalObject->vm();
+    JSC::JSLockHolder lock(vm);
+    globalObject->putDirect(vm, JSC::Identifier::fromString(vm, "__bibWasm2js"_s),
+        JSC::JSFunction::create(vm, globalObject, 2, "__bibWasm2js"_s, bibWasm2jsHostFunction, JSC::ImplementationVisibility::Public),
+        static_cast<unsigned>(JSC::PropertyAttribute::DontEnum));
+    // The polyfill consumes (and deletes) __bibWasm2js from the global, then
+    // defines WebAssembly. Runs before any author script in this document.
+    frame.script().executeScriptIgnoringException(String { polyfill }, JSC::SourceTaintedOrigin::Untainted);
+}
+
+extern "C" {
 
 // Phase 4: real navigation. Drives FrameLoader::load -> DocumentLoader ->
 // CachedResourceLoader -> EmbedderLoaderStrategy -> CurlRequest -> Wisp.

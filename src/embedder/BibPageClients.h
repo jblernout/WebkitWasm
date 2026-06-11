@@ -346,6 +346,11 @@ private:
     BibTextCheckerClient m_textCheckerClient;
 };
 
+// Wasm shim (decision-006 S-A): registers the __bibWasm2js host-translation
+// bridge and evaluates the WebAssembly polyfill in every new window object.
+// Implemented in main.cpp (EM_ASM + JSC API live there).
+void injectWasmPolyfill(WebCore::LocalFrame&, WebCore::DOMWrapperWorld&);
+
 // BibFrameLoaderClient (Phase 4 networking): EmptyFrameLoaderClient with the
 // four "silently dead" load gates fixed (each relaxed final->override in
 // EmptyFrameLoaderClient.h, patch ledger):
@@ -394,6 +399,16 @@ private:
     }
 
     bool canHandleRequest(const WebCore::ResourceRequest&) const final { return true; }
+
+    // Wasm shim injection point (decision-006 S-A): fires once per new
+    // document window, before any author script runs — the same hook every
+    // real port uses for window-object setup (relaxed final->override in
+    // EmptyFrameLoaderClient.h, patch ledger). Covers subframes too: every
+    // frame gets a BibFrameLoaderClient.
+    void dispatchDidClearWindowObjectInWorld(WebCore::DOMWrapperWorld& world) final
+    {
+        injectWasmPolyfill(m_frameLoader->frame(), world);
+    }
 
     bool canShowMIMEType(const String& mimeType) const final
     {
