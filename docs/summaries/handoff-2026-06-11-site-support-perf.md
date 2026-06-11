@@ -21,7 +21,22 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: guest-wasm IPInt scoping (#53), then G4
+## ⟶ NEXT SESSION STARTS HERE: wasm2js spike OR G4 (IPInt = NO-GO)
+
+**#53 SCOPED 2026-06-11 ~17:45 — IPInt on CLoop is a NO-GO (kill
+criterion fired, decision-006).** IPInt has no cloop lowering at any
+level: IPInt::initialize() RELEASE_ASSERTs under C_LOOP
+(InPlaceInterpreter.cpp:72), the asm entry op errors under C_LOOP
+(InPlaceInterpreter.asm:681), and LLIntData.cpp:157 calls it
+unconditionally when ENABLE(WEBASSEMBLY) && useWasm (default true) — so
+flipping the flag = abort at boot. No fallback tier exists (wasm LLInt
+deleted upstream; BBQ/OMG need executable memory). The ONLY GO-shaped
+path to guest wasm is a **wasm2js (Binaryen) shim** — host-side
+translation, guest-side WebAssembly API polyfill, no WebKit surgery,
+days-scale, wasm-MVP-only limits (Discord uses SIMD → partial at best).
+Cheap feasibility spike first: grab Discord's real .wasm, run wasm2js,
+measure output size / feature kills (~half a day). Full analysis:
+decision-006-guest-wasm-scope.md.
 
 **M2 MEASURED + G3 SHIPPED 2026-06-11 ~17:15 (tasks #51, #52).** GPU is
 now DEFAULT-ON for humans on plain browser.html (?gpu=0 escapes;
@@ -40,19 +55,17 @@ loss → raster fallback. Full record: decision-005 "M2 results" + "G3
 results". **Ask the user to re-run MotionMark** (32 was scored BEFORE
 canvas acceleration — expect higher now).
 
-Next, in order:
-1. **Guest-wasm scoping pass (task #53)**: JSC IPInt (in-place wasm
-   interpreter, no JIT needed — Lockdown Mode's path) may unblock
-   Discord-class sites ("WebAssembly is undefined"). Go/no-go doc only
-   (decision-006), modeled on the Workers scoping; likely kill criterion
-   is whether IPInt exists under the offlineasm cloop backend. JS-speed
-   verdict on record (2026-06-11): CLoop is permanent; only research-grade
-   paths (weval-style specialization) give 2×+; blocklist remains the
-   best real-site JS lever.
+Next, pick one:
+1. **wasm2js feasibility spike** (pre-epic, ~half a day): fetch Discord's
+   real .wasm modules + a couple of small-module sites, run Binaryen's
+   wasm2js, measure translated-JS size and which modules die on
+   SIMD/threads/post-MVP features. Output = go/no-go on the shim epic
+   (decision-006 Option C).
 2. **G4 — in-place context-loss recreate** (no reload: recreate WebGL2
    context + GrDirectContext + surfaces, re-point the GLContext facades —
    they hold the boot handle by value) + full validation sweep (5-site,
-   gates, memwatch) on the GPU default.
+   gates, memwatch) on the GPU default. MotionMark ladder on record:
+   2-3 → 32 (G2) → **109.87 @ 144fps** (G3, user-run).
 3. Backlog unchanged: request blocklist (best real-site JS lever), #32
    guest WebGL (cheap post-G2 — can share the live context), wave-3
    sweeps, Phase 5 chrome, cookie OPFS, HTTP auth, W-B pthreads HOLD.
