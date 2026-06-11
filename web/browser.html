@@ -288,7 +288,13 @@
         // Rebuild the heap view every frame: ALLOW_MEMORY_GROWTH detaches
         // the ArrayBuffer when the wasm memory grows.
         const pixels = new Uint8ClampedArray(Module.HEAPU8.buffer, ptr, w * h * 4);
-        ctx.putImageData(new ImageData(pixels, w, h), 0, 0);
+        // Partial upload: the engine repainted only bib_dirty_box. The
+        // ImageData stays full-frame (zero-copy heap view); putImageData's
+        // dirty-rect args limit the canvas upload to the damaged region.
+        // (View built from HEAPU8.buffer — HEAP32 isn't an exported
+        // runtime view in this build.)
+        const box = new Int32Array(Module.HEAPU8.buffer, Module._bib_dirty_box(), 4);
+        ctx.putImageData(new ImageData(pixels, w, h), 0, 0, box[0], box[1], box[2], box[3]);
         if (bib.frames === 0 && demo === "hello") judgeHelloFrame(pixels, w, h);
         bib.frames++;
         blitsEl.textContent = bib.frames;

@@ -1,0 +1,33 @@
+<!doctype html>
+<!-- Dirty-rect validation page: one SMALL animated region (60x60 color
+     cycler, ~30Hz) inside a wall of static text. Steady-state dirty frames
+     should cover only the box, not the viewport. Loaded through the engine
+     via browser.html?url= for tools/../build/dirty-cost.mjs. -->
+<html>
+<head>
+  <style>
+    body { font: 14px sans-serif; margin: 16px; }
+    #box { width: 60px; height: 60px; background: #c00; margin: 8px 0; }
+    p { max-width: 720px; }
+  </style>
+</head>
+<body>
+  <h1>Dirty-rect probe</h1>
+  <div id="box"></div>
+  <p>Static paragraph one. The quick brown fox jumps over the lazy dog.
+     Pack my box with five dozen liquor jugs. How vexingly quick daft
+     zebras jump. Sphinx of black quartz, judge my vow.</p>
+  <p>Static paragraph two. The five boxing wizards jump quickly. Jackdaws
+     love my big sphinx of quartz. The jay, pig, fox, zebra and my wolves
+     quack. Quick zephyrs blow, vexing daft Jim.</p>
+  <p>Static paragraph three. Two driven jocks help fax my big quiz. Five
+     quacking zephyrs jolt my wax bed. The public was amazed to view the
+     quickness and dexterity of the juggler.</p>
+  <script>
+    const box = document.getElementById("box");
+    const colors = ["#c00", "#0c0", "#00c", "#cc0", "#0cc", "#c0c"];
+    let i = 0;
+    setInterval(() => { box.style.background = colors[++i % colors.length]; }, 33);
+  </script>
+</body>
+</html>

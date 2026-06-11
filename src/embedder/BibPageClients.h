@@ -37,6 +37,7 @@
 #include "LocalFrame.h"
 #include "LocalFrameView.h"
 #include "MIMETypeRegistry.h"
+#include "IntRect.h"
 #include "Page.h"
 #include "ReferrerPolicy.h"
 #include "Node.h"
@@ -54,6 +55,18 @@ namespace BIB {
 // Set by BibChromeClient on any damage report; cleared by paintFrame().
 inline bool g_frameDirty = true;
 
+// Union of every damage rect reported since the last paint (root-view
+// coords). bib_render snapshots it AFTER layout (layout adds damage),
+// clamps to the frame, paints/reads back only that region, then resets it.
+// Starts huge so the first paint covers the whole frame whatever its size.
+inline WebCore::IntRect g_dirtyRect { 0, 0, 1 << 20, 1 << 20 };
+
+inline void addDamage(const WebCore::IntRect& rect)
+{
+    g_dirtyRect.unite(rect);
+    g_frameDirty = true;
+}
+
 // Set by BibChromeClient::scheduleRenderingUpdate (WebCore requested the
 // "update the rendering" steps); consumed once per host display frame by
 // bib_tick. Starts true so the boot page gets its first update pass.
@@ -64,10 +77,13 @@ public:
     BibChromeClient() = default;
 
 private:
-    void invalidateRootView(const WebCore::IntRect&) final { g_frameDirty = true; }
-    void invalidateContentsAndRootView(const WebCore::IntRect&) final { g_frameDirty = true; }
-    void invalidateContentsForSlowScroll(const WebCore::IntRect&) final { g_frameDirty = true; }
-    void scroll(const WebCore::IntSize&, const WebCore::IntRect&, const WebCore::IntRect&) final { g_frameDirty = true; }
+    void invalidateRootView(const WebCore::IntRect& rect) final { addDamage(rect); }
+    void invalidateContentsAndRootView(const WebCore::IntRect& rect) final { addDamage(rect); }
+    void invalidateContentsForSlowScroll(const WebCore::IntRect& rect) final { addDamage(rect); }
+    // scroll() is the fast-scroll path: the embedder is asked to blit-shift
+    // the scrolled pixels and repaint only the exposed strip. We don't
+    // blit-shift, so the whole scrolled clip region is damage.
+    void scroll(const WebCore::IntSize&, const WebCore::IntRect&, const WebCore::IntRect& clipRect) final { addDamage(clipRect); }
 
     // Returning true takes ownership of driving Page::updateRendering():
     // bib_tick runs it on the next host display frame iff this flag is set.

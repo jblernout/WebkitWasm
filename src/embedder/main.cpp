@@ -134,19 +134,36 @@ static bool writePPM(const char* path, const SkPixmap& pixmap)
     return ok;
 }
 
-// Layout + paint the full frame into the persistent surface, then clear the
-// dirty flag BibChromeClient maintains.
-static bool paintFrame()
+// Paint ONLY `dirty` (root-view coords, pre-clamped to the frame, layout
+// already up to date — see bib_render) into the persistent surface. Pixels
+// outside the clip keep the previous frame's content; g_blitPixels mirrors
+// the surface the same way via partial readbacks, so the two stay in sync.
+// drawColor, NOT clear(): SkCanvas::clear ignores the clip.
+static bool paintFrameRect(const WebCore::IntRect& dirty)
 {
     RefPtr view = mainFrameView();
     if (!view)
         return false;
-    g_engine->mainFrame->protectedDocument()->updateLayoutIgnorePendingStylesheets();
-    g_engine->surface->getCanvas()->clear(SK_ColorWHITE);
-    WebCore::GraphicsContextSkia context(*g_engine->surface->getCanvas(), WebCore::RenderingMode::Unaccelerated, WebCore::RenderingPurpose::Unspecified);
-    view->paint(context, WebCore::IntRect(0, 0, kWidth, kHeight));
+    SkCanvas* canvas = g_engine->surface->getCanvas();
+    canvas->save();
+    canvas->clipRect(SkRect::MakeXYWH(dirty.x(), dirty.y(), dirty.width(), dirty.height()));
+    canvas->drawColor(SK_ColorWHITE);
+    WebCore::GraphicsContextSkia context(*canvas, WebCore::RenderingMode::Unaccelerated, WebCore::RenderingPurpose::Unspecified);
+    view->paint(context, dirty);
+    canvas->restore();
     BIB::g_frameDirty = false;
+    BIB::g_dirtyRect = { };
     return true;
+}
+
+// Layout + paint the FULL frame (boot/gate path; bib_render drives the
+// dirty-rect path itself so it can snapshot damage after layout).
+static bool paintFrame()
+{
+    if (!mainFrameView())
+        return false;
+    g_engine->mainFrame->protectedDocument()->updateLayoutIgnorePendingStylesheets();
+    return paintFrameRect(WebCore::IntRect(0, 0, kWidth, kHeight));
 }
 
 static OptionSet<WebCore::PlatformEvent::Modifier> modifiersFromBits(int bits)
@@ -211,21 +228,50 @@ EMSCRIPTEN_KEEPALIVE void bib_pump_network()
     WTF::RunLoop::cycle();
 }
 
+// The region bib_render last repainted, as {x, y, w, h} for the host's
+// partial putImageData. force=1 and the first frame report the full frame.
+static int g_dirtyBox[4] = { 0, 0, kWidth, kHeight };
+
+EMSCRIPTEN_KEEPALIVE const int* bib_dirty_box() { return g_dirtyBox; }
+
 // Returns the RGBA frame buffer (kWidth*kHeight*4) after repainting, or 0.
 // force=0: only repaints (and returns the buffer) when the page is dirty —
-//          the rAF blit loop skips putImageData on clean frames.
-// force=1: always repaints and returns the buffer (pixel probes, first use).
+//          the rAF blit loop skips putImageData on clean frames. Only the
+//          accumulated damage union is painted + read back (bib_dirty_box);
+//          the rest of g_blitPixels still holds the previous frame, which
+//          is exactly what those pixels look like on the surface too.
+// force=1: always repaints and returns the FULL frame (pixel probes that
+//          sample anywhere in the buffer, first use).
 EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
 {
     if (!g_engine)
         return nullptr;
     if (!force && !BIB::g_frameDirty)
         return nullptr;
-    if (!paintFrame())
+    RefPtr view = mainFrameView();
+    if (!view)
         return nullptr;
-    auto dstInfo = SkImageInfo::Make(kWidth, kHeight, kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
-    if (!g_engine->surface->readPixels(SkPixmap(dstInfo, g_blitPixels, kWidth * 4), 0, 0))
+    // Layout BEFORE snapshotting the damage union — layout itself reports
+    // damage through BibChromeClient, and it must land in THIS frame.
+    g_engine->mainFrame->protectedDocument()->updateLayoutIgnorePendingStylesheets();
+    const WebCore::IntRect frameRect(0, 0, kWidth, kHeight);
+    WebCore::IntRect dirty = force ? frameRect : WebCore::intersection(BIB::g_dirtyRect, frameRect);
+    if (dirty.isEmpty()) {
+        // All damage was outside the viewport — nothing visible changed.
+        BIB::g_frameDirty = false;
+        BIB::g_dirtyRect = { };
         return nullptr;
+    }
+    if (!paintFrameRect(dirty))
+        return nullptr;
+    auto dstInfo = SkImageInfo::Make(dirty.width(), dirty.height(), kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
+    uint8_t* dst = g_blitPixels + (dirty.y() * kWidth + dirty.x()) * 4;
+    if (!g_engine->surface->readPixels(SkPixmap(dstInfo, dst, kWidth * 4), dirty.x(), dirty.y()))
+        return nullptr;
+    g_dirtyBox[0] = dirty.x();
+    g_dirtyBox[1] = dirty.y();
+    g_dirtyBox[2] = dirty.width();
+    g_dirtyBox[3] = dirty.height();
     return g_blitPixels;
 }
 
