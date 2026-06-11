@@ -259,6 +259,12 @@ __bib.probe() returns null in GPU mode (no GPU readback path yet);
 bib.frames/judgeHelloFrame don't run under ?gpu=1 — the GPU gate probe
 does its own FBO 0 readback same-task (preserveDrawingBuffer is off).
 
+**First M2 data point (user-run, 2026-06-11): MotionMark 2-3 → 32 under
+?gpu=1 — a 10-15× real-workload uplift,** matching the G1 prediction (paint
+term 32.6ms → ~1-3ms). Remaining MotionMark ceiling is the expected
+non-paint walls: CLoop JS (dominant, by design), single-threaded engine,
+full-canvas present per frame.
+
 **Bonus fix (Codex review finding, confirmed + fixed same day):** on
 USE(SKIA) builds ImageBitmap unconditionally requests
 RenderingMode::Accelerated with RenderingPurpose::Canvas (the
