@@ -388,8 +388,12 @@ canvasgpu default flip: plain gpu canvas anim **16.95ms/frame** (295 frames
 in 5s), canvas getImageData 2.11ms.
 
 User-facing summary: plain http://localhost:8080/browser.html now runs the
-GPU path with accelerated canvases; MotionMark re-run (vs the 32 scored
-pre-canvas-acceleration) is the outstanding real-world datapoint.
+GPU path with accelerated canvases. **Real-world validation (user-run,
+2026-06-11): MotionMark 1.3.1 = 109.87 @ 144fps** — vs 32 with GPU paint
+but CPU canvases, vs 2-3 on the original CPU raster engine. The GPU ladder
+end-to-end: 2-3 → 32 (G2 page paint) → 109.87 (G3 canvas acceleration),
+scored against a 144Hz target. Remaining ceiling is CLoop JS +
+single-threaded engine, as designed.
 
 ## Open questions (as originally scoped; OQ1/OQ2 resolved, OQ3 partial — see G1 results)
 
