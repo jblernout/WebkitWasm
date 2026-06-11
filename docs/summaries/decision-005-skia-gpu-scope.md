@@ -1,6 +1,7 @@
 # Decision 005 — Skia GPU backend (WebGL2/Ganesh) scope + acceleration ladder
 
-Date: 2026-06-11. Status: **G1 PASSED 2026-06-11 — see "G1 results" below; G2 next.**
+Date: 2026-06-11. Status: **G2 M1 PASSED 2026-06-11 — engine paints through
+Ganesh under ?gpu=1 (see "G2 M1 results"); next: M2 perf measurement, then G3.**
 Motivation: heavy visual+JS sites drop to a few fps. Measured anatomy:
 full-viewport Skia CPU paint **32.09ms** (old.reddit, >1 frame budget
 before any JS), CLoop JS 10–100× slower than JIT (unfixable — no JIT in
@@ -229,6 +230,47 @@ load still to observe in G2.
 Milestone M1 = gate page paints through Ganesh under BIB_GPU=1 while
 raster gate2 stays green. Then: paint-cost/scroll-cost/sweep on GPU (M2),
 backend-choice polish + GPU smoke gate (G3), full validation (G4).
+
+## G2 M1 results (2026-06-11) — PASS, engine paints through Ganesh
+
+Landed exactly per the design above. WebKit-tree side (exported to
+src/patches/webkit-emscripten.patch): upstream PlatformDisplay.cpp +
+egl/GLDisplay.cpp now compile on the port; NEW
+platform/graphics/emscripten/PlatformDisplayEmscripten.{h,cpp} owns the
+boot WebGL2 context, the G1 shims, the assembled-GLES factory, the
+GLContext facade definitions (single-context world: createOffscreen wraps
+THE canvas context, createSharing = nullptr) and the GLContextWrapper
+bookkeeping; PlatformDisplaySkia.cpp got the two planned hunks; GLStubs
+shrank to GLFence + GraphicsLayer. Embedder side: Module.bibGPU (?gpu=1)
+boot init → skiaGLContext()/skiaGrContext(); texture-backed backing
+surface; presentGPU() = backing->draw(FBO0 wrap) + FlushAndSubmit;
+bib_render returns null pixels in GPU mode (host never putImageData's);
+g_scrollBlit = null → scroll falls back to addDamage (clipped GPU repaint);
+link flags += -sMAX_WEBGL_VERSION=2 -sFULL_ES3=1.
+
+**Verification (build/gpu-gate-probe.mjs, BIB_CHANNEL=chromium):**
+GPU-GATE VERDICT: PASS — gpu=on, no context loss, no fallback, and the
+readback is PIXEL-IDENTICAL to the CPU raster gate: exactBlue=20000,
+redGlyph=1962, nonWhite=22414 (same Skia geometry/AA code, GPU shading).
+Raster gates re-run green and unchanged (offscreen + browser, pixel-exact).
+**Size**: embedder.wasm 106.5→107.2MB (+0.7MB, well under the <4MB bound);
+embedder.js +97KB (WebGL/EGL/FULL_ES3 glue). Known M1 limits (G3 scope):
+__bib.probe() returns null in GPU mode (no GPU readback path yet);
+bib.frames/judgeHelloFrame don't run under ?gpu=1 — the GPU gate probe
+does its own FBO 0 readback same-task (preserveDrawingBuffer is off).
+
+**Bonus fix (Codex review finding, confirmed + fixed same day):** on
+USE(SKIA) builds ImageBitmap unconditionally requests
+RenderingMode::Accelerated with RenderingPurpose::Canvas (the
+compositing-off escape hatch is PLATFORM(GTK)-only), and
+ImageBufferSkiaAcceleratedBackend::create calls sharedDisplay()
+unguarded — so ANY guest createImageBitmap() call aborted the engine in
+CPU mode (latent since Phase 2; pre-G2 the stub asserted identically).
+Fixed with a port-scoped sharedDisplayIfExists() early-out in
+ImageBufferSkiaAcceleratedBackend::create — CPU mode degrades to the
+unaccelerated backend via ImageBuffer::create's fallthrough; GPU mode
+allocates real texture-backed ImageBitmap buffers. Verified both ways
+(build/imagebitmap-probe.mjs: cpu PASS, gpu PASS — was abort).
 
 ## Open questions (as originally scoped; OQ1/OQ2 resolved, OQ3 partial — see G1 results)
 

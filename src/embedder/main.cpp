@@ -32,6 +32,7 @@
 #include "FocusController.h"
 #include "FrameLoadRequest.h"
 #include "FrameLoader.h"
+#include "GLContext.h" // presentGPU: makeContextCurrent on the shared display's context
 #include "GraphicsContextSkia.h"
 #include "HandleUserInputEventResult.h"
 #include "LocalFrame.h"
@@ -40,6 +41,8 @@
 #include "MemoryCache.h"
 #include "Page.h"
 #include "PageConfiguration.h"
+#include "PlatformDisplay.h"
+#include "PlatformDisplayEmscripten.h"
 #include "PlatformKeyboardEvent.h"
 #include "PlatformMouseEvent.h"
 #include "PlatformWheelEvent.h"
@@ -65,6 +68,10 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/core/SkImageInfo.h>
 #include <skia/core/SkPixmap.h>
 #include <skia/core/SkSurface.h>
+#include <skia/gpu/ganesh/GrBackendSurface.h>
+#include <skia/gpu/ganesh/GrDirectContext.h>
+#include <skia/gpu/ganesh/SkSurfaceGanesh.h>
+#include <skia/gpu/ganesh/gl/GrGLBackendSurface.h>
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 
 #include <cstdio>
@@ -110,6 +117,27 @@ static WebCore::LocalFrameView* mainFrameView()
 // expects; for this engine's output (opaque pixels) conversion is identity.
 static uint8_t g_blitPixels[kWidth * kHeight * 4];
 
+// Skia GPU (decision-005 G2, opt-in via Module.bibGPU): the backing
+// SkSurface in g_engine becomes a Ganesh TEXTURE target, paints stay
+// dirty-rect-clipped, and presenting = drawing the backing texture onto a
+// wrap of the canvas WebGL2 context's framebuffer 0 (GPU-GPU quad). The
+// host page never sees pixels: bib_render returns null and the canvas is
+// live. When the flag is unset every byte of the CPU path is unchanged.
+static bool g_gpu = false;
+static sk_sp<SkSurface> g_fbo0Surface; // present target, GPU mode only
+
+static void presentGPU()
+{
+    // Defensive make-current: host-page JS could have bound another GL
+    // context since the last frame; Ganesh assumes ITS context is current.
+    WebCore::PlatformDisplay::sharedDisplay().skiaGLContext()->makeContextCurrent();
+    // Full-canvas composite, not dirty-rect: with preserveDrawingBuffer off
+    // the FBO 0 content is undefined after each composite, so every present
+    // must cover the whole frame (G1-measured at 0.9-1.3ms).
+    g_engine->surface->draw(g_fbo0Surface->getCanvas(), 0, 0);
+    skgpu::ganesh::FlushAndSubmit(g_fbo0Surface.get());
+}
+
 // Dump RGBA pixels as a binary PPM (P6, alpha dropped) into the wasm FS.
 // The node runner extracts it afterwards.
 static bool writePPM(const char* path, const SkPixmap& pixmap)
@@ -154,7 +182,11 @@ static bool paintFrameRect(const WebCore::IntRect& dirty)
     canvas->save();
     canvas->clipRect(SkRect::MakeXYWH(dirty.x(), dirty.y(), dirty.width(), dirty.height()));
     canvas->drawColor(SK_ColorWHITE);
-    WebCore::GraphicsContextSkia context(*canvas, WebCore::RenderingMode::Unaccelerated, WebCore::RenderingPurpose::Unspecified);
+    // Accelerated mode only changes texture-backed-image handling (no raster
+    // copies for shadows) — Canvas-purpose GL gymnastics stay off either way.
+    WebCore::GraphicsContextSkia context(*canvas,
+        g_gpu ? WebCore::RenderingMode::Accelerated : WebCore::RenderingMode::Unaccelerated,
+        WebCore::RenderingPurpose::Unspecified);
     g_inPaint = true;
     view->paint(context, dirty);
     g_inPaint = false;
@@ -403,7 +435,9 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
         const WebCore::IntRect& r = dirty[i];
         bool painted = paintFrameRect(r);
         bool readBack = painted;
-        if (painted) {
+        // GPU mode keeps no g_blitPixels mirror — pixels stay on the GPU
+        // until presentGPU() composites them to the canvas below.
+        if (painted && !g_gpu) {
             auto dstInfo = SkImageInfo::Make(r.width(), r.height(), kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
             uint8_t* dst = g_blitPixels + (static_cast<size_t>(r.y()) * kWidth + r.x()) * 4;
             readBack = g_engine->surface->readPixels(SkPixmap(dstInfo, dst, kWidth * 4), r.x(), r.y());
@@ -431,6 +465,14 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
     g_dirtyBox[1] = box.y();
     g_dirtyBox[2] = box.width();
     g_dirtyBox[3] = box.height();
+    if (g_gpu) {
+        // The canvas updates when control returns to the event loop
+        // (implicit WebGL commit); on clean frames the early-outs above ran
+        // and the canvas keeps showing the last presented frame. Null tells
+        // the host there is no CPU pixel buffer — it must not putImageData.
+        presentGPU();
+        return nullptr;
+    }
     return g_blitPixels;
 }
 
@@ -600,6 +642,21 @@ int main()
 
     const bool interactive = EM_ASM_INT({ return Module.bibInteractive ? 1 : 0; });
 
+    // Skia GPU boot (decision-005 G2, opt-in via Module.bibGPU / ?gpu=1).
+    // Must run before ANY paint: GraphicsContextSkia consults the shared
+    // PlatformDisplay. Browser-only — gate/node mode has no canvas, and
+    // with the flag unset nothing here runs (sharedDisplay stays unset, so
+    // the CPU path is bit-for-bit the pre-G2 binary).
+    if (interactive && EM_ASM_INT({ return Module.bibGPU ? 1 : 0; })) {
+        if (WebCore::initializePlatformDisplayEmscripten("#screen")) {
+            // Force SkiaGLContext creation now; a null GrContext means the
+            // interface/caps stage failed — fall back to CPU raster.
+            auto& display = WebCore::PlatformDisplay::sharedDisplay();
+            g_gpu = display.skiaGLContext() && display.skiaGrContext();
+        }
+        printf("EMBEDDER: gpu=%s\n", g_gpu ? "on" : "REQUESTED-BUT-UNAVAILABLE (cpu fallback)");
+    }
+
     printf("EMBEDDER: init OK\n");
 
     auto pageConfiguration = WebCore::pageConfigurationWithEmptyClients(std::nullopt, PAL::SessionID::defaultSessionID());
@@ -726,14 +783,42 @@ int main()
     printf("RENDER TREE:\n%s\n", treeDump.utf8().data());
 
     auto info = SkImageInfo::Make(kWidth, kHeight, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
-    sk_sp<SkSurface> surface = SkSurfaces::Raster(info);
+    sk_sp<SkSurface> surface;
+    if (g_gpu) {
+        // Texture-backed backing store (NOT framebuffer 0 directly: with
+        // preserveDrawingBuffer off, FBO 0 is undefined after every
+        // composite — dirty-rect painting needs stable pixels). Present
+        // wraps FBO 0 once; samples=1/stencil=8 match the context attrs
+        // (G1: GL_SAMPLES=0 with antialias:false, stencil honored at 8).
+        auto* grContext = WebCore::PlatformDisplay::sharedDisplay().skiaGrContext();
+        surface = SkSurfaces::RenderTarget(grContext, skgpu::Budgeted::kNo, info, 0, kTopLeft_GrSurfaceOrigin, nullptr);
+        if (surface) {
+            GrGLFramebufferInfo fbInfo;
+            fbInfo.fFBOID = 0;
+            fbInfo.fFormat = 0x8058; // GL_RGBA8
+            auto target = GrBackendRenderTargets::MakeGL(kWidth, kHeight, 1, 8, fbInfo);
+            g_fbo0Surface = SkSurfaces::WrapBackendRenderTarget(grContext, target,
+                kBottomLeft_GrSurfaceOrigin, kRGBA_8888_SkColorType, nullptr, nullptr);
+        }
+        if (!surface || !g_fbo0Surface) {
+            printf("EMBEDDER: gpu surface setup failed — cpu fallback\n");
+            g_fbo0Surface = nullptr;
+            surface = nullptr;
+            g_gpu = false;
+        }
+    }
+    if (!g_gpu)
+        surface = SkSurfaces::Raster(info);
     if (!surface) {
         printf("EMBEDDER: FAIL SkSurface\n");
         return 1;
     }
 
     g_engine = new Engine { WTF::move(page), WTF::move(localMainFrame), WTF::move(surface) };
-    BIB::g_scrollBlit = bibScrollBlit; // fast-scroll shift (needs g_engine)
+    // Fast-scroll shift needs g_engine. GPU mode: the CPU memmove trick is
+    // moot (no g_blitPixels mirror) — a null hook makes ChromeClient::scroll
+    // fall back to addDamage(clip), i.e. a clipped GPU repaint.
+    BIB::g_scrollBlit = g_gpu ? nullptr : bibScrollBlit;
 
     if (!paintFrame()) {
         printf("EMBEDDER: FAIL paint\n");

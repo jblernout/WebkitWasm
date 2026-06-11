@@ -53,7 +53,12 @@
     }
 
     const canvas = document.getElementById("screen");
-    const ctx = canvas.getContext("2d");
+    // GPU mode (?gpu=1): the ENGINE owns the canvas through its own WebGL2
+    // context (Ganesh renders straight into it). Touching getContext("2d")
+    // here would lock the canvas to 2d and the engine's context creation
+    // would fail — so in GPU mode there is no 2d context and no blit at all.
+    const gpuMode = !!new URLSearchParams(location.search).get("gpu");
+    const ctx = gpuMode ? null : canvas.getContext("2d");
 
     // --- Event-driven engine pump (perf) --------------------------------
     // The engine pokes Module.bibWakeUp on every RunLoop wake-up (dispatch,
@@ -282,7 +287,11 @@
       // force only the very first frame; afterwards the engine returns null
       // for clean frames and we skip the blit entirely.
       const ptr = Module._bib_render(bib.frames === 0 ? 1 : 0);
-      if (ptr) {
+      if (gpuMode) {
+        // GPU present happens engine-side; bib_render returns null by
+        // design. Count the forced first frame so force=1 fires only once.
+        if (bib.frames === 0) bib.frames++;
+      } else if (ptr) {
         const w = Module._bib_frame_width();
         const h = Module._bib_frame_height();
         // Rebuild the heap view every frame: ALLOW_MEMORY_GROWTH detaches
@@ -398,6 +407,9 @@
     // global scope `var Module` re-declares without clobbering the value.
     window.Module = {
       bibInteractive: true,
+      // ?gpu=1 -> Ganesh-over-WebGL2 paint path (decision-005 G2). Opt-in;
+      // the engine falls back to CPU raster if context/caps setup fails.
+      bibGPU: gpuMode,
       bibHTML: demo === "hello" ? helloHTML : demo === "scripttest" ? scriptTestHTML : interactiveHTML,
       // SOCKFS websocket config: bare prefix => 'ws://<host>:<port>/',
       // which the dispatcher above reroutes onto Wisp streams. The
@@ -417,7 +429,7 @@
       // the engine page is loaded, laid out, and painted once.
       onEngineReady: function () {
         bib.ready = true;
-        statusEl.textContent = `engine live (${demo})`;
+        statusEl.textContent = `engine live (${demo}${gpuMode ? ", gpu" : ""})`;
         wireInput();
         canvas.focus();
         requestAnimationFrame(blitLoop);

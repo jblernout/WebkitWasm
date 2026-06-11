@@ -21,23 +21,26 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: Skia-GPU G2 — IMPLEMENT (design is DONE)
+## ⟶ NEXT SESSION STARTS HERE: Skia-GPU G2 — M2 (measure) then G3
 
-**G2 recon/design completed 2026-06-11 ~15:00 (task #45 in_progress).**
-Full patch plan + embedder plan in decision-005 "G2 design" — read THAT
-first; do not re-derive. Summary: compile upstream PlatformDisplay.cpp +
-GLDisplay.cpp (setSharedDisplay injection is upstream's own pattern);
-new port file PlatformDisplayEmscripten.cpp carries the G1 shims + GLES
-interface factory + GLContext port definitions (GLContext.cpp stays
-excluded; its ctor is public, EGL types are void*); two small hunks in
-PlatformDisplaySkia.cpp (skiaGLInterface() __EMSCRIPTEN__ branch +
-lazy-init gate). Embedder: BIB_GPU=1 opt-in, texture-backed backing
-surface (NOT FBO0-direct, NOT preserveDrawingBuffer), present =
-surface draw to FBO0 wrap + FlushAndSubmit, link flags
--sMAX_WEBGL_VERSION=2 -sFULL_ES3=1. CPU path bit-for-bit when unset.
-M1 = gate page paints via Ganesh under BIB_GPU=1 AND raster gate2 stays
-green. Patch export (tools/export-webkit-patches.sh) REQUIRED before
-commit — this touches the WebKit tree.
+**G2 M1 SHIPPED 2026-06-11 ~15:15 (task #45).** The engine paints through
+Ganesh under `browser.html?gpu=1` — GPU gate PASS with readback
+PIXEL-IDENTICAL to CPU raster (exactBlue=20000 redGlyph=1962
+nonWhite=22414); raster gates unchanged and green; wasm +0.7MB. Full
+implementation record in decision-005 "G2 M1 results". Verify any GPU
+work with `BIB_CHANNEL=chromium node build/gpu-gate-probe.mjs` (full
+Chromium REQUIRED — headless-shell loses WebGL contexts).
+
+Next, in order:
+1. **M2 — measure GPU mode on real content**: perf-probe/scroll-cost on
+   ?gpu=1 (old.reddit force-frame was 32.6ms CPU; G1 spike said ~1-3ms),
+   image-heavy pages (texture upload/cache behavior, OQ3 tail), watch for
+   paths that read pixels mid-paint (risk #1: filters, getImageData).
+2. **G3 — probe/gate compat**: __bib.probe()/bib_render(force) GPU
+   readback path (surface->readPixels — probes only), GPU smoke gate in
+   the gate suite, decide default-on vs opt-in.
+3. Context-loss recreate handler (risk #3) — headless-shell is a free
+   repro rig. Then G4 validation sweep.
 
 **G1 PASSED 2026-06-11 ~14:30 (task #44).** The full Ganesh→GLES3→WebGL2
 stack works against our exact libSkia.a: gradient/AA/texture-upload/path

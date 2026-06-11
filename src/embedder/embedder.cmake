@@ -56,6 +56,13 @@ target_link_options(BibEmbedder PRIVATE
     # real function names instead of wasm-function[N]. Costs binary size
     # only (no codegen change) — load-bearing for site-abort diagnosis.
     "SHELL:--profiling-funcs"
+    # Skia GPU (decision-005 G2): Ganesh drives a WebGL2 context created at
+    # boot when Module.bibGPU is set. FULL_ES3 ships the JS shadow-buffer
+    # emulation of glMapBufferRange & co — the SK_ASSUME_GL_ES=1 archive's
+    # GLES3 interface validation requires them (G1 finding 3). Inert in
+    # node/gate mode: nothing creates a context there.
+    "SHELL:-sMAX_WEBGL_VERSION=2"
+    "SHELL:-sFULL_ES3=1"
 )
 
 # ICU data archive at the same absolute path ICU compiled in as its default
