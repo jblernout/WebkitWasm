@@ -18,19 +18,37 @@ nothing below is done until real sites feel usable and the wave-2 sweep
 verdicts flip. Phase 5 chrome (title/back-forward/etc.) stays SECONDARY
 to that.
 
-## ⟶ NEXT SESSION STARTS HERE: Web Workers scoping pass (task #40)
+## ⟶ NEXT SESSION STARTS HERE: Workers Phase W-A (main-thread workers)
 
-User (2026-06-10 ~23:45): start with the Workers scoping pass, keep the
-rest of the menu in mind. NO build flip yet — the deliverable is a
-go/no-go decision doc (docs/summaries/decision-XXX-workers-scope.md).
-Task #40 has the full checklist: pthread build-flag impact, inventory of
-every single-threaded surgery in the ledger that real threads would
-re-expose (WorkQueue-on-main-RunLoop, inline dispatchSync, callOnFileThread
-main-dispatch, IDB serialization inline, ImageFrameWorkQueue
-callOnMainThread, Thread::create assert sites, CookieJarDB), per-worker
-VM/heap cost under the wasm32 4GB ceiling, what actually unlocks per site
-(reCAPTCHA regular variant likely; Turnstile/Discord still guest-wasm
-gated), and a phasing recommendation.
+Task #40 (Workers scoping pass) is **DONE** (2026-06-11 ~00:15) —
+deliverable: **docs/summaries/decision-004-workers-scope.md**. Verdict:
+**GO on Phase W-A** (upstream `WorkerThreadMode::UseMainThread` for
+dedicated workers — NO pthread flip, ~4-hunk WebKit patch + fail-fast
+stubs for importScripts/sync-XHR + the WorkerGlobalScope crypto-semaphore
+sites Codex found, incremental rebuild, 1–2 days);
+**HOLD on Phase W-B** (real pthread workers, 1–2 weeks) until W-A's
+empirical reCAPTCHA result. Headline findings (details + file:line
+evidence in the doc):
+- Upstream already runs workers WITHOUT an OS thread (service-worker
+  testing mode): `WorkerMessagingProxy.cpp:162` is the switch;
+  main-thread workers share commonVM (zero per-worker VM cost).
+- importScripts/sync-XHR would INFINITE-SPIN in that mode (sync load pumps
+  the C++ RunLoop while wisp bytes need host JS events) → stubs mandatory.
+- The wasm-sysroot is ALREADY pthread-ABI (atomics+bulk-memory verified in
+  libsqlite3/libcurl/libicuuc/libfreetype target_features) — a W-B flip
+  recompiles only the WebKit tree + embedder, into a separate
+  build/webcore-mt dir. embedder.cmake:34's "sysroot is single-threaded"
+  comment is stale/wrong.
+- W-B pre-flip MUSTs: dispatchSync wrong-thread fix + a cross-thread
+  main-RunLoop wake (worker→main callOnMainThread currently couldn't wake
+  the host pump).
+- Unlock truth: reCAPTCHA is the ONLY sweep-verified site where Workers is
+  the binding gap; Turnstile/Discord stay gated on guest wasm regardless.
+
+Next concrete step (pending user go on the doc's recommendation):
+implement W-A per the doc's "Phasing & exit criteria" — 4 hunks + stubs,
+incremental rebuild, gates + 5-site sweep regression, log the reCAPTCHA
+worker's behavior. Export ledger after WebKit edits; commit.
 
 **Wave-2 sweep (task #39, 2026-06-10 ~23:45) — the checkup that picked
 this priority. Every verdict improved; NO aborts, NO crashes:**
