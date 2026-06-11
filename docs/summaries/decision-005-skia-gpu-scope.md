@@ -155,6 +155,81 @@ OQ3 PARTIALLY RESOLVED: raster→texture upload + sampled draw works
 transparently (the spike's image block). Cache behavior under real page
 load still to observe in G2.
 
+## G2 design (recon complete 2026-06-11, task #45 — verified against pinned tree + archive)
+
+**Upstream's own injection point does the heavy lifting.** Verified facts:
+
+- `PlatformDisplaySkia.cpp` IS already compiled into libWebCore.a (it
+  builds against Emscripten's EGL headers). Its lazy `SkiaGLContext`
+  machinery (offscreen GLContext + `GrDirectContexts::MakeGL(skiaGLInterface())`)
+  is gated `#if PLATFORM(GTK) || PLATFORM(WPE) || PLAYSTATION…` — our port
+  falls into `return nullptr`.
+- Upstream `PlatformDisplay.cpp` (NOT compiled today) has exactly the
+  pattern we need: `PlatformDisplay::setSharedDisplay(unique_ptr&&)` +
+  `sharedDisplay()` that asserts one was set. `Type::Surfaceless` is an
+  unconditional enum value our subclass can return.
+- `GLContext` (egl/GLContext.h) is concrete/final with a PUBLIC ctor
+  `GLContext(GLDisplay&, EGLContext, EGLSurface, EGLConfig)` where the EGL
+  types are plain `void*` typedefs. Its .cpp is EXCLUDED from our build —
+  our GLStubs file already owns its member definitions (dtor +
+  makeContextCurrent=false stub today). Members: ThreadSafeWeakPtr
+  m_display, m_version, 3 void* handles. Once we CONSTRUCT one, the vtable
+  is referenced → must also define makeCurrentImpl/unmakeCurrentImpl/
+  glVersion (+ swapBuffers etc. if link demands).
+- Both accelerated call sites in GraphicsContextSkia (:326 texture-backed
+  draw, :1142 createAcceleratedSurface) guard with
+  `skiaGLContext() && makeContextCurrent()` then RELEASE_ASSERT
+  skiaGrContext() — null skiaGLContext = graceful CPU fallback.
+- ImageBufferSkiaAcceleratedBackend + SkiaReplayCanvas are NOT compiled →
+  ImageBuffers stay CPU; decoded raster images upload as textures
+  transparently when drawn (OQ3 ✓).
+- No WTF platform macro exists for the port — shared-file conditionals use
+  `defined(__EMSCRIPTEN__)` (CurlContext patch precedent).
+
+**Patch plan (WebKit tree, export via tools/export-webkit-patches.sh):**
+
+1. Compile upstream `PlatformDisplay.cpp` + `egl/GLDisplay.cpp` on the
+   port (PlatformEmscripten.cmake) — gives setSharedDisplay machinery +
+   GLDisplay over Emscripten's real EGL (eglGetDisplay/eglInitialize work;
+   library_egl.js provides the symbols). Drop the now-duplicate
+   sharedDisplay stub from GLStubsEmscripten.cpp.
+2. NEW port file `platform/graphics/emscripten/PlatformDisplayEmscripten.cpp`:
+   - PlatformDisplayEmscripten subclass (type() = Surfaceless).
+   - Port init called from embedder boot: emscripten_webgl_create_context
+     on the engine canvas (G1 attrs incl. stencil), make current,
+     setSharedDisplay(...).
+   - The G1 shims (GetString truncation + glGetInternalformativ over
+     getInternalformatParameter via EM_JS) + the assembled-GLES interface
+     factory live HERE (spike code moves nearly verbatim).
+   - GLContext member definitions for the port: ctor wraps THE canvas
+     context (single-context world); makeContextCurrent →
+     emscripten_webgl_make_context_current; glVersion → 300;
+     createOffscreen returns the facade. (GLContext.cpp stays excluded.)
+3. `PlatformDisplaySkia.cpp` hunks: (a) `skiaGLInterface()` gains
+   `#if defined(__EMSCRIPTEN__)` branch → port's shimmed interface
+   factory; (b) the skiaGLContext() lazy-init gate adds
+   `|| defined(__EMSCRIPTEN__)`.
+
+**Embedder plan (no patch needed):**
+
+- BIB_GPU=1 (Module.ENV, opt-in first) boot path: port init →
+  skiaGLContext() to force SkiaGLContext creation → grab skiaGrContext.
+- Backing store: TEXTURE-backed SkSurface (SkSurfaces::RenderTarget) — NOT
+  FBO 0 directly and NOT preserveDrawingBuffer (Chrome perf cost): paint
+  dirty rects with clips into the texture surface
+  (RenderingMode::Accelerated), present = backing->draw(fbo0Canvas) +
+  FlushAndSubmit (GPU-GPU quad, ~free; FBO0 wrap once, G1 code).
+- bib_render GPU mode: returns null pixels; host page skips the
+  putImageData loop (mode flag). g_blitPixels mirror not maintained.
+- Scroll: GPU mode maps g_scrollBlit → addDamage(clip) (GPU repaint of the
+  scroll region ≈1–3ms; the CPU memmove trick is moot).
+- BibEmbedder link flags += `-sMAX_WEBGL_VERSION=2 -sFULL_ES3=1`.
+- CPU path stays bit-for-bit identical when BIB_GPU unset (gates/node).
+
+Milestone M1 = gate page paints through Ganesh under BIB_GPU=1 while
+raster gate2 stays green. Then: paint-cost/scroll-cost/sweep on GPU (M2),
+backend-choice polish + GPU smoke gate (G3), full validation (G4).
+
 ## Open questions (as originally scoped; OQ1/OQ2 resolved, OQ3 partial — see G1 results)
 
 - **OQ1**: What does `PlatformDisplay` do on PORT=Emscripten today —

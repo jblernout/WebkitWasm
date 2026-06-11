@@ -21,7 +21,23 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: Skia-GPU G2 engine integration (decision-005)
+## ⟶ NEXT SESSION STARTS HERE: Skia-GPU G2 — IMPLEMENT (design is DONE)
+
+**G2 recon/design completed 2026-06-11 ~15:00 (task #45 in_progress).**
+Full patch plan + embedder plan in decision-005 "G2 design" — read THAT
+first; do not re-derive. Summary: compile upstream PlatformDisplay.cpp +
+GLDisplay.cpp (setSharedDisplay injection is upstream's own pattern);
+new port file PlatformDisplayEmscripten.cpp carries the G1 shims + GLES
+interface factory + GLContext port definitions (GLContext.cpp stays
+excluded; its ctor is public, EGL types are void*); two small hunks in
+PlatformDisplaySkia.cpp (skiaGLInterface() __EMSCRIPTEN__ branch +
+lazy-init gate). Embedder: BIB_GPU=1 opt-in, texture-backed backing
+surface (NOT FBO0-direct, NOT preserveDrawingBuffer), present =
+surface draw to FBO0 wrap + FlushAndSubmit, link flags
+-sMAX_WEBGL_VERSION=2 -sFULL_ES3=1. CPU path bit-for-bit when unset.
+M1 = gate page paints via Ganesh under BIB_GPU=1 AND raster gate2 stays
+green. Patch export (tools/export-webkit-patches.sh) REQUIRED before
+commit — this touches the WebKit tree.
 
 **G1 PASSED 2026-06-11 ~14:30 (task #44).** The full Ganesh→GLES3→WebGL2
 stack works against our exact libSkia.a: gradient/AA/texture-upload/path
