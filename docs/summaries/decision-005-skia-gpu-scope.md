@@ -1,7 +1,8 @@
 # Decision 005 — Skia GPU backend (WebGL2/Ganesh) scope + acceleration ladder
 
-Date: 2026-06-11. Status: **G2 M1 PASSED 2026-06-11 — engine paints through
-Ganesh under ?gpu=1 (see "G2 M1 results"); next: M2 perf measurement, then G3.**
+Date: 2026-06-11. Status: **G2 M1 PASSED + M2 MEASURED 2026-06-11 — engine
+paints through Ganesh under ?gpu=1, 2.6-3.4× frame-cost wins on real sites,
+zero engine-side GPU readbacks (see "M2 results"); next: G3.**
 Motivation: heavy visual+JS sites drop to a few fps. Measured anatomy:
 full-viewport Skia CPU paint **32.09ms** (old.reddit, >1 frame budget
 before any JS), CLoop JS 10–100× slower than JIT (unfixable — no JIT in
@@ -277,6 +278,56 @@ ImageBufferSkiaAcceleratedBackend::create — CPU mode degrades to the
 unaccelerated backend via ImageBuffer::create's fallthrough; GPU mode
 allocates real texture-backed ImageBitmap buffers. Verified both ways
 (build/imagebitmap-probe.mjs: cpu PASS, gpu PASS — was abort).
+
+## M2 results (2026-06-11) — measured on real content, task #51
+
+All runs: BIB_CHANNEL=chromium, 8G scopes, probes build/gpu-paint-cost.mjs /
+gpu-scroll-cost.mjs / gpu-readback-trace.mjs / canvas-readback-probe.mjs
+(gitignored). "Force frame" = bib_render(1): layout + full 800×600 paint +
+present. gl.finish() drain was ≤0.06ms in every run — the GPU absorbs our
+command streams trivially; the cost that remains is CPU-side paint recording
++ submission.
+
+| Workload | CPU raster | GPU (?gpu=1) | Win |
+|---|---|---|---|
+| old.reddit force frame | 32.60ms | **9.60ms** | **3.4×** |
+| en.wikipedia Glacier (image-heavy) force frame | 33.94ms (+0.30 blit) | **13.30ms** | **2.6×** |
+| tall.html scroll frame | 5.62ms (blit-shift strips) | **1.91ms mean / 2.50ms p95** | **~3×** |
+| MotionMark (user-run, real browser) | 2-3 | **32** | **10-15×** |
+| guest canvas getImageData 300×150 | 3.14ms | 2.90ms | parity |
+| discord.com/login (40s settle, stability) | — | 0.35ms/frame, no context loss | stable |
+
+Notes per row: GPU scroll repaints the FULL viewport every frame (g_scrollBlit
+is null in GPU mode → ChromeClient::scroll falls back to addDamage(clip)) and
+still beats the CPU's optimized partial blit-shift path 3×. The Wikipedia
+ratio is lower than reddit's because more of its frame is CPU-side
+layout/display-list recording, which the GPU can't help. Discord renders
+near-empty without guest wasm — the row is a stability point (heavy JS SPA,
+gpu stayed on), not a paint benchmark.
+
+**Risk #1 audit (mid-paint GPU readback) — CLEAR.** gpu-readback-trace.mjs
+wraps WebGL2RenderingContext.prototype.readPixels + getBufferSubData (the
+-sFULL_ES3 glMapBufferRange emulation reads back through the latter) before
+engine boot. GLctx lives in the PAGE realm (Emscripten proxies GL to the
+main thread under PROXY_TO_PTHREAD), so the wrap sees everything — and saw
+**zero calls** across boot, old.reddit load, 25s settle, and 5 forced frames.
+The NVIDIA "GPU stall due to ReadPixels" driver lines seen in probe output
+are HEADLESS Chrome's own compositor reading back the canvas for frame
+output (sparse, never inside our render loop, absent in real browsers) — a
+probe-rig artifact, not engine behavior. NativeImage::singlePixelSolidColor's
+texture readback never fires either (decoded 1×1 trackers are raster-backed
+→ peekPixels path).
+
+**Finding for G3: guest 2D canvases are still CPU-raster even in GPU mode.**
+CanvasUsesAcceleratedDrawing defaults to FALSE for WebCore-direct embedders
+(UnifiedWebPreferences.yaml: `WebCore: default: false`; gate at
+CanvasBase.cpp:292) and we never set it. That's why getImageData is at
+parity (no texture round-trip — there's no texture). Consequence: the user's
+MotionMark 32 was scored with guest canvases on CPU; canvas-heavy suites
+paint raster then upload per frame. G3 experiment: set
+canvasUsesAcceleratedDrawing=true (GPU mode only) and re-measure MotionMark
+— upside on canvas suites, watch getImageData-heavy sites for new sync
+stalls (the cost would become real GPU readback instead of memcpy).
 
 ## Open questions (as originally scoped; OQ1/OQ2 resolved, OQ3 partial — see G1 results)
 
