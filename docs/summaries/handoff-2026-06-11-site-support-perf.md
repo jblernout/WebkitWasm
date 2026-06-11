@@ -21,7 +21,24 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: wasm2js spike OR G4 (IPInt = NO-GO)
+## ⟶ NEXT SESSION STARTS HERE: shim epic S-A OR G4 (spike = GO)
+
+**#54 SPIKE RUN 2026-06-11 ~18:20 — wasm2js shim is a GO
+(decision-006 "Option C feasibility spike").** All 103 .wasm modules
+Discord actually ships were captured from their asset bundles and run
+through emsdk's wasm2js (Binaryen v130): **102/103 translate OK**
+(84.3 MB wasm → 292.4 MB JS, avg ×3.47; biggest single output 13.7 MB),
+**zero SIMD/threads failures** — the SIMD fear was wrong. 101/103 are
+lazily-loaded tree-sitter grammars + 1 Lottie-style renderer; the only
+FAIL is the Rust/wasm-bindgen client-state module (multiple tables —
+structural wasm2js limit, Discord has its own no-wasm fallbacks).
+Executability proven: translated ini grammar runs in PURE JS (node, no
+wasm) → valid TSLanguage struct, abi_version=14. Login needs almost
+nothing: zero .wasm fetched on /login; it dies feature-detecting via a
+~40-byte Uint8Array probe module. Polyfill surface used:
+instantiate(Streaming), Module, Instance, Memory, error classes, stub
+WebAssembly.Exception. Spike rigs + modules + results.tsv in
+build/spike-wasm2js/ (gitignored).
 
 **#53 SCOPED 2026-06-11 ~17:45 — IPInt on CLoop is a NO-GO (kill
 criterion fired, decision-006).** IPInt has no cloop lowering at any
@@ -31,12 +48,8 @@ level: IPInt::initialize() RELEASE_ASSERTs under C_LOOP
 unconditionally when ENABLE(WEBASSEMBLY) && useWasm (default true) — so
 flipping the flag = abort at boot. No fallback tier exists (wasm LLInt
 deleted upstream; BBQ/OMG need executable memory). The ONLY GO-shaped
-path to guest wasm is a **wasm2js (Binaryen) shim** — host-side
-translation, guest-side WebAssembly API polyfill, no WebKit surgery,
-days-scale, wasm-MVP-only limits (Discord uses SIMD → partial at best).
-Cheap feasibility spike first: grab Discord's real .wasm, run wasm2js,
-measure output size / feature kills (~half a day). Full analysis:
-decision-006-guest-wasm-scope.md.
+path to guest wasm is the wasm2js shim — now spike-validated above.
+Full analysis: decision-006-guest-wasm-scope.md.
 
 **M2 MEASURED + G3 SHIPPED 2026-06-11 ~17:15 (tasks #51, #52).** GPU is
 now DEFAULT-ON for humans on plain browser.html (?gpu=0 escapes;
@@ -56,11 +69,13 @@ results". **Ask the user to re-run MotionMark** (32 was scored BEFORE
 canvas acceleration — expect higher now).
 
 Next, pick one:
-1. **wasm2js feasibility spike** (pre-epic, ~half a day): fetch Discord's
-   real .wasm modules + a couple of small-module sites, run Binaryen's
-   wasm2js, measure translated-JS size and which modules die on
-   SIMD/threads/post-MVP features. Output = go/no-go on the shim epic
-   (decision-006 Option C).
+1. **Shim epic Phase S-A — WebAssembly API polyfill + host translation
+   bridge** (decision-006 "Shim epic shape"): guest-page `WebAssembly`
+   global, module bytes → host-side Binaryen wasm2js → translated-JS
+   factory eval in guest. Acceptance: Discord login passes its
+   wasmSupported probe; a tree-sitter grammar loads and highlights.
+   Phase S-B after: translation cache, Memory/Table emulation classes,
+   graceful CompileError on multi-table modules.
 2. **G4 — in-place context-loss recreate** (no reload: recreate WebGL2
    context + GrDirectContext + surfaces, re-point the GLContext facades —
    they hold the boot handle by value) + full validation sweep (5-site,

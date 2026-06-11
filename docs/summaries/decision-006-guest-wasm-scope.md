@@ -89,3 +89,62 @@ Supporting facts:
   feasibility spike = grab Discord's actual .wasm modules, run wasm2js,
   measure translated-JS size + whether SIMD/threads kill it. Cheap spike
   (~half a day) before committing.
+
+## Option C feasibility spike — run 2026-06-11 (task #54): **GO**
+
+Method: scraped every `.wasm` referenced by discord.com's asset bundles
+via host Chromium (login page network capture + bundle-scan of all
+loaded JS), then ran emsdk's `wasm2js -all -O1` (Binaryen v130) on each.
+Throwaway rigs in `build/spike-wasm2js/` (capture.mjs, analyze.sh,
+run-translated.mjs); modules + results.tsv there too (gitignored).
+
+What Discord actually ships (103 modules, 84.3 MB):
+- **101 are tree-sitter grammars** (code-block syntax highlighting),
+  Emscripten `dylink` side modules, lazily loaded per language. 4.7 KB
+  (ini) to 9.1 MB (lean).
+- **1 Lottie/Skottie-style animation renderer** (714ffcb9…, 1.45 MB).
+- **1 Rust/wasm-bindgen client-state engine** (6e6e667c….module.wasm,
+  1.18 MB — guild/role action handlers, idna). Post-login app code, not
+  fetched at login.
+
+Translation results (`results.tsv`):
+- **102/103 translate OK**: 84.3 MB wasm → 292.4 MB JS, **avg ×3.47**
+  expansion (worst ×52 on one 43 KB module; biggest single output
+  13.7 MB JS from the 9.1 MB lean grammar). Translate time mostly <3 s
+  per module, worst 109 s — host-side, lazy, cacheable, off the guest
+  thread.
+- **1/103 FAILS**: the Rust state module — `Fatal: modules with multiple
+  tables are not supported yet` (wasm-bindgen externref table). A
+  structural wasm2js limitation; not fixable from our side.
+- **ZERO SIMD/threads failures.** The "Discord uses SIMD" fear from the
+  original scoping did not materialize in the actual payload.
+
+Executability proven (the shim's core bet): the translated ini grammar
+runs in pure JS with NO WebAssembly anywhere — `tree_sitter_ini()`
+returns a relocated TSLanguage struct whose first u32 reads
+**abi_version = 14** (correct tree-sitter ABI). Emulated `env` imports
+needed: `memory(.buffer)`, `__memory_base`, `__table_base`,
+`__indirect_function_table`. Output form: ES6 module with
+`import * as env from 'env'` + base64 data segments → trivially
+rewrapped as a factory function for guest eval.
+
+Login-path requirement is tiny: the login page fetches **zero** .wasm.
+It dies on feature-detect — `wasmSupported` instantiates a ~40-byte
+probe module from a Uint8Array literal. Polyfill surface used across
+the login bundles: `instantiate`, `instantiateStreaming`, `Module`,
+`Instance`, `Memory`, `CompileError`, `RuntimeError`, plus a guarded
+`WebAssembly.Exception` presence check (Sentry) — stub class suffices.
+Other gates (libdave voice E2EE) reject gracefully without wasm.
+
+Shim epic shape (phased, all embedder/host-side, no WebKit surgery):
+1. **Phase S-A — API polyfill + host translation bridge**: guest-page
+   `WebAssembly` global; module bytes → host (Binaryen wasm2js in the
+   host page) → translated JS string → guest eval via factory wrap.
+   Unblocks login (probe module) and tree-sitter highlighting.
+2. **Phase S-B — coverage/limits**: translation cache, instantiate
+   import-object plumbing (Memory/Table emulation classes), graceful
+   `CompileError` on untranslatable modules (multi-table Rust module
+   takes Discord's own no-wasm fallback paths, which exist).
+Known limits to record up front: CLoop-speed execution, avg ×3.5 JS
+size in guest heap (lazy per-module, acceptable), multi-table
+wasm-bindgen modules unsupported.
