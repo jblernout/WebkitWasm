@@ -18,12 +18,47 @@ nothing below is done until real sites feel usable and the wave-2 sweep
 verdicts flip. Phase 5 chrome (title/back-forward/etc.) stays SECONDARY
 to that.
 
-## ⟶ NEXT SESSION STARTS HERE: site support + performance (user-stated focus)
+## ⟶ NEXT SESSION STARTS HERE: Web Workers scoping pass (task #40)
 
-User (2026-06-10 ~23:05): "next session i really want to discuss improving
-site support and performance to make it more and more usable." Open with
-that DISCUSSION — the menu below is the candidate list with status; let
-the user pick the order before grinding.
+User (2026-06-10 ~23:45): start with the Workers scoping pass, keep the
+rest of the menu in mind. NO build flip yet — the deliverable is a
+go/no-go decision doc (docs/summaries/decision-XXX-workers-scope.md).
+Task #40 has the full checklist: pthread build-flag impact, inventory of
+every single-threaded surgery in the ledger that real threads would
+re-expose (WorkQueue-on-main-RunLoop, inline dispatchSync, callOnFileThread
+main-dispatch, IDB serialization inline, ImageFrameWorkQueue
+callOnMainThread, Thread::create assert sites, CookieJarDB), per-worker
+VM/heap cost under the wasm32 4GB ceiling, what actually unlocks per site
+(reCAPTCHA regular variant likely; Turnstile/Discord still guest-wasm
+gated), and a phasing recommendation.
+
+**Wave-2 sweep (task #39, 2026-06-10 ~23:45) — the checkup that picked
+this priority. Every verdict improved; NO aborts, NO crashes:**
+- **old.reddit FLIPPED**: real front page renders (941 colors, 7 streams,
+  zero errors) — the old server-side "network policy" block page is gone.
+- **google login FULL FLOW WORKS**: email visible while typing, Enter →
+  real account-validation error rendered in ≤3s. The never-resolving
+  gray overlay is dead (pump #17).
+- **reCAPTCHA click-feel FIXED**: click→first visual response **0.46s**
+  (was "slow after click"); the full image challenge (3×3 grid, all
+  tiles painted) renders. Workers NotSupportedError fires on load AND
+  +2.3s post-click — the challenge path wants a Worker; Workers remain
+  the suspected fallback-variant trigger.
+- **velzie.rip near-perfect**: fonts/pfp/now-playing all render; ONLY the
+  WebGL background is dead (gl.viewport null, #32). Button-wall failures
+  are environmental (LAN ad-block + rinici.de bot-filter).
+- **fal.ai/grants renders fine**; one purple-noise artifact in their
+  animated hero canvas (minor, unexplored).
+- Only TWO engine gaps repeated across all five sites: **Web Workers**
+  (×2) and **WebGL** (×2). Everything else environmental.
+- Perf calibration: pump-era numbers hold (MessageChannel hop 0.38ms,
+  setTimeout hop 6.93ms, fetch 44ms). Click-feel is no longer the
+  problem → dirty-rect (#37) is an efficiency win now, not a feel fix.
+- Sweep ran with BIB_CHANNEL=chromium (knob added to site-diagnose.mjs +
+  google-login-repro.mjs, commit e48bd55) — zero host crashes, #38
+  mitigation works. recaptcha click runner: build/recaptcha-click.mjs
+  (gitignored). Logs: build/sweep2-*.log, screenshots build/diagnose-*,
+  build/google-login-*, build/recaptcha-*.
 
 **Closed this session (don't re-litigate):**
 - **woff2 "bug" RESOLVED — NOT a bug.** The vendored pacifico.woff2 was
@@ -52,12 +87,10 @@ the user pick the order before grinding.
   isolated. Repro harness: build/hw-crash-catch.mjs (BIB_CHROME_FLAGS /
   BIB_CHANNEL env knobs), logs build/hw-*.log.
 
-**The menu for "more usable" (discuss, then execute):**
-1. **Wave-2 real-site sweep (#30)** — re-verdict fal.ai, google login
-   full flow, old.reddit, velzie.rip, reCAPTCHA click-feel with pump
-   (#17) + fonts landed. Cheap, high-information; calibrates everything
-   else. tools/site-diagnose.mjs + tools/perf-probe.mjs.
-2. **Web Workers epic** — single biggest site-support unlock left:
+**The menu for "more usable" (re-ranked after the sweep):**
+1. ~~Wave-2 real-site sweep (#30)~~ DONE 2026-06-10 (see verdicts above).
+2. **Web Workers epic** ← CURRENT (scoping pass first, task #40) —
+   single biggest site-support unlock left:
    gates Discord, Cloudflare Turnstile, likely the reCAPTCHA fallback-v2
    downgrade (2captcha logs "Web Workers are not supported"), and
    degrades countless SPA loaders. Safe under the one-mutator-per-VM
