@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- G1 GPU context spike host page (decision-005). Serves the standalone
+     Skia-over-WebGL2 spike binary; verdict arrives as "GPUSPIKE: ..." lines
+     on the console (Module.print → console.log). -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>BiB GPU spike</title>
+<style>
+  body { background: #202028; color: #ccc; font: 13px monospace; }
+  canvas { border: 1px solid #555; display: block; margin: 12px auto; }
+</style>
+</head>
+<body>
+<canvas id="spike" width="800" height="600"></canvas>
+<script>
+  // Catch context loss as early as possible — before the module loads.
+  document.getElementById("spike").addEventListener("webglcontextlost", (e) => {
+    console.log("GPUSPIKE: js webglcontextlost status=" + e.statusMessage);
+  });
+  var Module = {
+    print: (s) => console.log(s),
+    printErr: (s) => console.error(s),
+  };
+</script>
+<script src="engine/gpu-spike.js"></script>
+</body>
+</html>

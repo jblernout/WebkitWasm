@@ -83,3 +83,26 @@ if (BIB_CA_BUNDLE)
     target_link_options(BibEmbedder PRIVATE
         "SHELL:--embed-file ${BIB_CA_BUNDLE}@/etc/ssl/cacert.pem")
 endif ()
+
+# G1 GPU context spike (decision-005): standalone Skia-over-WebGL2 proof,
+# linked against the same libSkia.a the engine uses. EXCLUDE_FROM_ALL —
+# built only on demand via `ninja BibGpuSpike`. SK_GL/SK_GANESH are PRIVATE
+# defines on the Skia target, so a TU using the Ganesh public headers must
+# set them itself (the PUBLIC ABI defines — SK_TRIVIAL_ABI, SK_R32_SHIFT,
+# SK_ASSUME_GL_ES — propagate through Skia::Skia).
+add_executable(BibGpuSpike EXCLUDE_FROM_ALL
+    ${BIB_EMBEDDER_DIR}/../spike/gpu-spike.cpp
+)
+set_target_properties(BibGpuSpike PROPERTIES OUTPUT_NAME gpu-spike)
+target_compile_definitions(BibGpuSpike PRIVATE SK_GL SK_GANESH)
+target_link_libraries(BibGpuSpike PRIVATE Skia::Skia)
+target_link_options(BibGpuSpike PRIVATE
+    "SHELL:-sMAX_WEBGL_VERSION=2"
+    # The SK_ASSUME_GL_ES=1 archive validates the GLES3 interface strictly:
+    # glMapBufferRange/glUnmapBuffer/glFlushMappedBufferRange must resolve.
+    # Emscripten only ships those (JS shadow-buffer emulation) with FULL_ES3.
+    "SHELL:-sFULL_ES3=1"
+    "SHELL:-sINITIAL_MEMORY=64MB"
+    "SHELL:-sALLOW_MEMORY_GROWTH=1"
+    "SHELL:--profiling-funcs"
+)

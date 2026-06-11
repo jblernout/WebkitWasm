@@ -21,7 +21,35 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: Skia-GPU G1 context spike (decision-005)
+## ⟶ NEXT SESSION STARTS HERE: Skia-GPU G2 engine integration (decision-005)
+
+**G1 PASSED 2026-06-11 ~14:30 (task #44).** The full Ganesh→GLES3→WebGL2
+stack works against our exact libSkia.a: gradient/AA/texture-upload/path
+all render, verified 3 ways (Skia readPixels, raw glReadPixels FBO 0,
+host JS readback + screenshot). **Steady-state full-canvas draw
+0.9–1.3ms/frame** (vs 32.6ms CPU full-viewport paint); frame0 ≈ 100ms
+one-time shader compiles. Spike: `src/spike/gpu-spike.cpp` →
+`ninja -C build/webcore BibGpuSpike` → web/gpu-spike.html →
+build/gpu-spike-probe.mjs (**BIB_CHANNEL=chromium required** — playwright
+headless-shell loses the WebGL context at first composite; full Chromium
+is solid). Engine untouched: embedder.wasm pre-spike timestamp, gate2
+PASS pixel-exact after.
+
+**G2 must carry three integration requirements** (full detail in
+decision-005 "G1 results"): (1) GetString shim — Skia's version parser
+takes the "(WebGL 2.0" number and caps us at ES2, killing RGBA8
+renderability; truncate GL_VERSION at first '('. (2) glGetInternalformativ
+shim — Emscripten's is a silent no-op → empty sample-count tables →
+NOTHING renderable; implement over getInternalformatParameter.
+(3) `-sFULL_ES3=1` link flag — ES3 interface validation demands the
+MapBufferRange trio. Both shims are getProc-level (libcurl.js pattern, NO
+Skia patch). OQ1 resolved: PlatformDisplay::sharedDisplay() is a
+RELEASE_ASSERT stub in the patch, written to be replaced — G2 implements
+the real provider there. OQ2 resolved: fences available. G2 scope:
+provider + RenderingMode::Accelerated + delete the readPixels/putImageData
+blit; G3 keeps raster backend for pixel-exact gates (runtime choice).
+
+## (superseded) Previous opener: Skia-GPU G1 context spike
 
 **BLIT-SHIFT LIVE 2026-06-11 ~13:10 (task #43 complete).** Scroll cost
 **24.09ms → 5.62ms mean / 7.28ms p95** (build/scroll-cost.mjs on

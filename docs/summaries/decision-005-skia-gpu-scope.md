@@ -1,7 +1,6 @@
 # Decision 005 — Skia GPU backend (WebGL2/Ganesh) scope + acceleration ladder
 
-Date: 2026-06-11. Status: **SCOPED, NOT STARTED** (user direction:
-blit-shift + SIMD ship first; this is the prep for the GPU phase).
+Date: 2026-06-11. Status: **G1 PASSED 2026-06-11 — see "G1 results" below; G2 next.**
 Motivation: heavy visual+JS sites drop to a few fps. Measured anatomy:
 full-viewport Skia CPU paint **32.09ms** (old.reddit, >1 frame budget
 before any JS), CLoop JS 10–100× slower than JIT (unfixable — no JIT in
@@ -89,7 +88,74 @@ term and deletes the readPixels/putImageData blit entirely.
   measurement on GitHub-class pages, dirty-cost + paint-cost probes
   re-run on GPU.
 
-## Open questions (resolve in G1)
+## G1 results (2026-06-11) — PASS, full stack proven
+
+Spike: `src/spike/gpu-spike.cpp` → CMake target `BibGpuSpike`
+(EXCLUDE_FROM_ALL, bottom of src/embedder/embedder.cmake, build with
+`ninja -C build/webcore BibGpuSpike`), host page `web/gpu-spike.html`,
+probe `build/gpu-spike-probe.mjs` (**must run BIB_CHANNEL=chromium**, see
+finding 4). Verdict: gradient + AA circle + raster→texture image upload +
+AA stroked path all render through Ganesh→GLES3→WebGL2, verified three
+ways (Skia surface->readPixels, raw glReadPixels on FBO 0, host-side JS
+readPixels + screenshot).
+
+**Measured**: frame0 ≈ 85–115ms (one-time shader compiles); steady-state
+full-canvas draw + FlushAndSubmit ≈ **0.9–1.3ms/frame** (vs 32.6ms CPU
+full-viewport paint — different workload, but the order-of-magnitude
+signal is unambiguous). Stencil=8 honored on FBO 0; GL_SAMPLES=0 with
+antialias:false; wrap at sampleCnt 1 works.
+
+**Integration requirements discovered (G2 must carry all three):**
+
+1. **GetString shim.** Emscripten reports GL_VERSION
+   `"OpenGL ES 3.0 (WebGL 2.0 (...))"`; Skia's parser
+   (GrGLUtil.cpp:95) matches the `"(WebGL %d.%d"` tail and takes the
+   WEBGL number → context capped at ES 2.0 → RGBA8 loses renderability
+   (GrGLCaps.cpp:1524) → WrapBackendRenderTarget fails. Fix: getProc
+   returns a wrapper that truncates GL_VERSION at the first '(' so the
+   plain GLES branch parses 3.0. (The WebGL parser branch serves Skia's
+   WebGL-standard builds, which SK_ASSUME_GL_ES=1 compiles out of our
+   archive.) GLSL-version parsing is safe (ES branch matches first).
+2. **glGetInternalformativ shim.** Emscripten's symbol resolves but is a
+   no-op stub → GrGLCaps's per-format MSAA sample-count query reads
+   nothing → fColorSampleCounts stays EMPTY → isFormatRenderable() false
+   at ANY sample count for EVERY format. Fix: getProc-level
+   implementation over WebGL2 getInternalformatParameter(RENDERBUFFER,
+   fmt, SAMPLES); NUM_SAMPLE_COUNTS = returned array length (WebGL2
+   dropped that pname).
+3. **`-sFULL_ES3=1` link flag.** At parsed-ES3.0 the interface validation
+   requires glMapBufferRange/glUnmapBuffer/glFlushMappedBufferRange;
+   Emscripten only ships them (JS shadow-buffer emulation) under
+   FULL_ES3. Engine link gains this flag in G2. If map-based transfers
+   prove slow, GrContextOptions::fBufferMapThreshold can bias Skia
+   toward BufferSubData — measure first.
+
+Both shims are getProc-level — the libcurl.js pattern: pure
+embedder/port code, NO Skia source patch, pinned tree stays clean.
+G2 decision: keep them as shims next to the skiaGrContext provider
+(preferred) rather than patching GrGLUtil.cpp.
+
+4. **Tooling**: playwright's bundled headless-shell LOSES the WebGL
+   context at the first composite (webglcontextlost at frame 2, empty
+   status). Full Chromium (BIB_CHANNEL=chromium) is solid. All GPU
+   gates/probes must set it — and headless-shell is a free regression
+   rig for the G2 context-loss recreate handler (risk #3).
+5. **Size**: spike wasm = 3.99MB (core Skia + Ganesh + runtime). The
+   engine already links core Skia, so expected embedder.wasm growth in
+   G2 is the Ganesh-only slice — < 4MB upper bound (risk #5 quantified).
+
+OQ1 RESOLVED: `PlatformDisplay::sharedDisplay()` on PORT=Emscripten is a
+deliberate `RELEASE_ASSERT_NOT_REACHED()` stub (see
+src/patches/webkit-emscripten.patch, GL stubs file — its header comment
+already says the Skia GPU phase replaces it). G2 = implement the real
+provider there + the GLContext/GLFence plumbing.
+OQ2 RESOLVED: fence=yes — glFenceSync/glClientWaitSync/glDeleteSync all
+resolve under WebGL2. GLFence is viable in G2.
+OQ3 PARTIALLY RESOLVED: raster→texture upload + sampled draw works
+transparently (the spike's image block). Cache behavior under real page
+load still to observe in G2.
+
+## Open questions (as originally scoped; OQ1/OQ2 resolved, OQ3 partial — see G1 results)
 
 - **OQ1**: What does `PlatformDisplay` do on PORT=Emscripten today —
   exists, stubbed, or absent? (Decides whether we implement
