@@ -20,7 +20,37 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 32.09ms)**, idle bib_tick 0.005ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: validate acceleration rung 1 (task #42)
+## ⟶ NEXT SESSION STARTS HERE: blit-shift guard fix, then Skia-GPU G1
+
+**RUNG 1 VALIDATED 2026-06-11 ~12:30 (task #42 complete) — honest mixed
+verdict; build is HEALTHY and stays:**
+- Gate pixel-exact under SIMD; anim probe 0.34ms; reddit renders clean.
+- **-msimd128 ≈ ZERO paint win on real content**: reddit full repaint
+  **32.18ms vs 32.09ms scalar**. Text-dominated CPU raster doesn't
+  autovectorize; if SIMD is to matter, Skia's dedicated wasm SIMD opts
+  need explicit investigation — but the better conclusion: **GPU
+  (decision-005) is THE paint lever, full stop.**
+- **Blit-shift DORMANT**: scroll probe = 40/40 full-viewport boxes @
+  24.09ms. The g_frameDirty stale-pixel guard in bibScrollBlit trips on
+  EVERY scroll tick (WebCore invalidates scrollbars/content BEFORE
+  calling ChromeClient::scroll). FIX FIRST (small): translate the pending
+  g_dirtyRect by the scroll delta (damage moves with content) instead of
+  bailing; re-run build/scroll-cost.mjs expecting thin strips.
+- **NEW TRAPS** (also in task #42): (a) playwright `browser.close()`
+  hangs FOREVER on the COOP/COEP engine page — found two zombie probe
+  scopes (11h56m, 1h38m); add close-timeout armor (Promise.race +
+  process.exit) to all probe scripts; check for stale run-p*.scope units.
+  (b) Full-rebuild reclaim-livelock: nproc-parallel unified-sources TUs
+  at -O3 -msimd128 need ~1.2GB EACH → 12G/no-swap scope livelocks (28min
+  wall/3min CPU per job, counter frozen at [1676/2089] for 30+ min).
+  `BIB_JOBS=6` knob now in build-webcore.sh — USE IT for full rebuilds.
+- Post-SIMD 5-site sweep NOT yet run (only reddit via probes) — run as
+  part of the next session's regression pass.
+
+Then: **Skia-GPU G1 context spike** (decision-005) — now unambiguously
+the top perf item since SIMD underdelivered on paint.
+
+## (superseded by the block above) Previous opener: validate rung 1
 
 **2026-06-11 ~02:55 update — acceleration work started after this handoff
 was first written; the WebGL-spike opener below is now SECOND in line.**

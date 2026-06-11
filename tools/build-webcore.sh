@@ -104,8 +104,12 @@ else
 fi
 
 # -k 50: keep building past failures so each run surfaces a BATCH of
-# errors to fix, not just the first one
-ninja -C "$BUILD" -k 50 WebCore BibEmbedder > "$ROOT/build/webcore-ninja.log" 2>&1 || {
+# errors to fix, not just the first one.
+# BIB_JOBS caps parallelism: WebCore's unified-sources TUs at -O3 -msimd128
+# need ~1.2GB+ of clang RSS EACH — full nproc parallelism (~16) livelocks
+# the 12G/no-swap scope in reclaim (observed 2026-06-11: 28min wall, 3min
+# CPU per job, counter frozen). BIB_JOBS=6 fits comfortably.
+ninja -C "$BUILD" -k 50 ${BIB_JOBS:+-j "$BIB_JOBS"} WebCore BibEmbedder > "$ROOT/build/webcore-ninja.log" 2>&1 || {
   echo "NINJA FAILED — unique errors:"
   rg -n 'error:' "$ROOT/build/webcore-ninja.log" | sort -t: -k4 -u | head -25
   exit 1
