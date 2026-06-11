@@ -13,7 +13,10 @@ const clickY = Number(process.argv[3] ?? 300);
 const url =
   "http://127.0.0.1:8080/browser.html?url=" +
   encodeURIComponent("https://accounts.google.com/");
-const browser = await chromium.launch();
+// BIB_CHANNEL=chromium routes around the headless-shell V8 SEGV (task #38).
+const browser = await chromium.launch(
+  process.env.BIB_CHANNEL ? { channel: process.env.BIB_CHANNEL } : {}
+);
 const page = await browser.newPage();
 page.on("console", (m) => {
   const t = m.text();

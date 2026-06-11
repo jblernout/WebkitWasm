@@ -17,7 +17,11 @@ const sites = process.argv.slice(2).length
       "https://old.reddit.com/",
     ];
 
-const browser = await chromium.launch();
+// BIB_CHANNEL=chromium routes around the headless-shell V8 SEGV that heavy
+// CLoop workloads trigger (~1/3 of loads on multi-MB JS bundles, task #38).
+const browser = await chromium.launch(
+  process.env.BIB_CHANNEL ? { channel: process.env.BIB_CHANNEL } : {}
+);
 
 for (const target of sites) {
   console.log(`\n=== ${target} ===`);
