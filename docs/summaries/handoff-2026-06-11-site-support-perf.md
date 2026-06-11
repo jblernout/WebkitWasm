@@ -41,6 +41,14 @@ Next, in order:
    the gate suite, decide default-on vs opt-in.
 3. Context-loss recreate handler (risk #3) — headless-shell is a free
    repro rig. Then G4 validation sweep.
+4. **Guest-wasm scoping pass (task #53, after G3)**: JSC IPInt (in-place
+   wasm interpreter, no JIT needed — Lockdown Mode's path) may unblock
+   Discord-class sites ("WebAssembly is undefined"). Go/no-go doc only
+   (decision-006), modeled on the Workers scoping; likely kill criterion
+   is whether IPInt exists under the offlineasm cloop backend. JS-speed
+   verdict on record (2026-06-11): CLoop is permanent; only research-grade
+   paths (weval-style specialization) give 2×+; blocklist remains the
+   best real-site JS lever. MotionMark under ?gpu=1: 2-3 → 32.
 
 **G1 PASSED 2026-06-11 ~14:30 (task #44).** The full Ganesh→GLES3→WebGL2
 stack works against our exact libSkia.a: gradient/AA/texture-upload/path
