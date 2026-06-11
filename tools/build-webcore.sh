@@ -67,6 +67,8 @@ if [ ! -f "$BUILD/build.ninja" ]; then
   emcmake cmake -S "$TP/WebKit" -B "$BUILD" -GNinja \
     -DPORT=Emscripten \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_FLAGS=-msimd128 \
+    -DCMAKE_CXX_FLAGS=-msimd128 \
     -DENABLE_JIT=OFF \
     -DENABLE_C_LOOP=ON \
     -DENABLE_STATIC_JSC=ON \

@@ -1,0 +1,33 @@
+<!doctype html>
+<!-- Scroll blit-shift probe page: tall, plain (NO fixed/sticky elements so
+     canBlitOnScroll holds and ChromeClient::scroll fires), text-heavy so a
+     full repaint would be expensive enough to measure. Companion runner:
+     build/scroll-cost.mjs. -->
+<html>
+<head>
+  <style>
+    body { font: 14px/1.5 sans-serif; margin: 24px; }
+    p { max-width: 700px; }
+    h2 { margin-top: 2em; }
+  </style>
+</head>
+<body>
+  <h1>Scroll probe — 200 paragraphs</h1>
+  <script>
+    for (let i = 0; i < 200; i++) {
+      if (i % 10 === 0) {
+        const h = document.createElement("h2");
+        h.textContent = "Section " + i / 10;
+        document.body.appendChild(h);
+      }
+      const p = document.createElement("p");
+      p.textContent =
+        "Paragraph " + i + ": the quick brown fox jumps over the lazy dog. " +
+        "Pack my box with five dozen liquor jugs. Sphinx of black quartz, " +
+        "judge my vow. How vexingly quick daft zebras jump. Two driven " +
+        "jocks help fax my big quiz while quick zephyrs blow.";
+      document.body.appendChild(p);
+    }
+  </script>
+</body>
+</html>

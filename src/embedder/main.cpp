@@ -134,6 +134,12 @@ static bool writePPM(const char* path, const SkPixmap& pixmap)
     return ok;
 }
 
+// True while view->paint runs (paintFrameRect). A scroll callback arriving
+// MID-PAINT would shift pixels under the painter and slip past the frame's
+// snapshotted upload box — bibScrollBlit falls back to plain damage instead
+// (Codex hypothesis, 2026-06-11).
+static bool g_inPaint = false;
+
 // Paint ONLY `dirty` (root-view coords, pre-clamped to the frame, layout
 // already up to date — see bib_render) into the persistent surface. Pixels
 // outside the clip keep the previous frame's content; g_blitPixels mirrors
@@ -149,7 +155,9 @@ static bool paintFrameRect(const WebCore::IntRect& dirty)
     canvas->clipRect(SkRect::MakeXYWH(dirty.x(), dirty.y(), dirty.width(), dirty.height()));
     canvas->drawColor(SK_ColorWHITE);
     WebCore::GraphicsContextSkia context(*canvas, WebCore::RenderingMode::Unaccelerated, WebCore::RenderingPurpose::Unspecified);
+    g_inPaint = true;
     view->paint(context, dirty);
+    g_inPaint = false;
     canvas->restore();
     return true;
 }
@@ -161,6 +169,73 @@ static void clearDamage()
 {
     BIB::g_frameDirty = false;
     BIB::g_dirtyRect = { };
+    BIB::g_uploadRect = { };
+}
+
+// Fast-scroll blit (ChromeClient::scroll): shift the already-painted pixels
+// by `delta` within the scrolled clip, in BOTH mirrors (g_blitPixels and the
+// SkSurface — they must stay identical or later partial paints composite
+// over a stale base). WebCore then only repaints the strips the shift
+// exposed; the host re-uploads the whole moved region via g_uploadRect.
+static void bibScrollBlit(const WebCore::IntSize& delta, const WebCore::IntRect& rectToScroll, const WebCore::IntRect& clipRect)
+{
+    const WebCore::IntRect frameRect(0, 0, kWidth, kHeight);
+    WebCore::IntRect scrollRect = WebCore::intersection(WebCore::intersection(rectToScroll, clipRect), frameRect);
+    if (!g_engine || g_inPaint || scrollRect.isEmpty()) {
+        BIB::addDamage(clipRect);
+        return;
+    }
+    // Pending unpainted damage means the surface holds stale pixels —
+    // shifting stale content and painting only the strips would smear.
+    if (BIB::g_frameDirty) {
+        BIB::addDamage(scrollRect);
+        return;
+    }
+    const int dx = delta.width(), dy = delta.height();
+    WebCore::IntRect dst = scrollRect;
+    dst.move(dx, dy);
+    dst.intersect(scrollRect);
+    if (dst.isEmpty()) { // shifted clean out of the clip — nothing reusable
+        BIB::addDamage(scrollRect);
+        return;
+    }
+    WebCore::IntRect src = dst;
+    src.move(-dx, -dy);
+
+    // Overlap-safe row walk over g_blitPixels (memmove handles x overlap).
+    const size_t rowBytes = static_cast<size_t>(dst.width()) * 4;
+    if (dy > 0) {
+        for (int y = dst.height() - 1; y >= 0; --y)
+            memmove(g_blitPixels + ((static_cast<size_t>(dst.y() + y)) * kWidth + dst.x()) * 4,
+                g_blitPixels + ((static_cast<size_t>(src.y() + y)) * kWidth + src.x()) * 4, rowBytes);
+    } else {
+        for (int y = 0; y < dst.height(); ++y)
+            memmove(g_blitPixels + ((static_cast<size_t>(dst.y() + y)) * kWidth + dst.x()) * 4,
+                g_blitPixels + ((static_cast<size_t>(src.y() + y)) * kWidth + src.x()) * 4, rowBytes);
+    }
+    // Mirror the shift onto the surface — via the CANVAS writePixels, which
+    // (unlike SkSurface::writePixels) reports failure. On failure the two
+    // mirrors have DIVERGED (buffer shifted, surface not) — full-frame
+    // damage repaints and re-reads everything, resyncing both; never leave
+    // it silent (Codex confirmed finding, 2026-06-11).
+    auto info = SkImageInfo::Make(dst.width(), dst.height(), kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
+    if (!g_engine->surface->getCanvas()->writePixels(info, g_blitPixels + (static_cast<size_t>(dst.y()) * kWidth + dst.x()) * 4, kWidth * 4, dst.x(), dst.y())) {
+        BIB::addDamage(frameRect);
+        return;
+    }
+
+    // Host re-uploads everything that moved…
+    BIB::g_uploadRect.unite(scrollRect);
+    // …WebCore repaints only the exposed strips (scrollRect minus dst):
+    // a horizontal band (top or bottom) and/or a vertical band (left/right).
+    if (dy > 0)
+        BIB::addDamage({ scrollRect.x(), scrollRect.y(), scrollRect.width(), dy });
+    else if (dy < 0)
+        BIB::addDamage({ scrollRect.x(), scrollRect.maxY() + dy, scrollRect.width(), -dy });
+    if (dx > 0)
+        BIB::addDamage({ scrollRect.x(), scrollRect.y(), dx, scrollRect.height() });
+    else if (dx < 0)
+        BIB::addDamage({ scrollRect.maxX() + dx, scrollRect.y(), -dx, scrollRect.height() });
 }
 
 // Layout + paint the FULL frame (boot/gate path; bib_render drives the
@@ -254,7 +329,7 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
 {
     if (!g_engine)
         return nullptr;
-    if (!force && !BIB::g_frameDirty)
+    if (!force && !BIB::g_frameDirty && BIB::g_uploadRect.isEmpty())
         return nullptr;
     RefPtr view = mainFrameView();
     if (!view)
@@ -263,27 +338,37 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
     // damage through BibChromeClient, and it must land in THIS frame.
     g_engine->mainFrame->protectedDocument()->updateLayoutIgnorePendingStylesheets();
     const WebCore::IntRect frameRect(0, 0, kWidth, kHeight);
+    // Two regions, two meanings: `dirty` = WebCore repaints + we read back;
+    // `upload` = pixels bibScrollBlit already shifted in BOTH mirrors — the
+    // host just re-uploads them, nothing repaints (a force frame is both).
     WebCore::IntRect dirty = force ? frameRect : WebCore::intersection(BIB::g_dirtyRect, frameRect);
+    WebCore::IntRect upload = force ? WebCore::IntRect() : WebCore::intersection(BIB::g_uploadRect, frameRect);
     clearDamage(); // BEFORE paint — paint-time damage belongs to the next frame
-    if (dirty.isEmpty()) {
+    if (dirty.isEmpty() && upload.isEmpty()) {
         // All damage was outside the viewport — nothing visible changed.
         return nullptr;
     }
-    if (!paintFrameRect(dirty))
-        return nullptr;
-    auto dstInfo = SkImageInfo::Make(dirty.width(), dirty.height(), kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
-    uint8_t* dst = g_blitPixels + (dirty.y() * kWidth + dirty.x()) * 4;
-    if (!g_engine->surface->readPixels(SkPixmap(dstInfo, dst, kWidth * 4), dirty.x(), dirty.y())) {
-        // Failed readback: the surface now has newer pixels than
-        // g_blitPixels — re-dirty so the next frame repaints and retries
-        // instead of losing the damage (Codex 2026-06-11).
-        BIB::addDamage(dirty);
-        return nullptr;
+    if (!dirty.isEmpty()) {
+        if (!paintFrameRect(dirty))
+            return nullptr;
+        auto dstInfo = SkImageInfo::Make(dirty.width(), dirty.height(), kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
+        uint8_t* dst = g_blitPixels + (static_cast<size_t>(dirty.y()) * kWidth + dirty.x()) * 4;
+        if (!g_engine->surface->readPixels(SkPixmap(dstInfo, dst, kWidth * 4), dirty.x(), dirty.y())) {
+            // Failed readback: the surface now has newer pixels than
+            // g_blitPixels — re-dirty so the next frame repaints and retries
+            // instead of losing the damage (Codex 2026-06-11). Re-arm the
+            // upload region too: it was snapshot-cleared above.
+            BIB::addDamage(dirty);
+            BIB::g_uploadRect.unite(upload);
+            return nullptr;
+        }
     }
-    g_dirtyBox[0] = dirty.x();
-    g_dirtyBox[1] = dirty.y();
-    g_dirtyBox[2] = dirty.width();
-    g_dirtyBox[3] = dirty.height();
+    WebCore::IntRect box = dirty;
+    box.unite(upload);
+    g_dirtyBox[0] = box.x();
+    g_dirtyBox[1] = box.y();
+    g_dirtyBox[2] = box.width();
+    g_dirtyBox[3] = box.height();
     return g_blitPixels;
 }
 
@@ -586,6 +671,7 @@ int main()
     }
 
     g_engine = new Engine { WTF::move(page), WTF::move(localMainFrame), WTF::move(surface) };
+    BIB::g_scrollBlit = bibScrollBlit; // fast-scroll shift (needs g_engine)
 
     if (!paintFrame()) {
         printf("EMBEDDER: FAIL paint\n");

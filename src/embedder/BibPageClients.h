@@ -61,6 +61,15 @@ inline bool g_frameDirty = true;
 // Starts huge so the first paint covers the whole frame whatever its size.
 inline WebCore::IntRect g_dirtyRect { 0, 0, 1 << 20, 1 << 20 };
 
+// Region the HOST canvas must re-upload WITHOUT WebCore repainting it:
+// blit-shifted scroll pixels already updated in g_blitPixels + the surface
+// by bibScrollBlit. bib_render unions it into the reported dirty box.
+inline WebCore::IntRect g_uploadRect;
+
+// Fast-scroll hook installed by main.cpp (shifts surface + blit buffer).
+// Null until the engine is up; scroll() falls back to full-clip damage.
+inline void (*g_scrollBlit)(const WebCore::IntSize&, const WebCore::IntRect&, const WebCore::IntRect&) = nullptr;
+
 inline void addDamage(const WebCore::IntRect& rect)
 {
     g_dirtyRect.unite(rect);
@@ -80,10 +89,18 @@ private:
     void invalidateRootView(const WebCore::IntRect& rect) final { addDamage(rect); }
     void invalidateContentsAndRootView(const WebCore::IntRect& rect) final { addDamage(rect); }
     void invalidateContentsForSlowScroll(const WebCore::IntRect& rect) final { addDamage(rect); }
-    // scroll() is the fast-scroll path: the embedder is asked to blit-shift
-    // the scrolled pixels and repaint only the exposed strip. We don't
-    // blit-shift, so the whole scrolled clip region is damage.
-    void scroll(const WebCore::IntSize&, const WebCore::IntRect&, const WebCore::IntRect& clipRect) final { addDamage(clipRect); }
+    // scroll() is the fast-scroll path: the embedder blit-shifts the
+    // scrolled pixels and repaints only the exposed strips (main.cpp's
+    // bibScrollBlit). NOTE: WebCore only takes this path when
+    // canBlitOnScroll() — pages with fixed/sticky elements go through the
+    // slow full-invalidate path regardless (decision-005 finding 5).
+    void scroll(const WebCore::IntSize& delta, const WebCore::IntRect& rectToScroll, const WebCore::IntRect& clipRect) final
+    {
+        if (g_scrollBlit)
+            g_scrollBlit(delta, rectToScroll, clipRect);
+        else
+            addDamage(clipRect);
+    }
 
     // Returning true takes ownership of driving Page::updateRendering():
     // bib_tick runs it on the next host display frame iff this flag is set.
