@@ -18,7 +18,26 @@ nothing below is done until real sites feel usable and the wave-2 sweep
 verdicts flip. Phase 5 chrome (title/back-forward/etc.) stays SECONDARY
 to that.
 
-## ⟶ NEXT SESSION STARTS HERE: Workers Phase W-A (main-thread workers)
+## ⟶ NEXT SESSION STARTS HERE: WebGL spike (#32) or more-site sweeps
+
+**2026-06-11 ~01:30 — BOTH PRIORITY ITEMS SHIPPED THIS SESSION:**
+- **Dirty-rect #37 DONE** (commit 0203316 + Codex fixes in a5c991c):
+  steady-state dirty frame **32.09ms → 0.35ms**; full plan + measurements
+  in the commit and task #37 description.
+- **Workers Phase W-A DONE** (commit a5c991c): main-thread dedicated
+  workers live — smoke 6/6, reCAPTCHA zero worker errors + interactive
+  4×4 challenge, sweep at baseline. Six hunks + the upstream
+  postTaskForMode drop-fix; full story in decision-004 "W-A
+  implementation results". **W-B (pthreads) stays HOLD.**
+- Rollback point if anything surfaces: tag `phase4-pre-dirtyrect-workers`.
+
+Remaining menu, re-ranked: WebGL spike #32 (now the top engine gap —
+1-day route decision: vendored ANGLE→wasm vs custom
+GraphicsContextGLEmscripten on Emscripten GLES→host WebGL), more-site
+sweeps with workers live (cheap re-calibration), page-WS rework (defer —
+nearly free if W-B ever happens), Phase 5 chrome trio as filler.
+
+## (superseded 2026-06-11) Previous opener: Workers Phase W-A
 
 Task #40 (Workers scoping pass) is **DONE** (2026-06-11 ~00:15) —
 deliverable: **docs/summaries/decision-004-workers-scope.md**. Verdict:
