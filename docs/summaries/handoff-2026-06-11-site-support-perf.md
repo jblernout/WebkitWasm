@@ -20,7 +20,45 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 32.09ms)**, idle bib_tick 0.005ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: WebGL spike (#32)
+## ⟶ NEXT SESSION STARTS HERE: validate acceleration rung 1 (task #42)
+
+**2026-06-11 ~02:55 update — acceleration work started after this handoff
+was first written; the WebGL-spike opener below is now SECOND in line.**
+
+State at compaction: commit **cda7af6** = scroll blit-shift + `-msimd128`
+(PENDING VALIDATION); decision-005 (commit 384f9f8) = Skia-GPU scope
+(headline: SK_GL+SK_GANESH and the full Ganesh GL backend are ALREADY
+compiled into our libSkia.a; WebCore Skia layer is GPU-aware;
+integration = PlatformDisplay::skiaGrContext provider + WebGL2 context +
+RenderingMode::Accelerated; ~1.5–2.5wk; G1 context spike first).
+**A FULL `-msimd128` REBUILD WAS IN FLIGHT at session end** (~878/2089
+when last checked; every object in the tree recompiles — engine was 100%
+scalar wasm before this).
+
+Validation steps (run in order once the build lands; run
+`bash tools/build-webcore.sh` once more first — incremental — to be sure
+the final main.cpp edits compiled):
+1. Node gate (`tools/run-embedder.cjs` under 8G scope) — pixel-exactness
+   under SIMD blitters; expect exactBlue=20000, redGlyph=1962 unchanged.
+2. `build/dirty-cost.mjs` (anim probe) — 0.35ms scalar baseline.
+3. `build/paint-cost.mjs` (old.reddit) — **32.09ms scalar baseline;
+   expect ~12–20ms with SIMD**.
+4. `build/scroll-cost.mjs` (NEW, on web/probe/tall.html — plain page so
+   canBlitOnScroll holds) — expect thin-strip dirty boxes + few
+   full-viewport frames; also eyeball old.reddit scroll.
+5. 5-site sweep spot check (site-diagnose, BIB_CHANNEL=chromium).
+6. Mark #42 complete; amend/extend cda7af6's message or commit results.
+Codex review of the blit-shift ALREADY DONE (2 mediums fixed in cda7af6:
+g_inPaint guard, canvas-writePixels failure resync). Reality check
+already documented: blit-shift only fires on pages without fixed/sticky
+elements (GitHub takes the slow path — SIMD/GPU are its cure).
+
+Then: **Skia-GPU G1 context spike** (decision-005) or the WebGL spike
+below — note decision-005 OQ5: doing GPU-G1/G2 first likely makes guest
+WebGL (#32) much cheaper (shared context, zero-copy composite), so
+consider folding #32's route decision into G1.
+
+## (now second in line) Previous opener: WebGL spike (#32)
 
 WebGL is the last repeated engine gap on real sites (velzie.rip
 background `gl.viewport null`, happy_wheels PixiJS needs
