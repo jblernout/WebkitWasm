@@ -21,7 +21,33 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~15:30)
+## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~17:15)
+
+**PERSISTENCE + AUDIO SHIPPED (tasks #67/#68, commits dc5cc9e + 07fcbc7,
+both on main, Codex-reviewed, full board green after each):**
+- **dc5cc9e Persistence**: cookies + guest localStorage survive host
+  reloads via an OPFS profile (bib-state-v1.json on the host origin).
+  Engine dumps a JSON blob every ~5s on change (string-compare detector,
+  bib_tick), seeds before first load (cookies → CookieJarDB::setCookie,
+  localStorage → lazy per-origin pending-import in BibStorage.h).
+  ?persist=0 / ?persist=clear. tools/persist-test.mjs (persistent-profile
+  playwright — fresh-profile gates stay isolated). Known gap: IDB still
+  memory-only. **User impact: Discord login survives reload.**
+- **07fcbc7 M-A audio**: BibMediaPlayer host-element mirror, audio-only,
+  behind ?media=1 (default = A2 zero-engine, asserted). ONE WebKit hunk
+  (buildMediaEnginesVector, patch exported). tools/media-test.mjs plays a
+  1s wav end-to-end. **ROOT-CAUSE FIX: pages now get
+  PageIdentifier::generate() — identifier-less pages have NO
+  mediaSessionManager and playInternal() parks EVERY play() forever
+  (pending promise, paused=true, no error). Remember this one.**
+  Flagged wisp exception: host element fetches media directly.
+- **NEXT (user-ordered queue)**: W-B2 GPU (OffscreenCanvas, gate8 green,
+  restore gpu default) — user said STOP before this; get the word first.
+  Then M-B video overlay / W-B3 dividends. Codex follow-ups recorded in
+  07fcbc7: focused media tests (src replacement, destroy-while-loading,
+  failed load, autoplay-default).
+
+(previous update, 2026-06-12 ~15:30, below)
 
 **🏁 MILESTONE (user-confirmed, 2026-06-12 ~16:00): live Discord chat
 with a friend INSIDE the engine — login, auth, gateway socket, messaging
