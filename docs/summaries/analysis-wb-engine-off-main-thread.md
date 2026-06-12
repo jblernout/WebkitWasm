@@ -3,6 +3,65 @@
 Date: 2026-06-12 (task #63). Analysis only — no build flip. Modeled on
 the #40 workers scoping and #53 IPInt scoping passes.
 
+## ⟶ W-B0 SPIKE RESULTS (2026-06-12, task #64): ALL PASS — proceed to W-B1
+
+Spike artifacts: `src/spike/wb-spike.c` + `wb-spike-pre.js`,
+`web/wb-spike.html`, `tools/build-wb-spike.sh`, `tools/wb-spike-test.mjs`.
+Run: `PORT=8090 node tools/dev-server.mjs web --mount /wbspike=build/wb-spike`
+then `BIB_WB_BROWSERS=chromium,firefox node tools/wb-spike-test.mjs`.
+Kill criteria: **NOT MET** (needed wisp-unworkable-from-pthread or
+growth broken in 2/3 browsers; instead 2/2 testable browsers full PASS).
+
+- **Q1 ANSWERED — sockets land in MAIN scope.** Under PROXY_TO_PTHREAD,
+  SOCKFS syscalls from the engine pthread are proxied to the main
+  runtime thread: `ws-construct scope=main`, with the PAGE Module's
+  `websocket.url/subprotocol` config honored. **browser.html's existing
+  page-scope wisp dispatcher keeps working UNCHANGED** (spike dispatcher
+  mirrors production INCLUDING the bib-sockfs subprotocol discriminator;
+  runner exit-gates ws-routed + scope=main + abort-symbolized, so a
+  future emsdk placement change fails loudly on re-run). The pthread
+  worker's own Module does NOT inherit page Module fields
+  (`module-websocket pre-existing=false`) — irrelevant for sockets
+  (read main-side), load-bearing for the other 12 bib* hooks (§2 table
+  stands). Acceptance hit: full HTTP GET over the wisp shim from the
+  pthread (connect→EISCONN 26ms, 293 bytes, 52ms round-trip) using the
+  emscripten_async_call yield chain = the engine pump shape.
+- **Q2 ANSWERED — growth works at the ENGINE's ceiling.** 64MB→574MB
+  via malloc on the pthread, chromium + firefox both PASS, with
+  `-sMAXIMUM_MEMORY=4GB` matching embedder.cmake — i.e. the full-size
+  growable shared-memory RESERVATION instantiates in both browsers
+  (Codex flagged the original 1GB run as under-scoped; re-run at 4GB).
+  TRAP for W-B1: after grow, a
+  scope's HEAPU8 view is STALE until `growMemViews()` — the host blit
+  path must re-acquire views per frame, and emcc warns JS-side heap
+  access pays a refresh tax under growth+threads
+  (`-Wpthreads-mem-growth`) — consider larger INITIAL_MEMORY to make
+  growth rare.
+- **Q3 PARTIALLY ANSWERED (bonus) — browser side yes.** OffscreenCanvas
+  + WebGL2 context creation works in the pthread worker scope on
+  chromium AND firefox (`gpu-probe scope=worker offscreenCanvas=true
+  webgl2=true`). Scope honesty (Codex): this is a raw browser-API
+  probe; Emscripten's `-sOFFSCREENCANVAS_SUPPORT` canvas-TRANSFER path
+  is NOT exercised — W-B2 validates that on the gpu-spike pattern.
+- **Q5 ANSWERED — symbolization survives.** `?abort=1` pageerror stack
+  names `wb_crash_inner`/`wb_crash_middle`/`__original_main` wasm
+  frames across the worker boundary with `--profiling-funcs`; pthread
+  printf arrives on the page console in program order; page
+  `Module.onAbort` fires (stack there shows only the forwarding path —
+  use pageerror for frames).
+- **THE headline:** host main thread ticked 12/12 100ms intervals while
+  the engine pthread blocked in a 1200ms usleep —
+  `block-responsive=PASS` in both browsers. W-B's premise holds.
+- **Q4 (atomics tax)** deferred by design to W-B1 gate measurements
+  (abort if >10% on gate-suite + perf-probe).
+- **Safari/WebKit caveat:** playwright-webkit not runnable on this host
+  (system `libavif` missing; `sudo pacman -S libavif` would unlock).
+  Kill criterion already settled without it; Safari remains a
+  verify-during-W-B1 risk with raster fallback acceptable (§Risks).
+- Three emcc traps recorded in the playbook: pre-js ASI splice (needs
+  leading `;`), LLVM dead-allocation elision of unobserved
+  malloc/memset, stale HEAP views after shared-memory growth.
+
 ## Problem
 
 The engine (WebCore + JSC CLoop + W-A main-thread workers + synchronous

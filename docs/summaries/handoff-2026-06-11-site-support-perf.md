@@ -21,7 +21,36 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~00:40)
+## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~13:10)
+
+**W-B0 spike DONE (task #64) — ALL PASS, kill criteria NOT met, W-B is
+GO for W-B1.** Full results at the top of
+`analysis-wb-engine-off-main-thread.md`. Headlines: SOCKFS sockets are
+PROXIED TO MAIN scope under PROXY_TO_PTHREAD (browser.html's wisp
+dispatcher works unchanged — the load-bearing unknown is dead); memory
+growth works 64→574MB chromium+firefox; OffscreenCanvas+WebGL2 works in
+worker scope (GPU survives W-B2); abort stacks stay symbolized; host
+main thread ticked 12/12 during a 1200ms engine-thread block. Spike:
+src/spike/wb-spike.c, runner tools/wb-spike-test.mjs (serve:
+`PORT=8090 node tools/dev-server.mjs web --mount /wbspike=build/wb-spike`).
+Worker Modules do NOT inherit page Module fields → the 12 bib* hooks
+table in the analysis doc is the W-B1 work list. playwright-webkit needs
+`sudo pacman -S libavif` if Safari-class data is ever wanted locally.
+
+**NEXT: W-B1 — the full -pthread rebuild** (1-2 sessions, plan in
+analysis doc §Recommendation): branch + audit the 71 patch guards,
+browser.html split (bib* hooks into worker scope / MAIN_THREAD_EM_ASM),
+input proxy, SAB blit (re-acquire HEAPU8 after growth!), measure Q4
+atomics tax on gates (abort >10%). Acceptance: gates 2/3/9 green AND
+discord.com/login boots with the host tab responsive.
+
+**Also queued: media playback scoping (#65)** — go/no-go doc for a
+host-bridge MediaPlayerPrivate (real <video>/<audio> playback; A2 gave
+spec-correct but inert elements). Same pattern as #40/#53/#63.
+
+---
+
+## (superseded 2026-06-12 ~13:10) Previous opener: post-blocklist/WS-1/A2 queue
 
 **Shipped this session (commits 0caafd9 → ede840e):**
 

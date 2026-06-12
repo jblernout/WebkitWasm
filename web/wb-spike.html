@@ -1,0 +1,47 @@
+<!doctype html>
+<!-- W-B0 pthread spike host page (analysis-wb-engine-off-main-thread.md).
+     Serve with: PORT=8090 node tools/dev-server.mjs web --mount /wbspike=build/wb-spike
+     Verdict arrives as "WBSPIKE: ..." console lines; the 100ms main-tick
+     line is the responsiveness witness while the engine pthread blocks. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>BiB W-B0 pthread spike</title>
+<style>body { background: #202028; color: #ccc; font: 13px monospace; }</style>
+</head>
+<body>
+<p>W-B0 pthread spike — watch the console. <span id="tick">0</span></p>
+<!-- wisp-js client for the MAIN scope (workers importScripts it themselves) -->
+<script src="vendor/wisp-client.js"></script>
+<script>
+  var params = new URLSearchParams(location.search);
+  var Module = {
+    wbAbort: params.get("abort") === "1",
+    wbTargetPort: location.port || "80",
+    // Q1 datapoint: set on the PAGE Module; the spike logs whether this
+    // ever reaches the pthread worker's Module (expectation: it does not).
+    websocket: { url: "ws://", subprotocol: "bib-sockfs" },
+    print: (s) => console.log(s),
+    printErr: (s) => console.error(s),
+    onAbort: (what) => {
+      console.log("WBSPIKE: onAbort what=" + what
+        + " stack=" + String(new Error().stack || "").split("\n").slice(0, 6).join(" | "));
+    },
+  };
+  // Main-thread responsiveness witness. The pthread's emscripten_get_now()
+  // is timeOrigin-normalized (epoch-scale), so log Date.now() — same scale,
+  // close enough (<1ms drift) for a 1200ms block window.
+  var tickEl = document.getElementById("tick"), n = 0;
+  setInterval(() => {
+    n++;
+    tickEl.textContent = n;
+    console.log("WBSPIKE: main-tick t=" + Date.now());
+  }, 100);
+  addEventListener("error", (e) => {
+    console.log("WBSPIKE: window-error msg=" + (e.message || "")
+      + " stack=" + String((e.error && e.error.stack) || "").split("\n").slice(0, 8).join(" | "));
+  });
+</script>
+<script src="wbspike/wb-spike.js"></script>
+</body>
+</html>
