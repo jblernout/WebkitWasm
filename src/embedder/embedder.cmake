@@ -54,6 +54,15 @@ if (BIB_PTHREAD)
         "SHELL:-pthread"
         "SHELL:-sPROXY_TO_PTHREAD"
         "SHELL:-sPTHREAD_POOL_SIZE=4"
+        # W-B2: the engine pthread drives the page canvas through an
+        # OffscreenCanvas transferred at proxied-main spawn. The transfer
+        # list is RUNTIME-decided (GPU mode only) via __wrap_pthread_create
+        # in main.cpp — deliberately NOT -sOFFSCREENCANVASES_TO_PTHREAD:
+        # that list is compile-time-fixed and a missing canvas fails
+        # pthread_create outright (node gates have no DOM; raster mode
+        # must keep the page's 2d context on the canvas).
+        "SHELL:-sOFFSCREENCANVAS_SUPPORT=1"
+        "SHELL:-Wl,--wrap=pthread_create"
     )
 endif ()
 target_link_options(BibEmbedder PRIVATE

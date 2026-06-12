@@ -1784,10 +1784,10 @@ index 0000000000..539cdf6a24
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.cpp b/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.cpp
 new file mode 100644
-index 0000000000..2d8401a262
+index 0000000000..8ec75af118
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.cpp
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,307 @@
 +/*
 + * PORT=Emscripten PlatformDisplay + GLContext (Skia GPU phase, G2).
 + *
@@ -2000,6 +2000,21 @@ index 0000000000..2d8401a262
 +    bibQueryInternalformat(internalformat, pname, bufSize, reinterpret_cast<uintptr_t>(params));
 +}
 +
++// enableExtensionsByDefault only enables the extensions Emscripten's GL
++// library KNOWS; glGetStringi still advertises everything the browser
++// returned from getSupportedExtensions (GL.stringiCache). Skia trusts the
++// advertised list and emits #extension directives that ANGLE rejects
++// unless getExtension() actually enabled them — first seen as
++// GL_NV_shader_noperspective_interpolation shader-compile failures on
++// worker OffscreenCanvas contexts (W-B2; main-thread contexts never
++// exposed that extension). Enable everything so advertised == enabled.
++EM_JS(void, bibEnableAllWebGLExtensions, (), {
++    var ctx = GL.currentContext && GL.currentContext.GLctx;
++    if (!ctx || !ctx.getSupportedExtensions)
++        return;
++    ctx.getSupportedExtensions().forEach(function(name) { ctx.getExtension(name); });
++});
++
 +static GrGLFuncPtr bibGetProc(void*, const char name[])
 +{
 +    if (!strcmp(name, "glGetString"))
@@ -2062,6 +2077,8 @@ index 0000000000..2d8401a262
 +        return false;
 +    }
 +
++    bibEnableAllWebGLExtensions();
++
 +    auto display = PlatformDisplayEmscripten::create();
 +    if (!display) {
 +        WTFLogAlways("PlatformDisplayEmscripten: GLDisplay::create failed");
@@ -2080,10 +2097,10 @@ index 0000000000..2d8401a262
 +#endif // USE(SKIA)
 diff --git a/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.h b/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.h
 new file mode 100644
-index 0000000000..ccf7be7d06
+index 0000000000..654dad6569
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,52 @@
 +/*
 + * PORT=Emscripten PlatformDisplay: the Skia-GPU (Ganesh over WebGL2)
 + * provider. One WebGL2 context is created on the engine canvas at boot;
@@ -2121,7 +2138,11 @@ index 0000000000..ccf7be7d06
 +bool initializePlatformDisplayEmscripten(const char* canvasSelector);
 +
 +// The boot context handle (0 until initialize succeeds). The embedder uses
-+// it to wrap framebuffer 0 for the present pass.
++// it to wrap framebuffer 0 for the present pass. NOTE: an EM_JS helper,
++// bibEnableAllWebGLExtensions() (C linkage, defined in the .cpp), enables
++// every browser-offered extension on the current context — the embedder
++// re-declares and re-calls it after a G4 context restore, because
++// restoration invalidates every previously enabled extension (WebGL spec).
 +EMSCRIPTEN_WEBGL_CONTEXT_HANDLE emscriptenSkiaWebGLContext();
 +
 +#if USE(SKIA)

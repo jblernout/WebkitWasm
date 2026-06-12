@@ -112,6 +112,40 @@ HashMap<String, HashMap<String, String>>& bibPendingStorageImport()
 }
 }
 
+#ifdef __EMSCRIPTEN_PTHREADS__
+// W-B2: runtime-decided OffscreenCanvas transfer for the proxied-main
+// (engine) thread. crt1_proxy_main marks its pthread_create with a
+// (char*)-1 sentinel meaning "use the -sOFFSCREENCANVASES_TO_PTHREAD link
+// list". We deliberately don't link that list: it is compile-time-fixed
+// and a canvas missing at spawn fails pthread_create outright — node gates
+// have no DOM at all, and raster mode must keep #screen page-owned for its
+// 2d context. Intercept the sentinel (-Wl,--wrap=pthread_create,
+// embedder.cmake) and substitute the real decision: transfer #screen only
+// when the page committed to GPU mode. This also keeps the sentinel away
+// from UTF8ToString((char*)-1), which the stock JS would otherwise hit
+// with no link list configured.
+//
+// Runs on the SPAWNING thread — the page main thread for proxied main, so
+// EM_ASM reads the page Module directly (node: bibGPU undefined → no
+// transfer). All other pthread_creates (thread pool, WTF threads) carry a
+// null/zero canvas list and pass through untouched.
+extern "C" int __real_pthread_create(pthread_t*, const pthread_attr_t*, void* (*)(void*), void*);
+extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*startRoutine)(void*), void* arg)
+{
+    if (attr) {
+        const char* canvases = nullptr;
+        emscripten_pthread_attr_gettransferredcanvases(attr, &canvases);
+        if (canvases == reinterpret_cast<const char*>(-1)) {
+            pthread_attr_t patched = *attr;
+            bool gpu = EM_ASM_INT({ return typeof Module !== "undefined" && Module && Module.bibGPU ? 1 : 0; });
+            emscripten_pthread_attr_settransferredcanvases(&patched, gpu ? "#screen" : "");
+            return __real_pthread_create(thread, &patched, startRoutine, arg);
+        }
+    }
+    return __real_pthread_create(thread, attr, startRoutine, arg);
+}
+#endif
+
 static constexpr int kWidth = 800;
 static constexpr int kHeight = 600;
 
@@ -154,6 +188,12 @@ static uint8_t g_blitPixels[kWidth * kHeight * 4];
 // live. When the flag is unset every byte of the CPU path is unchanged.
 static bool g_gpu = false;
 static sk_sp<SkSurface> g_fbo0Surface; // present target, GPU mode only
+// G4 (W-B2): set by the webglcontextlost handler, cleared after the Ganesh
+// world is rebuilt on restore. Atomic: read by bib_render on the engine
+// thread, written by canvas event handlers (same thread under pthreads —
+// the OffscreenCanvas lives with the engine — but atomic keeps the
+// single-threaded build's main-thread handlers honest too).
+static std::atomic<bool> g_gpuLost { false };
 
 static void presentGPU()
 {
@@ -685,6 +725,11 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
         return nullptr;
     if (!g_engine)
         return nullptr;
+    // G4: while the WebGL context is lost the surfaces are dead/dropped —
+    // skip BEFORE the damage snapshot below so nothing is wiped; damage
+    // keeps accumulating and the restore path queues a full-frame repaint.
+    if (g_gpu && g_gpuLost.load(std::memory_order_acquire))
+        return nullptr;
     if (!force && !BIB::g_frameDirty && BIB::g_uploadRect.isEmpty())
         return nullptr;
     RefPtr view = mainFrameView();
@@ -867,6 +912,177 @@ EMSCRIPTEN_KEEPALIVE void bib_request_readback()
         return;
     }
     bibRunReadback(nullptr);
+}
+
+// --- G4: in-place GPU context-loss recovery (W-B2) ----------------------
+// The browser can revoke a WebGL context at any time (GPU reset, driver
+// restart, resource pressure). G3 recovered by reloading the page; G4
+// recovers IN PLACE: the lost handler preventDefault()s (required, or the
+// browser never restores) and parks rendering (bib_render's g_gpuLost
+// guard); the restored handler rebuilds the Ganesh world over the SAME
+// context handle (WebGL restores the same context object, so the GLContext
+// facades and the assembled proc table stay valid) and queues a full
+// repaint. If restored never fires (some drivers won't), a deadline falls
+// back to the G3 protocol: the page reloads (?gpulost=1, second loss
+// ?gpu=0). Guest ImageBuffers from accelerated 2D canvases (?canvasgpu)
+// are NOT rebuilt — accepted v1 gap, they re-create on guest redraw paths.
+
+extern "C" void bibEnableAllWebGLExtensions(); // EM_JS, PlatformDisplayEmscripten.cpp
+
+static void bibGpuRebuildAfterRestore()
+{
+    auto& display = WebCore::PlatformDisplay::sharedDisplay();
+    // Restoration invalidated every previously enabled extension (WebGL
+    // spec) — re-enable BEFORE Skia re-reads caps below, or shaders using
+    // advertised extensions fail to compile again. Make the (restored)
+    // context current first: the EM_JS helper reads GL.currentContext.
+    emscripten_webgl_make_context_current(WebCore::emscriptenSkiaWebGLContext());
+    bibEnableAllWebGLExtensions();
+    // Documented teardown order for a lost context: abandon the GrContext
+    // FIRST (destruction would otherwise drive dead GL), then drop the
+    // surfaces that reference it.
+    if (auto* grContext = display.skiaGrContext())
+        grContext->abandonContext();
+    g_fbo0Surface = nullptr;
+    if (g_engine)
+        g_engine->surface = nullptr;
+    // Upstream hook (public wrapper over the private clearSkiaGLContext):
+    // clears the thread-local SkiaGLContext; the next skiaGLContext() call
+    // builds a fresh GrDirectContext over the restored WebGL handle via
+    // GLContext::createOffscreen + the same proc table. Also nulls
+    // m_sharingGLContext, which this port never creates — harmless.
+    display.clearGLContexts();
+    bool ok = display.skiaGLContext() && display.skiaGrContext();
+    if (ok && g_engine) {
+        // Same surface pair as the boot path in main(): texture-backed
+        // store + FBO 0 present wrap (samples=1/stencil=8 match the
+        // context attributes).
+        auto info = SkImageInfo::Make(kWidth, kHeight, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
+        auto* grContext = display.skiaGrContext();
+        g_engine->surface = SkSurfaces::RenderTarget(grContext, skgpu::Budgeted::kNo, info, 0, kTopLeft_GrSurfaceOrigin, nullptr);
+        if (g_engine->surface) {
+            GrGLFramebufferInfo fbInfo;
+            fbInfo.fFBOID = 0;
+            fbInfo.fFormat = 0x8058; // GL_RGBA8
+            auto target = GrBackendRenderTargets::MakeGL(kWidth, kHeight, 1, 8, fbInfo);
+            g_fbo0Surface = SkSurfaces::WrapBackendRenderTarget(grContext, target,
+                kBottomLeft_GrSurfaceOrigin, kRGBA_8888_SkColorType, nullptr, nullptr);
+        }
+        ok = g_engine->surface && g_fbo0Surface;
+    }
+    if (!ok) {
+        // Same split-brain hazard as a failed GPU boot: the host has no
+        // blit path, so CPU raster would never reach the screen. Reload.
+        printf("EMBEDDER: gpu restore REBUILD FAILED — host reload\n");
+        MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuLostReload) Module.bibGpuLostReload(); });
+        return;
+    }
+    g_gpuLost.store(false, std::memory_order_release);
+    printf("EMBEDDER: gpu context restored\n");
+    // Everything on the old context is gone — full-frame repaint. The next
+    // bib_tick's push renders it.
+    BIB::addDamage(WebCore::IntRect(0, 0, kWidth, kHeight));
+}
+
+extern "C" {
+// Called directly from the canvas event handlers below — they run on the
+// thread that owns the canvas, which is the engine thread (pthread build:
+// the OffscreenCanvas lives here; single-thread build: main IS the engine).
+EMSCRIPTEN_KEEPALIVE void bib_gpu_context_lost()
+{
+    // No g_gpu guard: the handlers are installed right after context
+    // creation, BEFORE the caps stage sets g_gpu (Codex MEDIUM) — a
+    // mid-boot loss must still be flagged.
+    g_gpuLost.store(true, std::memory_order_release);
+    printf("EMBEDDER: gpu context LOST — awaiting restore\n");
+}
+
+EMSCRIPTEN_KEEPALIVE void bib_gpu_context_restored()
+{
+    if (!g_gpuLost.load(std::memory_order_acquire))
+        return;
+    if (!g_gpu) {
+        // Lost+restored entirely within the boot window: nothing to
+        // rebuild yet — boot either succeeded on the restored context or
+        // failed into the host raster-reload fallback.
+        g_gpuLost.store(false, std::memory_order_release);
+        return;
+    }
+    bibGpuRebuildAfterRestore();
+}
+
+EMSCRIPTEN_KEEPALIVE void bib_gpu_restore_timed_out()
+{
+    if (!g_gpuLost.load(std::memory_order_acquire))
+        return;
+    printf("EMBEDDER: gpu restore TIMED OUT — host reload\n");
+    MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuLostReload) Module.bibGpuLostReload(); });
+}
+}
+
+// Registered from main() after a successful GPU boot. Worker scope
+// (pthread build) sees the transferred OffscreenCanvas in
+// GL.offscreenCanvases; the single-threaded build falls back to the DOM
+// canvas. Both are EventTargets firing webglcontextlost/restored. The
+// handlers run between engine tasks (worker/main event loop), never
+// mid-paint, so calling the exports directly is safe.
+static void installGpuContextLossHandlers()
+{
+    EM_ASM({
+        var entry = typeof GL !== "undefined" && GL.offscreenCanvases && GL.offscreenCanvases["screen"];
+        var canvas = entry ? entry.offscreenCanvas
+            : (typeof document !== "undefined" ? document.querySelector("#screen") : null);
+        if (!canvas) {
+            out("EMBEDDER: gpu loss handlers NOT installed (no canvas handle)");
+            return;
+        }
+        var deadline = null;
+        canvas.addEventListener("webglcontextlost", function(e) {
+            e.preventDefault(); // REQUIRED or the browser never restores
+            _bib_gpu_context_lost();
+            deadline = setTimeout(function() {
+                deadline = null;
+                _bib_gpu_restore_timed_out();
+            }, 8000);
+        });
+        canvas.addEventListener("webglcontextrestored", function() {
+            if (deadline) {
+                clearTimeout(deadline);
+                deadline = null;
+            }
+            _bib_gpu_context_restored();
+        });
+    });
+}
+
+// Test hook (gate8): lose the live context via WEBGL_lose_context, restore
+// it 500ms later — exercises the full G4 path. Self-proxies like every
+// page-callable export.
+static void bibRunGpuTestLose(void*)
+{
+    if (!g_gpu || g_gpuLost.load(std::memory_order_acquire))
+        return;
+    auto* glContext = WebCore::PlatformDisplay::sharedDisplay().skiaGLContext();
+    if (!glContext || !glContext->makeContextCurrent())
+        return;
+    EM_ASM({
+        var ext = GL.currentContext && GL.currentContext.GLctx.getExtension("WEBGL_lose_context");
+        if (!ext) {
+            out("EMBEDDER: WEBGL_lose_context unavailable");
+            return;
+        }
+        ext.loseContext();
+        setTimeout(function() { ext.restoreContext(); }, 500);
+    });
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void bib_gpu_test_lose_restore()
+{
+    if (!bibOnEngineThread()) {
+        bibProxyToEngine(bibRunGpuTestLose, nullptr);
+        return;
+    }
+    bibRunGpuTestLose(nullptr);
 }
 
 // --- Input forwarding (canvas events -> WebCore EventHandler) ---
@@ -1313,15 +1529,35 @@ int main()
         printf("EMBEDDER: media bridge ENABLED (audio-only, wisp-routed fetch)\n");
 
     // Skia GPU boot (decision-005 G2, opt-in via Module.bibGPU / ?gpu=1).
-    // W-B1: DISABLED pending W-B2 — the WebGL2 context this path creates
-    // lives on the browser main thread's canvas, which the engine pthread
-    // can no longer drive directly (OffscreenCanvas transfer is the W-B2
-    // work). The host is told to reload in raster mode, same split-brain
-    // protocol as a failed GPU boot (Codex HIGH, G3). G2/G3 engine code is
-    // untouched behind this gate.
+    // Must run before ANY paint: GraphicsContextSkia consults the shared
+    // PlatformDisplay. W-B2: under PROXY_TO_PTHREAD the page's #screen
+    // arrives on THIS thread as an OffscreenCanvas (transferred at spawn by
+    // __wrap_pthread_create) and emscripten_webgl_create_context("#screen")
+    // resolves it through GL.offscreenCanvases; the single-threaded build
+    // creates the context on the page canvas directly (pre-W-B1 path).
+    // With the flag unset nothing here runs — the CPU path is unchanged.
     if (interactive && MAIN_THREAD_EM_ASM_INT({ return Module.bibGPU ? 1 : 0; })) {
-        printf("EMBEDDER: gpu=DISABLED-UNDER-PTHREAD (W-B2 re-enables; cpu fallback)\n");
-        MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
+        if (WebCore::initializePlatformDisplayEmscripten("#screen")) {
+            // G4 handlers go on FIRST (Codex MEDIUM): a loss between
+            // context creation and handler install would miss
+            // preventDefault and be unrestorable. A loss DURING the caps
+            // setup below now flags g_gpuLost; the boot then either fails
+            // here (GrContext caps against a lost context) → host raster
+            // reload, or the restored handler rebuilds post-boot.
+            installGpuContextLossHandlers();
+            // Force SkiaGLContext creation now; a null GrContext means the
+            // interface/caps stage failed — fall back to CPU raster.
+            auto& display = WebCore::PlatformDisplay::sharedDisplay();
+            g_gpu = display.skiaGLContext() && display.skiaGrContext();
+        }
+        printf("EMBEDDER: gpu=%s\n", g_gpu ? "on" : "REQUESTED-BUT-UNAVAILABLE (cpu fallback)");
+        if (!g_gpu) {
+            // The host committed to GPU mode (no 2d context, ignores frame
+            // pushes) before the engine could fail — an engine-only
+            // fallback would leave the canvas permanently blank (Codex
+            // HIGH, G3). Tell the host so it can reload with ?gpu=0.
+            MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
+        }
     }
 
     printf("EMBEDDER: init OK\n");
@@ -1505,8 +1741,7 @@ int main()
             g_gpu = false;
             // Same split-brain hazard as the boot-init fallback above: the
             // host is in GPU mode with no blit path — engine CPU raster
-            // would never reach the screen (Codex HIGH, G3). (Dead under
-            // W-B1 — g_gpu never sets — kept correct for W-B2.)
+            // would never reach the screen (Codex HIGH, G3).
             MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
         }
     }

@@ -54,16 +54,18 @@
 
     const canvas = document.getElementById("screen");
     // GPU mode: the ENGINE owns the canvas through its own WebGL2 context
-    // (Ganesh renders straight into it). Touching getContext("2d") here
-    // would lock the canvas to 2d and the engine's context creation would
-    // fail — so in GPU mode there is no 2d context and no blit at all.
-    // W-B1: GPU mode DISABLED BY DEFAULT — the engine runs on a pthread and
-    // cannot drive the page-side WebGL2 context until the OffscreenCanvas
-    // transfer lands (W-B2). ?gpu=1 still opts in; the engine refuses and
-    // bibGpuFallback reloads to ?gpu=0. (Pre-W-B1 default was !webdriver —
-    // G3/M2 measured 2.6-3.4×; restore when W-B2 ships.)
+    // (Ganesh renders straight into it). W-B2: under the pthread build the
+    // canvas is transferred to the engine thread as an OffscreenCanvas at
+    // proxied-main spawn (the engine's __wrap_pthread_create reads
+    // Module.bibGPU below — it must be final before the engine script
+    // runs). Touching getContext("2d") here would lock the canvas to 2d
+    // and make the transfer/context creation fail — so in GPU mode there
+    // is no 2d context and no blit at all.
+    // Default GPU for humans (G3/M2: 2.6-3.4× paint), raster for
+    // automation so the pixel-exact gates keep their semantics; ?gpu=0/1
+    // overrides either way.
     const gpuParam = new URLSearchParams(location.search).get("gpu");
-    const gpuMode = gpuParam !== null ? gpuParam !== "0" : false; // W-B2: restore !webdriver default
+    const gpuMode = gpuParam !== null ? gpuParam !== "0" : !navigator.webdriver;
     const ctx = gpuMode ? null : canvas.getContext("2d");
 
     // --- Event-driven engine pump (perf) --------------------------------
@@ -522,23 +524,30 @@
       pendingMove = null;
     }
 
-    // GPU context loss (G3 minimal recovery): the engine cannot recreate its
-    // Ganesh world in place yet (G4) — recover by reloading. Loss state
-    // rides the URL (?gpulost=1), NOT sessionStorage: opaque-origin /
-    // privacy-hardened contexts throw on storage access, which would kill
-    // the handler after preventDefault and leave the page dead (Codex, G3).
-    // A second loss means this GPU/driver can't hold a context → ?gpu=0.
-    if (gpuMode) {
-      canvas.addEventListener("webglcontextlost", (e) => {
-        e.preventDefault();
-        const u = new URL(location.href);
-        const second = u.searchParams.get("gpulost") === "1";
-        if (second) u.searchParams.set("gpu", "0");
-        else u.searchParams.set("gpulost", "1");
-        log(`WebGL context lost — reloading${second ? " in raster mode" : ""}`);
-        statusEl.textContent = "GPU context lost — reloading";
-        location.replace(u.href);
-      });
+    // GPU context loss: G4 (W-B2) recovers IN PLACE engine-side — the
+    // canvas (OffscreenCanvas under pthreads, the DOM canvas otherwise)
+    // fires lost/restored on the engine's side and it rebuilds its Ganesh
+    // world there. This reload protocol is only the FALLBACK, invoked by
+    // the engine (Module.bibGpuLostReload) when restore never arrives or
+    // the rebuild fails. No page-side webglcontextlost listener anymore:
+    // under pthreads the page canvas is a placeholder that gets no events,
+    // and in single-threaded builds a page listener would race the
+    // engine's in-place recovery. Loss state rides the URL (?gpulost=1),
+    // NOT sessionStorage: opaque-origin / privacy-hardened contexts throw
+    // on storage access, which would kill the handler and leave the page
+    // dead (Codex, G3). A second loss means this GPU/driver can't hold a
+    // context → ?gpu=0.
+    function gpuLostReload() {
+      // gpuMode guard mirrors bibGpuFallback: a stray engine call on a
+      // raster page must not bolt ?gpulost=1 onto a working session.
+      if (!gpuMode || bib.dead) return;
+      const u = new URL(location.href);
+      const second = u.searchParams.get("gpulost") === "1";
+      if (second) u.searchParams.set("gpu", "0");
+      else u.searchParams.set("gpulost", "1");
+      log(`WebGL context lost — reloading${second ? " in raster mode" : ""}`);
+      statusEl.textContent = "GPU context lost — reloading";
+      location.replace(u.href);
     }
 
     // W-B1: the rAF loop only provides CADENCE — _bib_tick self-proxies to
@@ -774,6 +783,9 @@
         u.searchParams.set("gpu", "0");
         location.replace(u.href);
       },
+      // G4 fallback: engine-side context restore never arrived or the
+      // Ganesh rebuild failed — reload (?gpulost=1, second loss ?gpu=0).
+      bibGpuLostReload: gpuLostReload,
       bibHTML: demo === "hello" ? helloHTML : demo === "scripttest" ? scriptTestHTML : interactiveHTML,
       // Guest wasm shim: the engine reads the polyfill source once at first
       // window-object setup and calls bibWasm2js per module (see shim block
@@ -825,6 +837,11 @@
         wireInput();
         canvas.focus();
         requestAnimationFrame(blitLoop);
+        // GPU mode never pushes CPU pixels through bibBlit, so the hello
+        // gate judges through the async readback instead (G3's one-time
+        // GPU sync, W-B1's push path). tol=2: driver-level rounding.
+        if (gpuMode && demo === "hello")
+          bib.readback().then((f) => { if (f) judgeHelloFrame(f.data, f.w, f.h, 2); });
         urlbarEl.disabled = false;
         gobtnEl.disabled = false;
         // Same allowlist as the URL bar — ?url= arrives from arbitrary
