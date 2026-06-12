@@ -205,6 +205,20 @@ static void presentGPU()
     // must cover the whole frame (G1-measured at 0.9-1.3ms).
     g_engine->surface->draw(g_fbo0Surface->getCanvas(), 0, 0);
     skgpu::ganesh::FlushAndSubmit(g_fbo0Surface.get());
+    // Nudge the rendering update: the HTML spec ties OffscreenCanvas
+    // placeholder commits to rAF processing in the OWNING scope. Stock
+    // Chromium also commits implicitly at task end, but forks/older builds
+    // may only present on worker rAF — without this the engine paints at
+    // full speed while the SCREEN updates seconds apart (live-fork report,
+    // 2026-06-12: bench 2.67ms, guest 94 rAF/s, visible ~1 frame/min).
+    // No-op callback (cadence is bib_tick's job); guard collapses presents
+    // that outpace the display into one pending rAF.
+    EM_ASM({
+        if (typeof requestAnimationFrame === "function" && !Module.bibRafNudge) {
+            Module.bibRafNudge = true;
+            requestAnimationFrame(function() { Module.bibRafNudge = false; });
+        }
+    });
 }
 
 // Dump RGBA pixels as a binary PPM (P6, alpha dropped) into the wasm FS.
