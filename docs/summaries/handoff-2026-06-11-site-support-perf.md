@@ -69,19 +69,27 @@ their useAuthWebsocket handles the failure gracefully.
 
 **Discord login state now:** paints the dark shell + loading bar,
 runs deep (ResizeObserver, PostMessageTransport iframe chatter), no
-crash — but the login FORM doesn't render within the diagnose window.
-Open leads, in order: (1) `NetworkError: Load failed` at :1 still
-appears (non-fatal now) — name the failing fetch via DEBUG_CURL
-tracing (ff6ff82) and see if the form waits on it; (2) the ×10
-`[PostMessageTransport] Protocol error: event data should be an
-Array!` — their iframe messaging may be stuck in a retry loop (check
-what we deliver in MessageEvent.data across frames); (3) maybe just
-CLoop-slow boot — try a longer diagnose window first (cheapest);
-(4) #57: one earlier run aborted in JSC::JSCell::toObjectSlow via
-slow_path_get_property_enumerator (for...in base = non-object/string/
-bigint/symbol cell — internal cell leak or corruption). NOT
-reproduced since (2 clean runs after); if it recurs, patch
-toObjectSlow to dataLog the JSType before the secure cast and rebuild.
+crash — but the login FORM doesn't render, and in a LIVE tab the
+single-threaded boot pegs the host main thread long enough that Chrome
+offers to kill the page (user report: pure white + "wait or close").
+Leads, re-ranked after the postMessage probe: (1) **boot cost /
+responsiveness** — CLoop executes Discord's full app bundle + W-A
+main-thread workers + synchronous binaryen wasm2js translations ALL on
+the host main thread; the request blocklist (backlog: best real-site
+JS lever — kill analytics/GTM/sentry bundles before parse) is the
+cheapest big win; engine-off-main-thread (W-B pthreads HOLD) is the
+structural fix. (2) `NetworkError: Load failed` at :1 (non-fatal) —
+name the fetch via ?curldebug=1 and check if the form awaits it.
+(3) ~~PostMessageTransport mangling~~ REFUTED 2026-06-11: in-guest
+web/probe/pmprobe.html 5/5 PASS — window↔iframe arrays/objects,
+source+origin, self-postMessage, MessageChannel ports all deliver
+intact. Their ×10 "event data should be an Array!" warnings are their
+listener warning on OTHER senders' messages (cross-talk noise), not a
+stuck handshake. (4) #57: one run aborted in JSC::JSCell::toObjectSlow
+via slow_path_get_property_enumerator (for...in base = non-object/
+string/bigint/symbol cell). NOT reproduced since (4+ clean runs); if
+it recurs, patch toObjectSlow to dataLog the JSType before the secure
+cast and rebuild.
 
 **Abort kill switch + GPU harness parity (~23:15, task #59).** A live
 Brave tab spammed RuntimeError:Aborted() + lag on discord.com while

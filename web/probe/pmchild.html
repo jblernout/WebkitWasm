@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<!-- Child frame for pmprobe.html (postMessage data-shape probe). -->
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<script>
+  // Child → parent: the Discord PostMessageTransport shape.
+  parent.postMessage(["HANDSHAKE", { nonce: 42 }], "*");
+  // Parent → child echo check.
+  window.addEventListener("message", function (e) {
+    parent.postMessage(["ECHO", {
+      isArray: Array.isArray(e.data),
+      type: typeof e.data,
+      opcode: Array.isArray(e.data) ? e.data[0] : null,
+      hasSource: e.source != null,
+      origin: String(e.origin),
+    }], "*");
+  });
+</script>
+</body>
+</html>
