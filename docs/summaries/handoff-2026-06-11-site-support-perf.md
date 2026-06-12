@@ -80,6 +80,10 @@ JS lever — kill analytics/GTM/sentry bundles before parse) is the
 cheapest big win; engine-off-main-thread (W-B pthreads HOLD) is the
 structural fix. (2) `NetworkError: Load failed` at :1 (non-fatal) —
 name the fetch via ?curldebug=1 and check if the form awaits it.
+Cross-site datapoint (tekeye video test page, 2026-06-11): the same
+generic `NetworkError: Load failed (:1)` appears there right next to a
+failed adsbygoogle.js (curl=35) — likely the unhandled rejection of a
+failed analytics fetch, same class as Discord's. Supports blocklist.
 (3) ~~PostMessageTransport mangling~~ REFUTED 2026-06-11: in-guest
 web/probe/pmprobe.html 5/5 PASS — window↔iframe arrays/objects,
 source+origin, self-postMessage, MessageChannel ports all deliver
@@ -184,7 +188,13 @@ Next, in order (A1 ✅ 7c8f153, WS-0 ✅ — see NEXT SESSION block):
 2. **WS-1 real WebSocket over curl-ws** (task #58 phase 2) — Discord
    gateway needs it post-login regardless.
 3. **Tier A2 ENABLE_VIDEO=ON zero-engine build** (real media elements;
-   stub self-disables) — batch with other build-flag work.
+   stub self-disables) — batch with other build-flag work. Acceptance
+   probe: https://www.tekeye.uk/html/html5-video-test-page — today
+   (VIDEO=OFF) every <video> tag is an unknown element rendering its
+   "video not supported" fallback text (verified 2026-06-11, page
+   otherwise renders fine); A2 makes the elements real (fallback text
+   disappears, honest error events, still no playback — that's the
+   future host-bridge media engine epic).
 4. **G4 — in-place context-loss recreate** (no reload: recreate WebGL2
    context + GrDirectContext + surfaces, re-point the GLContext facades —
    they hold the boot handle by value) + full validation sweep (5-site,
