@@ -166,6 +166,12 @@
       if (m && isEngineSocket(protocols)) {
         log(`wisp: stream -> ${m[1]}:${m[2]}`);
         const ws = new wisp_client.client.WispWebSocket(`${wispServer}${m[1]}:${m[2]}`);
+        // W-B1 wedge diagnostics: count payload bytes that REACHED the page
+        // so a stalled load splits into "bytes never arrived" (wisp/server)
+        // vs "engine never consumed" (pump/proxy). Cheap; kept.
+        ws.addEventListener("message", (e) => {
+          window.__bibWispBytes = (window.__bibWispBytes || 0) + (e.data?.byteLength || e.data?.length || 0);
+        });
         // Surface non-voluntary stream closes with the wisp reason name.
         // A failed dial otherwise dies inside TLS as a phantom curl=35
         // "SSL connect error" — e.g. hosts an ad-blocking DNS resolves to
@@ -259,11 +265,34 @@
           return [frame.data[i], frame.data[i + 1], frame.data[i + 2]];
         });
       },
+      // SYNC probe against the LAST pushed readback frame, kicking a fresh
+      // (collapsed) request for the next caller. For waitForFunction
+      // predicates, which CANNOT be async: playwright treats an async
+      // predicate's returned Promise as truthy under interval polling, so
+      // the wait passes vacuously (cost us a day's worth of phantom W-B1
+      // "wedges"). Polling predicates converge one poll late; one-shot
+      // reads should use the async probe() via an awaited evaluate.
+      lastFrame: null,
+      probeSync(x, y) {
+        if (!this.ready || this.dead) return null;
+        Module._bib_request_readback();
+        const frame = this.lastFrame;
+        if (!frame) return null;
+        x |= 0; y |= 0;
+        if (x < 0 || y < 0 || x >= frame.w || y >= frame.h) return null;
+        const i = (y * frame.w + x) * 4;
+        return [frame.data[i], frame.data[i + 1], frame.data[i + 2]];
+      },
       // Full-frame async readback: {data (tightly packed RGBA copy), w, h}
       // or null. Harnesses that sample many pixels use ONE of these instead
       // of per-pixel probes (each probe forces a full engine repaint).
       readback() {
-        if (this.dead) return Promise.resolve(null);
+        // Pre-ready: the engine thread doesn't exist yet and the C side
+        // DROPS proxied requests — a waiter pushed now never resolves, and
+        // a never-settling promise stalls waitForFunction polling forever
+        // (gate6/7 regression). Resolve null, like the old sync probe did
+        // before main() set g_engine.
+        if (!this.ready || this.dead) return Promise.resolve(null);
         return new Promise((resolve) => {
           readbackWaiters.push(resolve);
           Module._bib_request_readback();
@@ -364,6 +393,7 @@
       const waiters = readbackWaiters;
       readbackWaiters = [];
       const frame = data ? { data, w, h } : null;
+      if (frame) bib.lastFrame = frame; // probeSync's cache
       for (const resolve of waiters) resolve(frame);
     }
 

@@ -1039,6 +1039,16 @@ int main()
     // onEngineReady fires.
     g_engineThread = pthread_self();
     g_engineThreadReady.store(true, std::memory_order_release);
+
+    // Install the worker-scope Module hooks (pump, bibWasmPolyfill,
+    // bibWasm2js — web/engine-pre.js) NOW: this EM_ASM runs in the engine
+    // pthread's worker scope with Module fully constructed. The pre-js's
+    // own eager attempts can fire before the pthread bootstrap builds
+    // Module (gate9: empty bibWasmPolyfill got cached for the session).
+    EM_ASM({
+        if (typeof self !== "undefined" && self.__bibInstallWorkerHooks)
+            self.__bibInstallWorkerHooks();
+    });
     printf("EMBEDDER: engine thread=%p browser-main=%d\n",
         reinterpret_cast<void*>(g_engineThread), emscripten_is_main_browser_thread());
     // Verbose libcurl tracing (?curldebug=1 on the host page). Set from C
@@ -1177,7 +1187,7 @@ int main()
     RefPtr localMainFrame = page->localMainFrame();
     if (!localMainFrame) {
         printf("EMBEDDER: FAIL no localMainFrame\n");
-        return 1;
+        exit(1); // EXIT_RUNTIME=0: explicit teardown (node gate path)
     }
 
     localMainFrame->setView(WebCore::LocalFrameView::create(*localMainFrame, WebCore::IntSize(kWidth, kHeight)));
@@ -1197,7 +1207,7 @@ int main()
     RefPtr documentLoader = loader->activeDocumentLoader();
     if (!documentLoader) {
         printf("EMBEDDER: FAIL no activeDocumentLoader\n");
-        return 1;
+        exit(1); // EXIT_RUNTIME=0: explicit teardown (node gate path)
     }
 
     // The host page may supply the document via Module.bibHTML (a JS
@@ -1271,7 +1281,7 @@ int main()
         surface = SkSurfaces::Raster(info);
     if (!surface) {
         printf("EMBEDDER: FAIL SkSurface\n");
-        return 1;
+        exit(1); // EXIT_RUNTIME=0: explicit teardown (node gate path)
     }
 
     g_engine = new Engine { WTF::move(page), WTF::move(localMainFrame), WTF::move(surface) };
@@ -1293,7 +1303,7 @@ int main()
 
     if (!paintFrame()) {
         printf("EMBEDDER: FAIL paint\n");
-        return 1;
+        exit(1); // EXIT_RUNTIME=0: explicit teardown (node gate path)
     }
     printf("EMBEDDER: paint OK\n");
 
@@ -1308,11 +1318,11 @@ int main()
     SkPixmap pixmap;
     if (!g_engine->surface->peekPixels(&pixmap)) {
         printf("EMBEDDER: FAIL peekPixels\n");
-        return 1;
+        exit(1); // EXIT_RUNTIME=0: explicit teardown (node gate path)
     }
     if (!writePPM("/out.ppm", pixmap)) {
         printf("EMBEDDER: FAIL writePPM\n");
-        return 1;
+        exit(1); // EXIT_RUNTIME=0: explicit teardown (node gate path)
     }
 
     // Gate assertions are region-specific so a fontconfig/glyph regression
@@ -1336,12 +1346,12 @@ int main()
     printf("EMBEDDER: nonWhitePixels=%d exactBlue=%d redGlyph=%d\n", nonWhite, exactBlue, redGlyph);
     if (exactBlue != 200 * 100) {
         printf("EMBEDDER: FAIL blue div wrong size (%d != 20000)\n", exactBlue);
-        return 1;
+        exit(1); // EXIT_RUNTIME=0: explicit teardown (node gate path)
     }
     if (redGlyph < 200) {
         printf("EMBEDDER: FAIL heading glyphs missing (fonts broken?)\n");
-        return 1;
+        exit(1); // EXIT_RUNTIME=0: explicit teardown (node gate path)
     }
     printf("EMBEDDER: DONE\n");
-    return 0;
+    exit(0); // EXIT_RUNTIME=0: explicit teardown runs Module.onExit (gate1 reads /out.ppm there)
 }

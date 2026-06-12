@@ -21,11 +21,11 @@ await page.press("#urlbar", "Enter");
 
 // Boot page replaced by the fetched gate4 page (green div at (50,126)).
 await page.waitForFunction(
-  async () => {
-    const p = await window.__bib.probe(50, 126);
+  () => {
+    const p = window.__bib.probeSync(50, 126);
     return p && p[0] === 0x00 && p[1] === 0xaa && p[2] === 0x44;
   },
-  { timeout: 60000 }
+  { polling: 250, timeout: 60000 }
 );
 
 const checks = [];

@@ -21,7 +21,53 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~13:10)
+## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~15:30)
+
+**W-B1 SHIPPED (task #66, branch wb1-pthread): the engine runs on a
+dedicated pthread and THE acceptance is met — discord.com/login boots
+with the host tab responsive (maxGap 386-460ms, ZERO gaps >500ms over a
+75s boot window; pre-W-B1 = tens of seconds frozen + Chrome kill
+dialog).** Full gate board green on the final binary: gates 2/3/4/5/6/7/9
++ urlbar + HN smoke + tools/wb1-acceptance.mjs (the new committed
+acceptance probe). Q4 atomics tax: mc-hop 0.43ms (was 0.38), timer-hop
+7.35ms (was 6.93), raf 60/60, fetch 69ms (was 44 — added proxy hops,
+W-B3 real curl threads will claw this back). gate8/GPU expected-fail
+until W-B2 (OffscreenCanvas transfer).
+
+Architecture (see commit message + analysis doc): exports self-proxy to
+the engine thread with burst-collapse; rendering PUSHES (bibBlit);
+probes are request/push (bibReadbackReady; __bib.probe async +
+__bib.probeSync cached-frame for predicates); worker-scope hooks in
+web/engine-pre.js (pump + binaryen wasm2js, installed from main() via
+self.__bibInstallWorkerHooks); boot flags via MAIN_THREAD_EM_ASM;
+EXIT_RUNTIME=0 + explicit exit() on gate paths.
+
+**THE DEBUGGING LESSON (cost ~half the session): playwright
+waitForFunction does NOT await async predicates under interval polling —
+the returned Promise is truthy, the wait passes VACUOUSLY and instantly.**
+Every "W-B1 network wedge" (gate6/7 fails, phantom navigation stalls,
+phantom runtime death) was this one harness bug wearing different
+costumes. The engine networking was healthy throughout (curl traces:
+every transfer completed; unattended chains done in <2s). Predicates
+must be SYNC (probeSync); one-shot reads use async probe via awaited
+evaluate. Codex's independent race-hunt of the marshaling found the
+atomic collapse patterns sound; its real catches (pump
+disarm-on-one-exception, EXIT_RUNTIME teardown hazard) are fixed.
+
+**NEXT, in value order:** (a) merge wb1-pthread → main after a wave-2
+real-site sweep (old.reddit, google login, velzie.rip, fal.ai,
+reCAPTCHA) confirms no regressions; (b) W-B2: GPU via OffscreenCanvas
+transfer + fold G4 context-loss in (gate8 back to green; restore
+browser.html gpu default); (c) media playback M-0/M-A
+(analysis-media-playback.md); (d) W-B3 dividends (real curl threads —
+also fixes the fetch-latency regression, sync XHR, W-C real workers);
+(e) #57 instrumentation still armed.
+
+---
+
+## (superseded 2026-06-12 ~15:30) Previous opener: W-B0 spike results
+
+## ⟶ (old) NEXT SESSION STARTS HERE (updated 2026-06-12 ~13:10)
 
 **W-B0 spike DONE (task #64) — ALL PASS, kill criteria NOT met, W-B is
 GO for W-B1.** Full results at the top of

@@ -42,11 +42,11 @@ function check(name, ok, detail = "") {
 // blue div sits at (50,126); the fetched site replaces it.
 try {
   await page.waitForFunction(
-    async () => {
-      const p = await window.__bib.probe(50, 126);
+    () => {
+      const p = window.__bib.probeSync(50, 126);
       return p && !(p[0] === 0x00 && p[1] === 0x66 && p[2] === 0xcc);
     },
-    { timeout: 90000 }
+    { polling: 250, timeout: 90000 }
   );
 } catch {
   console.log("note: boot page never replaced");

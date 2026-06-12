@@ -32,15 +32,22 @@
 
     // --- event-driven pump, worker-local -------------------------------
     var pumpScheduled = false;
+    var pumpFailures = 0;
     var pumpChannel = new MessageChannel();
     pumpChannel.port1.onmessage = function () {
       pumpScheduled = false;
       try {
         if (typeof _bib_pump === "function")
           _bib_pump();
+        pumpFailures = 0;
       } catch (e) {
-        // post-abort the export throws; disarm instead of storming
-        pumpChannel.port1.onmessage = null;
+        // Post-abort the export throws on every call — disarm after a
+        // BURST of failures, never on one (a single transient throw must
+        // not permanently kill the engine's wakeup channel — Codex W-B1).
+        if (++pumpFailures >= 8) {
+          console.error("engine-pre: pump disarmed after repeated failures: " + e);
+          pumpChannel.port1.onmessage = null;
+        }
       }
     };
     Module.bibWakeUp = function () {
@@ -134,9 +141,16 @@
     return true;
   }
 
-  // `var Module` hoists — at pre-js time it may be declared-but-undefined
-  // in the pthread bootstrap; retry once the script body has assigned it.
-  // All consumers (EM_ASM blocks) run long after main() starts.
+  // `var Module` hoists — at pre-js time (and even at microtask/timeout
+  // time) the pthread bootstrap may not have built Module yet: the worker
+  // assembles it while handling the 'load'/'run' messages, AFTER this
+  // script evaluates. The guaranteed install point is C: main() executes
+  // in THIS scope with Module fully alive and calls
+  // self.__bibInstallWorkerHooks() as its first statement (gate9 caught
+  // the early attempts silently missing — empty bibWasmPolyfill was
+  // cached for the session). The eager attempts below remain as a best
+  // effort so the hooks exist as early as possible.
+  self.__bibInstallWorkerHooks = installHooks;
   if (!installHooks()) {
     Promise.resolve().then(installHooks);
     setTimeout(installHooks, 0);

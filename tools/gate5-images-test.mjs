@@ -26,11 +26,11 @@ await page.waitForFunction(() => window.__bib && window.__bib.ready, {
 });
 // Wait for the boot page to be replaced (hello blue div gone).
 await page.waitForFunction(
-  async () => {
-    const p = await window.__bib.probe(50, 126);
+  () => {
+    const p = window.__bib.probeSync(50, 126);
     return p && !(p[0] === 0x00 && p[1] === 0x66 && p[2] === 0xcc);
   },
-  { timeout: 90000 }
+  { polling: 250, timeout: 90000 }
 );
 // Let image subresources land and repaint.
 await page.waitForTimeout(8000);

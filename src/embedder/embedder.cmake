@@ -53,7 +53,12 @@ target_link_options(BibEmbedder PRIVATE
     "SHELL:-sINITIAL_MEMORY=256MB"
     "SHELL:-sALLOW_MEMORY_GROWTH=1"
     "SHELL:-sMAXIMUM_MEMORY=4GB"
-    "SHELL:-sEXIT_RUNTIME=1"
+    # W-B1: EXIT_RUNTIME=0 — under PROXY_TO_PTHREAD a keepalive underflow
+    # on the proxied-main pthread with EXIT_RUNTIME=1 tears down the WHOLE
+    # runtime mid-session (observed: page Module gutted, exports vanish).
+    # The interactive engine must be un-teardownable; gate/node mode calls
+    # exit() explicitly in main() so Module.onExit still fires there.
+    "SHELL:-sEXIT_RUNTIME=0"
     # FS: the node runner (tools/run-embedder.cjs) reads /out.ppm out of
     # MEMFS in Module.onExit, and both hosts pre-create fontconfig's cache
     # dir in preRun. HEAPU8: the browser host page (web/browser.html) wraps
