@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<!-- In-guest probe for WS-1: a REAL WebSocket round-trip through the whole
+     stack (BibWebSocketChannel -> CurlStream CONNECT_ONLY -> OpenSSL TLS ->
+     SOCKFS -> wisp). echo.websocket.org echoes every message back (and
+     sends one "Request served by ..." greeting first — tolerated below).
+     Checks: open fires (handshake validated), text echo, binary echo
+     (arraybuffer), clean close (wasClean=true / 1000), engine alive.
+     Run: browser.html?url=http://localhost:8080/probe/wsecho.html -->
+<html>
+<head><meta charset="utf-8"><title>WebSocket echo probe</title></head>
+<body>
+<h1>WebSocket echo probe</h1>
+<script>
+(function () {
+  var passes = 0, fails = 0, settled = false;
+  function report(name, ok, extra) {
+    if (ok) passes++; else fails++;
+    console.log("WSECHO: " + name + " " + (ok ? "PASS" : "FAIL") + (extra ? " " + extra : ""));
+  }
+  function verdict() {
+    if (settled) return;
+    settled = true;
+    report("engine-alive", true);
+    console.log("WSECHO-VERDICT: " + (fails === 0 ? "PASS" : "FAIL") +
+      " (" + passes + " pass, " + fails + " fail)");
+  }
+  setTimeout(function () {
+    if (settled) return;
+    report("timeout", false, "stage=" + stage);
+    verdict();
+  }, 20000);
+
+  var stage = "construct";
+  var ws;
+  try {
+    ws = new WebSocket("wss://echo.websocket.org/");
+  } catch (e) {
+    report("construct", false, e.name + ": " + e.message);
+    verdict();
+    return;
+  }
+  report("construct", true, "readyState=" + ws.readyState);
+  ws.binaryType = "arraybuffer";
+  stage = "open";
+
+  var TEXT = "bib-ws1-echo-7391";
+  var BIN = new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x42]);
+
+  ws.onopen = function () {
+    report("open", true, "protocol=" + JSON.stringify(ws.protocol) +
+      " extensions=" + JSON.stringify(ws.extensions));
+    stage = "text-echo";
+    ws.send(TEXT);
+  };
+
+  ws.onmessage = function (e) {
+    if (typeof e.data === "string") {
+      // The service greets with "Request served by ..." before echoing.
+      if (e.data.indexOf("Request served by") === 0) return;
+      if (stage === "text-echo") {
+        report("text-echo", e.data === TEXT, "got=" + JSON.stringify(e.data.slice(0, 40)));
+        stage = "binary-echo";
+        ws.send(BIN.buffer);
+        return;
+      }
+      report("unexpected-text", false, JSON.stringify(e.data.slice(0, 40)));
+      return;
+    }
+    if (stage === "binary-echo") {
+      var got = new Uint8Array(e.data);
+      var ok = got.length === BIN.length;
+      for (var i = 0; ok && i < got.length; i++) ok = got[i] === BIN[i];
+      report("binary-echo", ok, "len=" + got.length);
+      stage = "close";
+      ws.close(1000, "done");
+      return;
+    }
+    report("unexpected-binary", false, "len=" + e.data.byteLength);
+  };
+
+  ws.onerror = function () {
+    report("error-event", false, "stage=" + stage);
+  };
+
+  ws.onclose = function (e) {
+    report("close-clean", e.wasClean === true && e.code === 1000,
+      "wasClean=" + e.wasClean + " code=" + e.code + " stage=" + stage);
+    verdict();
+  };
+})();
+</script>
+</body>
+</html>

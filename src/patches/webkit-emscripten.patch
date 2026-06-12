@@ -92,6 +92,26 @@ index 26e825ace4..fbb5c47baf 100644
          auto result = ([&] -> std::optional<uint32_t> {
              Dl_info info { };
              if (!dladdr(jsFunctionAddr, &info))
+diff --git a/Source/JavaScriptCore/runtime/JSCell.cpp b/Source/JavaScriptCore/runtime/JSCell.cpp
+index 1e8be796f4..8e4fb4a73b 100644
+--- a/Source/JavaScriptCore/runtime/JSCell.cpp
++++ b/Source/JavaScriptCore/runtime/JSCell.cpp
+@@ -177,6 +177,15 @@ JSObject* JSCell::toObjectSlow(JSGlobalObject* globalObject) const
+         return string->toObject(globalObject);
+     if (const auto* bigInt = jsDynamicCast<const JSBigInt*>(this))
+         return bigInt->toObject(globalObject);
++#if defined(__EMSCRIPTEN__)
++    // BIB diagnostic (task #57): a for...in base intermittently reaches
++    // here as neither String/BigInt/Symbol on discord.com/login, and the
++    // secure cast below aborts the whole engine. The structure audit above
++    // passed, so the cell header is intact — name it before dying so the
++    // flake is diagnosable from the crash log.
++    if (!jsDynamicCast<const Symbol*>(this))
++        WTFLogAlways("BIB: toObjectSlow on unexpected cell: JSType=%u classInfo=%s", static_cast<unsigned>(type()), classInfo()->className.characters());
++#endif
+     return jsSecureCast<const Symbol*>(this)->toObject(globalObject);
+ }
+ 
 diff --git a/Source/JavaScriptCore/runtime/MathCommon.cpp b/Source/JavaScriptCore/runtime/MathCommon.cpp
 index 71b9262c4f..c5f8543491 100644
 --- a/Source/JavaScriptCore/runtime/MathCommon.cpp
@@ -2515,29 +2535,45 @@ index fc5b225a8b..3998a7ee71 100644
      long m_maxTotalConnections;
      long m_maxHostConnections;
 diff --git a/Source/WebCore/platform/network/curl/CurlStream.cpp b/Source/WebCore/platform/network/curl/CurlStream.cpp
-index e7708fd8bf..d4df13908a 100644
+index e7708fd8bf..19472b05b7 100644
 --- a/Source/WebCore/platform/network/curl/CurlStream.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlStream.cpp
-@@ -41,6 +41,18 @@ CurlStream::CurlStream(CurlStreamScheduler& scheduler, CurlStreamID streamID, UR
+@@ -41,6 +41,34 @@ CurlStream::CurlStream(CurlStreamScheduler& scheduler, CurlStreamID streamID, UR
      : m_scheduler(scheduler)
      , m_streamID(streamID)
  {
 +#if defined(__EMSCRIPTEN__)
-+    // Single-threaded port: the blocking CONNECT_ONLY perform() below can
-+    // never complete — the SOCKFS WebSocket underneath needs the JS event
-+    // loop to open, and that loop is starved while perform() spins. Fail
-+    // the stream immediately so pages get a clean WebSocket error/close
-+    // event instead of a minutes-long frozen tab. Real in-page WebSocket
-+    // support needs a multi-interface rework of CurlStream (deferred).
-+    UNUSED_PARAM(serverTrustEvaluation);
-+    UNUSED_PARAM(localhostAlias);
-+    notifyFailure(CURLE_COULDNT_CONNECT);
-+    return;
++    // Single-threaded port: upstream's blocking CONNECT_ONLY perform()
++    // (the #else branch) can never complete here — the SOCKFS WebSocket
++    // underneath needs the JS event loop to open, and that loop is starved
++    // while perform() spins. Drive the connect through a private multi
++    // handle instead: the scheduler's main-thread pump calls tryToConnect()
++    // (via tryToTransfer) until libcurl reports the TCP+TLS connect
++    // finished, after which the easy handle serves curl_easy_recv/send
++    // exactly like upstream (the documented connect-only-via-multi
++    // pattern). This replaces the WS-0-era stub that failed every stream
++    // with CURLE_COULDNT_CONNECT at creation.
++    m_curlHandle = makeUnique<CurlHandle>();
++
++    url.setProtocol(url.protocolIs("wss"_s) ? "https"_s : "http"_s);
++    m_curlHandle->setURL(WTF::move(url), localhostAlias);
++
++    if (serverTrustEvaluation == ServerTrustEvaluation::Disable)
++        m_curlHandle->disableServerTrustEvaluation();
++
++    m_curlHandle->enableConnectionOnly();
++
++    m_connectMulti = makeUnique<CurlMultiHandle>();
++    if (m_connectMulti->addHandle(m_curlHandle->handle()) != CURLM_OK) {
++        notifyFailure(CURLE_COULDNT_CONNECT);
++        return;
++    }
++    tryToConnect();
 +#else
      ASSERT(!isMainThread());
  
      m_curlHandle = makeUnique<CurlHandle>();
-@@ -62,11 +74,14 @@ CurlStream::CurlStream(CurlStreamScheduler& scheduler, CurlStreamID streamID, UR
+@@ -62,16 +90,75 @@ CurlStream::CurlStream(CurlStreamScheduler& scheduler, CurlStreamID streamID, UR
      m_scheduler.callClientOnMainThread(m_streamID, [streamID = m_streamID](Client& client) {
          client.didOpen(streamID);
      });
@@ -2552,7 +2588,68 @@ index e7708fd8bf..d4df13908a 100644
      destroyHandle();
  }
  
-@@ -80,7 +95,9 @@ void CurlStream::destroyHandle()
++#if defined(__EMSCRIPTEN__)
++void CurlStream::tryToConnect()
++{
++    if (!m_connecting || !m_curlHandle || !m_connectMulti)
++        return;
++
++    int activeCount = 0;
++    CURLMcode performResult;
++    while ((performResult = m_connectMulti->perform(activeCount)) == CURLM_CALL_MULTI_PERFORM) { }
++    if (performResult != CURLM_OK) {
++        // A multi-level failure never produces a CURLMSG_DONE, which would
++        // otherwise strand the channel in CONNECTING forever (Codex).
++        m_connecting = false;
++        notifyFailure(CURLE_COULDNT_CONNECT);
++        return;
++    }
++
++    while (true) {
++        int messagesInQueue = 0;
++        CURLMsg* msg = m_connectMulti->readInfo(messagesInQueue);
++        if (!msg)
++            break;
++        if (msg->msg != CURLMSG_DONE || msg->easy_handle != m_curlHandle->handle())
++            continue;
++
++        auto result = msg->data.result;
++        // The multi handle must stay alive (and the easy handle in it) for
++        // the stream's whole life: the multi owns the connection cache, so
++        // curl_multi_cleanup here would close the just-established
++        // CONNECT_ONLY connection out from under curl_easy_recv/send
++        // (observed: "closing connection #0" + ACTIVESOCKET going BAD).
++        // destroyHandle() tears both down in the required order.
++        m_connecting = false;
++
++        if (result != CURLE_OK) {
++            notifyFailure(result);
++            return;
++        }
++
++        m_scheduler.callClientOnMainThread(m_streamID, [streamID = m_streamID](Client& client) {
++            client.didOpen(streamID);
++        });
++        return;
++    }
++}
++#endif
++
+ void CurlStream::destroyHandle()
+ {
++#if defined(__EMSCRIPTEN__)
++    // Teardown order required by curl: remove the easy handle from the
++    // multi, destroy the easy handle, then destroy the multi.
++    if (m_connectMulti && m_curlHandle)
++        m_connectMulti->removeHandle(m_curlHandle->handle());
++    m_curlHandle = nullptr;
++    m_connectMulti = nullptr;
++#endif
++
+     if (!m_curlHandle)
+         return;
+ 
+@@ -80,7 +167,9 @@ void CurlStream::destroyHandle()
  
  void CurlStream::send(UniqueArray<uint8_t>&& buffer, size_t length)
  {
@@ -2562,7 +2659,7 @@ index e7708fd8bf..d4df13908a 100644
  
      if (!m_curlHandle)
          return;
-@@ -90,7 +107,9 @@ void CurlStream::send(UniqueArray<uint8_t>&& buffer, size_t length)
+@@ -90,17 +179,33 @@ void CurlStream::send(UniqueArray<uint8_t>&& buffer, size_t length)
  
  void CurlStream::appendMonitoringFd(fd_set& readfds, fd_set& writefds, fd_set& exceptfds, int& maxfd)
  {
@@ -2572,7 +2669,31 @@ index e7708fd8bf..d4df13908a 100644
  
      if (!m_curlHandle)
          return;
-@@ -113,7 +132,9 @@ void CurlStream::appendMonitoringFd(fd_set& readfds, fd_set& writefds, fd_set& e
+ 
++#if defined(__EMSCRIPTEN__)
++    // No usable ACTIVESOCKET until the multi-driven connect completes —
++    // asking for it now would read as a failure and kill the stream.
++    if (m_connecting)
++        return;
++#endif
++
+     auto socket = m_curlHandle->getActiveSocket();
+     if (!socket.has_value()) {
+         notifyFailure(socket.error());
+         return;
+     }
+ 
++    // CURLINFO_ACTIVESOCKET reports CURL_SOCKET_BAD (-1) as a "success"
++    // when the connection is gone — FD_SET on it corrupts memory.
++    if (*socket == CURL_SOCKET_BAD || *socket >= FD_SETSIZE) {
++        notifyFailure(CURLE_RECV_ERROR);
++        return;
++    }
++
+     FD_SET(*socket, &readfds);
+     FD_SET(*socket, &exceptfds);
+ 
+@@ -113,17 +218,33 @@ void CurlStream::appendMonitoringFd(fd_set& readfds, fd_set& writefds, fd_set& e
  
  void CurlStream::tryToTransfer(const fd_set& readfds, const fd_set& writefds, const fd_set& exceptfds)
  {
@@ -2582,8 +2703,77 @@ index e7708fd8bf..d4df13908a 100644
  
      if (!m_curlHandle)
          return;
+ 
++#if defined(__EMSCRIPTEN__)
++    // The pump calls this every pass regardless of fd readiness; while the
++    // multi-driven connect is still in flight, give it the cycle instead.
++    if (m_connecting) {
++        tryToConnect();
++        return;
++    }
++#endif
++
+     auto socket = m_curlHandle->getActiveSocket();
+     if (!socket.has_value()) {
+         notifyFailure(socket.error());
+         return;
+     }
+ 
++    if (*socket == CURL_SOCKET_BAD || *socket >= FD_SETSIZE) {
++        notifyFailure(CURLE_RECV_ERROR);
++        return;
++    }
++
+     if (FD_ISSET(*socket, &readfds) || FD_ISSET(*socket, &exceptfds))
+         tryToReceive();
+ 
+@@ -185,9 +306,13 @@ void CurlStream::tryToSend()
+ 
+ void CurlStream::notifyFailure(CURLcode errorCode)
+ {
++    // m_curlHandle can already be gone (or never have existed) on failure
++    // paths that run after destroyHandle().
+     CertificateInfo certificateInfo;
+-    if (auto info = m_curlHandle->certificateInfo())
+-        certificateInfo = WTF::move(*info);
++    if (m_curlHandle) {
++        if (auto info = m_curlHandle->certificateInfo())
++            certificateInfo = WTF::move(*info);
++    }
+ 
+     destroyHandle();
+ 
+diff --git a/Source/WebCore/platform/network/curl/CurlStream.h b/Source/WebCore/platform/network/curl/CurlStream.h
+index af04c9f7ac..a2d897c643 100644
+--- a/Source/WebCore/platform/network/curl/CurlStream.h
++++ b/Source/WebCore/platform/network/curl/CurlStream.h
+@@ -77,6 +77,12 @@ private:
+ 
+     void notifyFailure(CURLcode);
+ 
++#if defined(__EMSCRIPTEN__)
++    // Single-threaded port: non-blocking connect driven by the scheduler
++    // pump (see the constructor comment in CurlStream.cpp).
++    void tryToConnect();
++#endif
++
+     static const size_t kReceiveBufferSize = 16 * 1024;
+ 
+     CurlStreamScheduler& m_scheduler;
+@@ -86,6 +92,11 @@ private:
+ 
+     Vector<std::pair<UniqueArray<uint8_t>, size_t>> m_sendBuffers;
+     size_t m_sendBufferOffset { 0 };
++
++#if defined(__EMSCRIPTEN__)
++    std::unique_ptr<CurlMultiHandle> m_connectMulti;
++    bool m_connecting { true };
++#endif
+ };
+ 
+ } // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlStreamScheduler.cpp b/Source/WebCore/platform/network/curl/CurlStreamScheduler.cpp
-index 0fdc759290..31bb7496e0 100644
+index 0fdc759290..62bd87067d 100644
 --- a/Source/WebCore/platform/network/curl/CurlStreamScheduler.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlStreamScheduler.cpp
 @@ -27,6 +27,10 @@
@@ -2628,7 +2818,7 @@ index 0fdc759290..31bb7496e0 100644
      {
          Locker locker { m_mutex };
          if (m_runThread)
-@@ -122,8 +142,56 @@ void CurlStreamScheduler::startThreadIfNeeded()
+@@ -122,8 +142,85 @@ void CurlStreamScheduler::startThreadIfNeeded()
      m_thread = Thread::create("curlStreamThread"_s, [this] {
          workerThread();
      }, ThreadType::Network);
@@ -2641,6 +2831,12 @@ index 0fdc759290..31bb7496e0 100644
 +    ASSERT(isMainThread());
 +
 +    m_pumpScheduled = false;
++
++    bool hadTasks;
++    {
++        Locker locker { m_mutex };
++        hadTasks = m_taskQueue.size();
++    }
 +
 +    executeTasks();
 +
@@ -2677,15 +2873,38 @@ index 0fdc759290..31bb7496e0 100644
 +        Locker locker { m_mutex };
 +        moreWork = m_streamList.size() || m_taskQueue.size();
 +    }
-+    if (moreWork)
++    if (!moreWork)
++        return;
++
++    // Something happened this pass (queued tasks ran, or select() reported
++    // readiness): pump again at macrotask rate while data is flowing.
++    // Otherwise the streams are merely open-and-idle — a WebSocket like
++    // Discord's gateway stays connected for the whole session, and an
++    // immediate re-dispatch here would spin the host event loop at 100%
++    // for its lifetime. Poll on a short timer instead; writefds is only
++    // monitored while sends are buffered, so an idle socket really does
++    // report rc == 0.
++    if (hadTasks || rc > 0) {
 +        startThreadIfNeeded();
++        return;
++    }
++
++    if (m_pumpTimerArmed || m_pumpScheduled)
++        return;
++
++    static constexpr long pollDelayMs = 8;
++    m_pumpTimerArmed = true;
++    RunLoop::mainSingleton().dispatchAfter(Seconds::fromMilliseconds(pollDelayMs), [this] {
++        m_pumpTimerArmed = false;
++        pumpMainThread();
++    });
 +}
 +#endif
 +
  void CurlStreamScheduler::stopThreadIfNoMoreJobRunning()
  {
      ASSERT(!isMainThread());
-@@ -140,7 +208,9 @@ void CurlStreamScheduler::stopThreadIfNoMoreJobRunning()
+@@ -140,7 +237,9 @@ void CurlStreamScheduler::stopThreadIfNoMoreJobRunning()
  
  void CurlStreamScheduler::executeTasks()
  {
@@ -2696,10 +2915,10 @@ index 0fdc759290..31bb7496e0 100644
      Vector<Function<void()>> taskQueue;
  
 diff --git a/Source/WebCore/platform/network/curl/CurlStreamScheduler.h b/Source/WebCore/platform/network/curl/CurlStreamScheduler.h
-index 2d7a77d759..d8759893ff 100644
+index 2d7a77d759..c196005ac6 100644
 --- a/Source/WebCore/platform/network/curl/CurlStreamScheduler.h
 +++ b/Source/WebCore/platform/network/curl/CurlStreamScheduler.h
-@@ -54,6 +54,14 @@ private:
+@@ -54,6 +54,15 @@ private:
  
      void workerThread();
  
@@ -2709,6 +2928,7 @@ index 2d7a77d759..d8759893ff 100644
 +    // CurlRequestScheduler::pumpMainThread).
 +    void pumpMainThread();
 +    bool m_pumpScheduled { false };
++    bool m_pumpTimerArmed { false };
 +#endif
 +
      Lock m_mutex;

@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<!-- In-guest probe: which browser API rejects with "NetworkError: Load
+     failed"? discord.com/login logs exactly that as an unhandled rejection
+     while a full curldebug trace shows ZERO failing network requests — so
+     it must be an API whose provider is stubbed in this embedder, not a
+     real fetch. Run: browser.html?url=http://localhost:8080/probe/netprobe.html -->
+<html>
+<head><meta charset="utf-8"><title>NetworkError source probe</title></head>
+<body>
+<h1>NetworkError source probe</h1>
+<script>
+(function () {
+  var pending = 0, results = [];
+  function probe(name, fn) {
+    pending++;
+    var settle = function (outcome) {
+      console.log("NETPROBE: " + name + " -> " + outcome);
+      if (!--pending)
+        console.log("NETPROBE-VERDICT: done (" + results.length + " probes)");
+      results.push(name);
+    };
+    try {
+      var p = fn();
+      if (!p || typeof p.then !== "function") { settle("no-promise value=" + String(p).slice(0, 60)); return; }
+      p.then(
+        function (v) { settle("RESOLVED " + String(v).slice(0, 60)); },
+        function (e) { settle("REJECTED " + (e && e.name) + ": " + (e && e.message)); }
+      );
+    } catch (e) {
+      settle("THREW " + (e && e.name) + ": " + (e && e.message));
+    }
+  }
+
+  probe("caches.open", function () {
+    if (!("caches" in window)) return "caches missing";
+    return caches.open("netprobe");
+  });
+  probe("caches.match", function () {
+    if (!("caches" in window)) return "caches missing";
+    return caches.match("/anything");
+  });
+  probe("sw.register", function () {
+    if (!("serviceWorker" in navigator)) return "serviceWorker missing";
+    return navigator.serviceWorker.register("/sw.js");
+  });
+  probe("fetch-ok", function () { return fetch("/probe/netprobe.html").then(function (r) { return "status " + r.status; }); });
+  probe("storage.estimate", function () {
+    if (!navigator.storage || !navigator.storage.estimate) return "storage.estimate missing";
+    return navigator.storage.estimate().then(function (e) { return "quota " + e.quota; });
+  });
+})();
+</script>
+</body>
+</html>
