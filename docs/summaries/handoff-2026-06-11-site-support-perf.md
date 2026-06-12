@@ -83,6 +83,24 @@ bigint/symbol cell — internal cell leak or corruption). NOT
 reproduced since (2 clean runs after); if it recurs, patch
 toObjectSlow to dataLog the JSType before the secure cast and rebuild.
 
+**Abort kill switch + GPU harness parity (~23:15, task #59).** A live
+Brave tab spammed RuntimeError:Aborted() + lag on discord.com while
+every harness run was clean. Two findings: (1) ALL harness runs were
+secretly RASTER — browser.html defaults GPU by !navigator.webdriver;
+site-diagnose now takes BIB_GPU=1 to test the human-default path
+(found: site-diagnose's pixel paint-probe reports "engine dead" in GPU
+mode — harness artifact, no 2d ctx; engine actually healthy, verified
+by build/gpu-discord-probe.mjs state sampling). (2) The spam itself:
+best explanation is a reload during the relink window — embedder.wasm
+is written IN PLACE (~3min) and the ETag is size+mtime, so a mid-write
+fetch yields a truncated wasm → instant abort → and the host page kept
+pumping the corpse (rAF, 2 MessageChannels, pump timer, input), each
+call rethrowing. browser.html now has a kill switch: onAbort sets
+__bib.dead, halts every Module entry point, banners "ENGINE CRASHED —
+reload the tab (or retry with ?gpu=0)", keeps the FIRST abort reason
+readable. getProc MISS eglQueryString in GPU logs is benign (Skia
+null-tolerates it). Gates 2/3/8/9 PASS post-change; Codex clean.
+
 **WS-1 (the real WebSocket, task #58 phase 2):** channel over curl's
 native WebSocket API (curl 8.17 in-tree: CURLOPT ws://+wss://,
 curl_ws_send/curl_ws_recv) on the existing curl+OpenSSL+wisp stack —

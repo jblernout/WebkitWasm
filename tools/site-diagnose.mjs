@@ -42,8 +42,13 @@ for (const target of sites) {
     if (e.stack) for (const l of e.stack.split("\n").slice(0, 18)) errLines.push("  " + l.trim());
   });
 
+  // Real users default to GPU mode (browser.html: !navigator.webdriver);
+  // webdriver runs default to raster. BIB_GPU=1 forces the user-default
+  // GPU path under the harness.
   const url =
-    "http://127.0.0.1:8080/browser.html?demo=hello&url=" +
+    "http://127.0.0.1:8080/browser.html?demo=hello" +
+    (process.env.BIB_GPU ? "&gpu=" + process.env.BIB_GPU : "") +
+    "&url=" +
     encodeURIComponent(target);
   await page.goto(url);
   try {

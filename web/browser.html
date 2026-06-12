@@ -79,6 +79,7 @@
     let pumpScheduled = false;
     pumpChannel.port1.onmessage = () => {
       pumpScheduled = false;
+      if (bib.dead) return;
       if (Module._bib_pump) Module._bib_pump();
     };
     const schedulePump = () => {
@@ -91,12 +92,14 @@
     // the end-of-cycle hook in the engine re-arms whatever remains.
     const pumpTimer = { id: 0, at: Infinity };
     const armPumpTimer = (ms) => {
+      if (bib.dead) return;
       const at = performance.now() + ms;
       if (at >= pumpTimer.at - 0.25) return;
       clearTimeout(pumpTimer.id);
       pumpTimer.at = at;
       pumpTimer.id = setTimeout(() => {
         pumpTimer.at = Infinity;
+        if (bib.dead) return;
         if (Module._bib_pump) Module._bib_pump();
       }, Math.max(0, ms));
     };
@@ -107,6 +110,7 @@
     let netPumpScheduled = false;
     netPumpChannel.port1.onmessage = () => {
       netPumpScheduled = false;
+      if (bib.dead) return;
       if (Module._bib_pump_network) Module._bib_pump_network();
     };
     const scheduleNetPump = () => {
@@ -233,12 +237,13 @@
 
     // Machine-readable state for the gate tests.
     const bib = (window.__bib = {
-      ready: false, ticks: 0, frames: 0, verdict: "pending",
+      ready: false, dead: false, ticks: 0, frames: 0, verdict: "pending",
       exactBlue: -1, redGlyph: -1,
       // Force a repaint and read one pixel straight from the engine's
       // unpremultiplied RGBA buffer (NOT canvas getImageData — the canvas
       // premul round-trip is lossy).
       probe(x, y) {
+        if (this.dead) return null;
         // bib_render_readback is bib_render(1) in CPU mode; in GPU mode it
         // adds a full-frame Ganesh readback (probe-only GPU sync — G3).
         const ptr = Module._bib_render_readback();
@@ -286,7 +291,7 @@
     // event so the engine sees positions in order.
     let pendingMove = null;
     function flushPendingMove() {
-      if (!pendingMove) return;
+      if (!pendingMove || bib.dead) return;
       Module._bib_mouse_move(pendingMove[0], pendingMove[1], pendingMove[2]);
       pendingMove = null;
     }
@@ -311,6 +316,7 @@
     }
 
     function blitLoop() {
+      if (bib.dead) return; // ends the rAF chain after an abort
       flushPendingMove();
       Module._bib_tick();
       // force only the very first frame; afterwards the engine returns null
@@ -365,25 +371,28 @@
         pendingMove = [e.offsetX, e.offsetY, mods(e)];
       });
       canvas.addEventListener("mousedown", (e) => {
+        if (bib.dead) return;
         canvas.focus();
         e.preventDefault();
         flushPendingMove();
         Module._bib_mouse_button(1, e.button, e.offsetX, e.offsetY, e.detail || 1, mods(e));
       });
       canvas.addEventListener("mouseup", (e) => {
+        if (bib.dead) return;
         e.preventDefault();
         flushPendingMove();
         Module._bib_mouse_button(0, e.button, e.offsetX, e.offsetY, e.detail || 1, mods(e));
       });
       canvas.addEventListener("contextmenu", (e) => e.preventDefault());
       canvas.addEventListener("wheel", (e) => {
+        if (bib.dead) return; // dead engine: give scrolling back to the host
         e.preventDefault();
         flushPendingMove();
         Module._bib_wheel(e.offsetX, e.offsetY, e.deltaX, e.deltaY, mods(e));
       }, { passive: false });
 
       const sendKey = (type, e, text) =>
-        Module.ccall("bib_key", "number",
+        bib.dead ? 0 : Module.ccall("bib_key", "number",
           ["number", "string", "string", "string", "number", "number", "number"],
           [type, e.key, e.code, text, e.keyCode | 0, e.repeat ? 1 : 0, mods(e)]);
       canvas.addEventListener("keydown", (e) => {
@@ -425,6 +434,10 @@
       return url;
     }
     function navigateEngine(raw) {
+      if (bib.dead) {
+        statusEl.textContent = "engine crashed — reload the tab first";
+        return;
+      }
       const url = normalizeEngineURL(raw ?? urlbarEl.value);
       if (!url) {
         statusEl.textContent = "blocked: only http(s) URLs";
@@ -587,8 +600,18 @@
       print: (s) => log("out: " + s),
       printErr: (s) => log("err: " + s),
       onAbort: (r) => {
+        // Kill switch: after a wasm abort EVERY export throws, so a host
+        // page that keeps pumping turns one crash into an endless
+        // RuntimeError storm that lags the tab (live-tab report,
+        // 2026-06-11). Flag the corpse and stop every entry point; the
+        // FIRST abort reason stays readable at the top of the log.
+        bib.dead = true;
         bib.verdict = "abort";
-        statusEl.textContent = "ABORTED";
+        statusEl.textContent = "ENGINE CRASHED — reload the tab" + (gpuMode ? " (or retry with ?gpu=0)" : "");
+        urlbarEl.disabled = true;
+        gobtnEl.disabled = true;
+        clearTimeout(pumpTimer.id);
+        pumpTimer.at = Infinity;
         log("abort: " + r);
       },
     };
