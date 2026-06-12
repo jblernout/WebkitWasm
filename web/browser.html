@@ -128,8 +128,22 @@
     // bfcache-ineligible; pagehide additionally drops the Module root so
     // GC can reclaim the instance promptly.
     window.addEventListener("unload", () => {});
+    // Best-effort persistence flush before the Module root drops. The dump
+    // is async (engine thread -> bibPersist -> debounced OPFS write), so a
+    // hard tab close may lose it — the dependable flush is visibilitychange
+    // below (tab switch), and the 5s steady-state cadence bounds the loss.
+    const flushPersist = () => {
+      try {
+        if (window.Module && Module._bib_persist_now && bib.ready && !bib.dead)
+          Module._bib_persist_now();
+      } catch {}
+    };
     window.addEventListener("pagehide", () => {
+      flushPersist();
       window.Module = null;
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flushPersist();
     });
 
     // ?demo=hello loads the Phase 2 gate page (pixel-stable, script-free,
@@ -141,6 +155,83 @@
     const params = new URLSearchParams(location.search);
     const demo = params.get("demo") ?? "interactive";
     const navigateURL = params.get("url");
+
+    // --- Engine-state persistence (cookies + guest localStorage) ---------
+    // The engine dumps one JSON blob (Module.bibPersist, ~5s cadence, only
+    // on change); it lands in OPFS keyed to THIS page's origin — one
+    // "browser profile" regardless of ?url=. On boot the blob is read back
+    // and handed to the engine as Module.bibSeedState before the first
+    // load. ?persist=0 disables for this load; ?persist=clear wipes the
+    // profile and continues fresh. Playwright gates launch fresh browser
+    // profiles, so OPFS starts empty there — no cross-run leakage.
+    const persistParam = params.get("persist");
+    const persistOn = persistParam !== "0" && !!(navigator.storage && navigator.storage.getDirectory);
+    const PERSIST_FILE = "bib-state-v1.json";
+    const persistSeedReady = (async () => {
+      if (!persistOn) return null;
+      try {
+        const root = await navigator.storage.getDirectory();
+        if (persistParam === "clear") {
+          await root.removeEntry(PERSIST_FILE).catch(() => {});
+          log("persist: cleared stored engine state");
+          return null;
+        }
+        const file = await (await root.getFileHandle(PERSIST_FILE)).getFile();
+        const text = await file.text();
+        // Engine-side dumps cap at 12MB — anything bigger is a corrupt or
+        // foreign file; don't copy it into the wasm heap (Codex LOW).
+        if (text.length > 16 * 1024 * 1024) {
+          log("persist: stored profile oversized — ignoring");
+          return null;
+        }
+        return text || null;
+      } catch {
+        return null; // first run — no profile yet
+      }
+    })();
+    let persistTimer = 0;
+    let persistPending = null;
+    let persistWriting = false;
+    async function persistWriteLoop() {
+      if (persistWriting) return;
+      persistWriting = true;
+      try {
+        while (persistPending !== null) {
+          const text = persistPending;
+          persistPending = null;
+          try {
+            const root = await navigator.storage.getDirectory();
+            const handle = await root.getFileHandle(PERSIST_FILE, { create: true });
+            const w = await handle.createWritable();
+            await w.write(text);
+            await w.close();
+          } catch (e) {
+            // The engine's change-detector already advanced — losing this
+            // blob here would lose it FOREVER (no new push until the state
+            // changes again). Re-queue and retry on a timer (Codex MEDIUM).
+            log("persist: write failed (will retry): " + e);
+            if (persistPending === null) persistPending = text;
+            break;
+          }
+        }
+      } finally {
+        persistWriting = false;
+        if (persistPending !== null && !persistTimer)
+          persistTimer = setTimeout(() => {
+            persistTimer = 0;
+            persistWriteLoop();
+          }, 5000);
+      }
+    }
+    function bibPersist(json) {
+      if (!persistOn) return;
+      persistPending = json;
+      if (persistTimer) return;
+      persistTimer = setTimeout(() => {
+        persistTimer = 0;
+        persistWriteLoop();
+      }, 500);
+    }
 
     // --- Wisp transport (Phase 4) ---------------------------------------
     // The engine's BSD sockets surface as SOCKFS WebSockets. With
@@ -617,6 +708,11 @@
       // probe readbacks to the page (it cannot be pulled synchronously).
       bibBlit,
       bibReadbackReady,
+      // Persistence: engine pushes the state blob here (debounced OPFS
+      // write); bibSeedState is filled by the boot gate below before the
+      // engine script loads.
+      bibPersist,
+      bibSeedState: null,
       preRun: [function () {
         // fontconfig's compiled-in cache dir must exist in MEMFS.
         Module.FS.mkdirTree("/var/cache/fontconfig");
@@ -666,8 +762,12 @@
     // the engine script is appended only after the shim prep settles. If
     // every piece failed to load, bibWasmPolyfill stays "" and the engine
     // skips injection — the old no-wasm, no-Audio behavior.
-    wasmShimReady.then((polyfillText) => {
+    Promise.all([wasmShimReady, persistSeedReady]).then(([polyfillText, seedState]) => {
       Module.bibWasmPolyfill = polyfillText;
+      // Read ONCE by C main() before the first load; cookies seed the jar,
+      // localStorage waits per-origin for first touch.
+      Module.bibSeedState = seedState;
+      if (seedState) log(`persist: profile loaded (${seedState.length} bytes)`);
       const s = document.createElement("script");
       s.src = "engine/embedder.js";
       document.body.appendChild(s);

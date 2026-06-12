@@ -40,6 +40,7 @@
 #include "LocalFrameInlines.h"
 #include "LocalFrameView.h"
 #include "MemoryCache.h"
+#include "NetworkStorageSession.h" // persistence: cookieDatabase() dump/seed
 #include "Page.h"
 #include "PageConfiguration.h"
 #include "PlatformDisplay.h"
@@ -66,10 +67,13 @@
 #include <emscripten/proxying.h>
 #include <emscripten/threading.h>
 #include <pal/SessionID.h>
+#include <wtf/JSONValues.h>
 #include <wtf/MainThread.h>
 #include <wtf/MonotonicTime.h>
+#include <wtf/NeverDestroyed.h>
 #include <wtf/ProcessPrivilege.h>
 #include <wtf/RunLoop.h>
+#include <wtf/WallTime.h>
 
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/core/SkCanvas.h>
@@ -90,6 +94,19 @@ namespace BIB {
 void installEmbedderStrategies(); // EmbedderStrategies.cpp
 void setRequestBlocklistEnabled(bool); // EmbedderStrategies.cpp
 Ref<WebCore::StorageSessionProvider> createEmbedderStorageSessionProvider(); // EmbedderStrategies.cpp
+WebCore::NetworkStorageSession& embedderStorageSession(); // EmbedderStrategies.cpp
+
+// Persistence registries declared in BibStorage.h — engine-thread only.
+HashMap<String, RefPtr<BibStorageArea>>& bibLocalAreaRegistry()
+{
+    static NeverDestroyed<HashMap<String, RefPtr<BibStorageArea>>> registry;
+    return registry;
+}
+HashMap<String, HashMap<String, String>>& bibPendingStorageImport()
+{
+    static NeverDestroyed<HashMap<String, HashMap<String, String>>> pending;
+    return pending;
+}
 }
 
 static constexpr int kWidth = 800;
@@ -373,6 +390,160 @@ static bool bibProxyToEngine(void (*task)(void*), void* arg)
     return emscripten_proxy_async(emscripten_proxy_get_system_queue(), g_engineThread, task, arg);
 }
 
+// ---------------------------------------------------------------------------
+// Engine-state persistence: cookies + guest localStorage round-trip through
+// the host page's OPFS (web/browser.html). Seed: main() reads
+// Module.bibSeedState (one JSON blob) before the first load — cookies go
+// straight into the CookieJarDB, localStorage waits in
+// bibPendingStorageImport() until each origin's area materializes
+// (BibStorage.h). Dump: bib_tick re-serializes every ~5s and pushes to
+// Module.bibPersist ONLY when the blob changed (string compare — there is
+// no write hook on the cookie jar, so polling is the change detector).
+// Everything here runs on the engine thread.
+
+static String bibBuildPersistJSON()
+{
+    auto root = JSON::Object::create();
+    root->setInteger("v"_s, 1);
+
+    auto cookies = JSON::Array::create();
+    for (auto& cookie : BIB::embedderStorageSession().cookieDatabase().getAllCookies()) {
+        auto c = JSON::Object::create();
+        c->setString("name"_s, cookie.name);
+        c->setString("value"_s, cookie.value);
+        c->setString("domain"_s, cookie.domain);
+        c->setString("path"_s, cookie.path);
+        if (cookie.expires)
+            c->setDouble("expires"_s, *cookie.expires); // ms since epoch
+        c->setBoolean("httpOnly"_s, cookie.httpOnly);
+        c->setBoolean("secure"_s, cookie.secure);
+        c->setBoolean("session"_s, cookie.session);
+        cookies->pushObject(WTF::move(c));
+    }
+    root->setArray("cookies"_s, WTF::move(cookies));
+
+    auto storage = JSON::Object::create();
+    for (auto& [origin, area] : BIB::bibLocalAreaRegistry()) {
+        auto items = JSON::Object::create();
+        area->forEachItem([&](const String& key, const String& value) {
+            items->setString(key, value);
+        });
+        storage->setObject(origin, WTF::move(items));
+    }
+    // Origins seeded from a previous session that the guest has not opened
+    // yet THIS session still live in the pending map — dropping them here
+    // would erase a prior session's data just by not visiting the site.
+    for (auto& [origin, pendingItems] : BIB::bibPendingStorageImport()) {
+        if (BIB::bibLocalAreaRegistry().contains(origin))
+            continue;
+        auto items = JSON::Object::create();
+        for (auto& [key, value] : pendingItems)
+            items->setString(key, value);
+        storage->setObject(origin, WTF::move(items));
+    }
+    root->setObject("localStorage"_s, WTF::move(storage));
+    return root->toJSONString();
+}
+
+static void bibSeedPersistedState(const String& json)
+{
+    auto value = JSON::Value::parseJSON(json);
+    auto root = value ? value->asObject() : nullptr;
+    if (!root) {
+        printf("EMBEDDER: persist seed unreadable — starting fresh\n");
+        return;
+    }
+
+    int cookieCount = 0;
+    if (auto cookieArray = root->getArray("cookies"_s)) {
+        auto& jar = BIB::embedderStorageSession().cookieDatabase();
+        double nowMs = WallTime::now().secondsSinceEpoch().milliseconds();
+        for (auto& entry : *cookieArray) {
+            auto c = entry->asObject();
+            if (!c)
+                continue;
+            WebCore::Cookie cookie;
+            cookie.name = c->getString("name"_s);
+            cookie.value = c->getString("value"_s);
+            cookie.domain = c->getString("domain"_s);
+            cookie.path = c->getString("path"_s);
+            cookie.expires = c->getDouble("expires"_s);
+            cookie.httpOnly = c->getBoolean("httpOnly"_s).value_or(false);
+            cookie.secure = c->getBoolean("secure"_s).value_or(false);
+            cookie.session = c->getBoolean("session"_s).value_or(false);
+            if (cookie.name.isEmpty() && cookie.value.isEmpty())
+                continue;
+            if (!cookie.session && cookie.expires && *cookie.expires <= nowMs)
+                continue; // expired while we were away
+            if (jar.setCookie(cookie))
+                cookieCount++;
+        }
+    }
+
+    int originCount = 0;
+    if (auto storage = root->getObject("localStorage"_s)) {
+        for (auto& member : *storage) {
+            auto items = member.value->asObject();
+            if (!items)
+                continue;
+            HashMap<String, String> map;
+            for (auto& item : *items) {
+                String itemValue;
+                if (item.value->asString(itemValue))
+                    map.set(item.key, itemValue);
+            }
+            BIB::bibPendingStorageImport().set(member.key, WTF::move(map));
+            originCount++;
+        }
+    }
+    printf("EMBEDDER: persist seed: %d cookies, %d localStorage origins\n", cookieCount, originCount);
+}
+
+static void bibMaybePersist(bool force)
+{
+    static NeverDestroyed<String> lastJSON;
+    static MonotonicTime lastCheck;
+    static bool oversizeWarned = false;
+
+    if (!g_engine)
+        return;
+    auto now = MonotonicTime::now();
+    if (!force && now - lastCheck < Seconds(5))
+        return;
+    lastCheck = now;
+
+    String json = bibBuildPersistJSON();
+    if (json == lastJSON.get())
+        return;
+    CString utf8 = json.utf8();
+    // localStorage quota (5MB/origin) keeps real blobs far below this; the
+    // cap only guards the cross-heap string copy from pathological growth.
+    if (utf8.length() > 12 * 1024 * 1024) {
+        if (!std::exchange(oversizeWarned, true))
+            printf("EMBEDDER: persist blob over 12MB — persistence paused\n");
+        return;
+    }
+    lastJSON.get() = json;
+
+    char* copy = static_cast<char*>(malloc(utf8.length() + 1));
+    if (!copy)
+        return;
+    memcpy(copy, utf8.data(), utf8.length() + 1);
+    // Same protocol as bibPushFrameIfDirty: malloc'd payload crosses to the
+    // main thread, which reads it out of the (possibly grown) shared heap
+    // and frees it via the exported _bib_wasm_free.
+    // Module guard: pagehide nulls window.Module while a queued push may
+    // still be in flight — free-then-drop is the correct outcome there.
+    MAIN_THREAD_ASYNC_EM_ASM({
+        if (typeof growMemViews === "function")
+            growMemViews();
+        var json = UTF8ToString($0);
+        _bib_wasm_free($0);
+        if (typeof Module !== "undefined" && Module && Module.bibPersist)
+            Module.bibPersist(json);
+    }, copy);
+}
+
 extern "C" {
 
 EMSCRIPTEN_KEEPALIVE int bib_frame_width() { return kWidth; }
@@ -415,6 +586,7 @@ EMSCRIPTEN_KEEPALIVE void bib_tick()
         g_engine->page->finalizeRenderingUpdate({ });
     }
     bibPushFrameIfDirty();
+    bibMaybePersist(false);
 }
 static void bibRunTick(void*)
 {
@@ -849,6 +1021,19 @@ static void bibRunEval(void* p)
     free(source);
 }
 
+// Host-triggered persistence flush (visibilitychange/pagehide): skips the
+// 5s throttle but still skips the push when nothing changed.
+static void bibRunPersistNow(void*);
+EMSCRIPTEN_KEEPALIVE void bib_persist_now()
+{
+    if (!bibOnEngineThread()) {
+        bibProxyToEngine(bibRunPersistNow, nullptr);
+        return;
+    }
+    bibMaybePersist(true);
+}
+static void bibRunPersistNow(void*) { bib_persist_now(); }
+
 // ---------------------------------------------------------------------------
 // Guest WebAssembly shim (decision-006 S-A). JSC's wasm tiers are all
 // unavailable on the CLoop port (IPInt has no cloop lowering — NO-GO), so
@@ -1183,6 +1368,22 @@ int main()
     // everything, so every in-engine navigation refetched all subresources
     // over wisp. Still in-memory; sized like a small browser profile.
     WebCore::MemoryCache::singleton().setCapacities(0, 16 * 1024 * 1024, 64 * 1024 * 1024);
+
+    // Persistence seed (cookies + guest localStorage from a previous host
+    // session, loaded out of OPFS by browser.html). Must land before the
+    // first network request so the initial navigation already attaches the
+    // restored cookies. Same SAB string-copy recipe as bibHTML below.
+    {
+        int seedBytes = MAIN_THREAD_EM_ASM_INT({ return Module.bibSeedState ? lengthBytesUTF8(Module.bibSeedState) + 1 : 0; });
+        if (seedBytes > 0) {
+            char* seedJSON = static_cast<char*>(malloc(seedBytes));
+            if (seedJSON) {
+                MAIN_THREAD_EM_ASM({ stringToUTF8(Module.bibSeedState, $0, $1); }, seedJSON, seedBytes);
+                bibSeedPersistedState(String::fromUTF8(seedJSON));
+                free(seedJSON);
+            }
+        }
+    }
 
     RefPtr localMainFrame = page->localMainFrame();
     if (!localMainFrame) {

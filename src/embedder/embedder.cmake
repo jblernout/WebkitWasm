@@ -68,7 +68,9 @@ target_link_options(BibEmbedder PRIVATE
     # forces them into the runtime so the EM_ASM block can call them.
     # ENV: lets the host page set engine env vars in preRun (e.g.
     # DEBUG_CURL=1 turns on libcurl verbose tracing -> printErr).
-    "SHELL:-sEXPORTED_RUNTIME_METHODS=FS,HEAPU8,ccall,stringToUTF8,lengthBytesUTF8,ENV"
+    # UTF8ToString: the persistence push (bibMaybePersist) reads the JSON
+    # blob out of the shared heap on the MAIN thread inside an EM_ASM block.
+    "SHELL:-sEXPORTED_RUNTIME_METHODS=FS,HEAPU8,ccall,stringToUTF8,lengthBytesUTF8,UTF8ToString,ENV"
     # Surface the COMPLETE undefined-symbol list per link attempt instead of
     # wasm-ld's default 20-error cutoff — each stub iteration costs minutes.
     "SHELL:-Wl,--error-limit=0"

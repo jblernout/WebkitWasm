@@ -11,8 +11,12 @@
 //      real WebCore::StorageMap (quota-enforcing, the same store
 //      WebKitLegacy's StorageAreaImpl uses).
 //
-// Contents live for the host-page lifetime — same policy as cookies
-// (in-memory NetworkStorageSession). OPFS persistence is later optional work.
+// Contents are in-memory; LOCAL areas additionally round-trip through the
+// host page's OPFS persistence blob (main.cpp bibMaybePersist / seed):
+// imported origins wait in bibPendingStorageImport() until the guest first
+// opens that origin's storage, materialized areas register themselves in
+// bibLocalAreaRegistry() so the dump can walk them. Session/TransientLocal
+// areas stay tab-lifetime by design (matches real-browser semantics).
 
 #pragma once
 
@@ -25,8 +29,16 @@
 #include "StorageType.h"
 #include <pal/SessionID.h>
 #include <wtf/HashMap.h>
+#include <wtf/text/StringHash.h>
 
 namespace BIB {
+
+class BibStorageArea;
+
+// Persistence registries (defined in main.cpp; engine-thread only).
+// Keyed by SecurityOriginData::toString() (e.g. "https://discord.com").
+HashMap<String, RefPtr<BibStorageArea>>& bibLocalAreaRegistry();
+HashMap<String, HashMap<String, String>>& bibPendingStorageImport();
 
 class BibStorageArea final : public WebCore::StorageArea {
 public:
@@ -34,6 +46,26 @@ public:
         : m_type(type)
         , m_map(quota)
     {
+    }
+
+    // Persistence import: bypasses the LocalFrame-taking setItem (no frame
+    // exists at seed time). Quota still enforced; an over-quota seed (only
+    // possible if the OPFS file was edited by hand — our own dumps come
+    // from quota-respecting maps) silently truncates the origin's import,
+    // and the truncated set is what persists next. Accepted (Codex LOW).
+    void importItem(const String& key, const String& value)
+    {
+        String oldValue;
+        bool quotaException = false;
+        m_map.setItem(key, value, oldValue, quotaException);
+    }
+
+    template<typename Functor> void forEachItem(Functor&& functor)
+    {
+        for (unsigned i = 0; i < m_map.length(); ++i) {
+            String key = m_map.key(i);
+            functor(key, m_map.getItem(key));
+        }
     }
 
 private:
@@ -82,10 +114,22 @@ private:
 
     Ref<WebCore::StorageArea> storageArea(const WebCore::SecurityOrigin& origin) final
     {
-        auto& area = m_areas.ensure(origin.data(), [&]() -> RefPtr<WebCore::StorageArea> {
+        auto result = m_areas.ensure(origin.data(), [&]() -> RefPtr<WebCore::StorageArea> {
             return adoptRef(*new BibStorageArea(m_type, m_quota));
-        }).iterator->value;
-        return *area;
+        });
+        // First touch of a LOCAL origin: hydrate from the persistence seed
+        // (if a previous session stored anything for it) and register for
+        // the dump walk. Opaque origins serialize as "null" — not restorable.
+        if (result.isNewEntry && m_type == WebCore::StorageType::Local) {
+            auto& area = static_cast<BibStorageArea&>(*result.iterator->value);
+            String originKey = origin.data().toString();
+            if (!originKey.isEmpty() && originKey != "null"_s) {
+                for (auto& [key, value] : bibPendingStorageImport().take(originKey))
+                    area.importItem(key, value);
+                bibLocalAreaRegistry().set(originKey, &area);
+            }
+        }
+        return *result.iterator->value;
     }
 
     const WebCore::SecurityOrigin* topLevelOrigin() const final { return nullptr; }
