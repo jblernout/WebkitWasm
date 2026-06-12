@@ -61,11 +61,14 @@
     // runs). Touching getContext("2d") here would lock the canvas to 2d
     // and make the transfer/context creation fail — so in GPU mode there
     // is no 2d context and no blit at all.
-    // Default GPU for humans (G3/M2: 2.6-3.4× paint), raster for
-    // automation so the pixel-exact gates keep their semantics; ?gpu=0/1
-    // overrides either way.
+    // Default RASTER (2026-06-12 19:45): the user's live fork still hit
+    // ~1fps on Discord under default-GPU even after the present-bench
+    // guard landed — until that's root-caused on real logged-in content,
+    // GPU is opt-in via ?gpu=1 (the bench guard still runs there). The
+    // G3-era !webdriver default returns when GPU-under-pthread is
+    // validated on a live heavy site, not just gates/benches.
     const gpuParam = new URLSearchParams(location.search).get("gpu");
-    const gpuMode = gpuParam !== null ? gpuParam !== "0" : !navigator.webdriver;
+    const gpuMode = gpuParam !== null ? gpuParam !== "0" : false;
     const ctx = gpuMode ? null : canvas.getContext("2d");
 
     // --- Event-driven engine pump (perf) --------------------------------

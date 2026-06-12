@@ -21,7 +21,29 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~18:15)
+## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~19:30)
+
+**POST-SHIP LIVE REGRESSION + FIX (commits ff62439 + dc6cd1a): GPU
+default + a browser whose WORKER contexts are SwiftShader = ~1
+frame/minute (user's live fork on Discord). Hardware GL is granted
+PER-CONTEXT-LOCATION, not per-browser — the user's MotionMark-109 fork
+accelerates main-thread canvases but software-renders worker ones, and
+W-B1 moved our context into a worker. Fix: boot present-bench (2 warmup
+frames to absorb G1's ~100ms frame0 pipeline compiles — without warmup a
+healthy Intel UHD 630 read as 26.67ms "software"; then 3 timed frames at
+8x overdraw — single fills are too easy, SwiftShader steady-states at
+5ms on them; 1x1 readPixels as sync). >12ms/frame → raster fallback via
+bibGpuFallback. Measured: UHD 630 headed 1-2ms (gpu stays), SwiftShader
+18.67-28.67ms (falls back). ?gpubench=0 = measure-only (gate8 phase 1 —
+playwright headless IS SwiftShader); gate8 phase 2 asserts the ENFORCED
+path end-to-end (fallback fires, page lands green on ?gpu=0). Codex 0
+real bugs, LOWs accepted/fixed. Persistence exonerated for the parallel
+raster-lag report (build/persist-cost.mjs: 4MB mutating LS profile holds
+57-61 rAF/s through dump cycles); residual suspect for the user's
+raster 5-10fps = build-load on the machine during their test (their
+retest pending). MotionMark answer: returns ONLY where workers get real
+GL (stock Chromium on this box: yes, verified; their fork: raster until
+its GPU/shield settings change).**
 
 **W-B2 SHIPPED (task #69, commit 2b96e64): GPU mode works under the
 pthread — gate8 GREEN with G4 folded in, GPU default restored for humans
