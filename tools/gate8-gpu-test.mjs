@@ -86,6 +86,41 @@ try {
     g4Ok = lostSeen && restoredSeen && !fellBack && probe2.ok;
   }
 
+  // Phase 2 — the ENFORCED software-renderer guard (no gpubench=0): on a
+  // software context (>12ms bench, e.g. THIS headless env) the engine
+  // must fall back and the page must land green on ?gpu=0 raster; on a
+  // real GPU the bench must pass and GPU mode must stay. Asserts the
+  // guard end-to-end in whichever environment runs the gate (Codex LOW).
+  let guardOk = false, guardBench = null, guardFellBack = false;
+  {
+    const p2 = await browser.newPage();
+    p2.on("console", (m) => {
+      const t = m.text();
+      const mm = t.match(/present-bench ([\d.]+)ms/);
+      if (mm) guardBench = Number(mm[1]);
+      if (t.includes("SOFTWARE-RENDERED")) guardFellBack = true;
+    });
+    await p2.goto("http://127.0.0.1:8080/browser.html?demo=hello&gpu=1");
+    // The fallback path reloads to ?gpu=0 — waitForFunction survives the
+    // navigation and a verdict must land in EITHER mode.
+    await p2
+      .waitForFunction(() => window.__bib && window.__bib.verdict !== "pending", undefined, { timeout: 120000 })
+      .catch(() => {});
+    const p2verdict = await p2.evaluate(() => window.__bib && window.__bib.verdict).catch(() => "(gone)");
+    const rasterLanded = await p2
+      .evaluate(() => new URLSearchParams(location.search).get("gpu") === "0")
+      .catch(() => false);
+    guardOk =
+      p2verdict === "PASS" &&
+      guardBench !== null &&
+      (guardBench > 12 ? guardFellBack && rasterLanded : !guardFellBack && !rasterLanded);
+    console.log(
+      `guard: bench=${guardBench}ms fellBack=${guardFellBack} rasterLanded=${rasterLanded} ` +
+      `verdict=${p2verdict} guardOk=${guardOk}`
+    );
+    await p2.close().catch(() => {});
+  }
+
   console.log(
     `__bib: verdict=${bib.verdict} exactBlue=${bib.exactBlue} redGlyph=${bib.redGlyph} ` +
     `ticks=${bib.ticks} | gpuOn=${gpuOn} fellBack=${fellBack} ` +
@@ -96,7 +131,7 @@ try {
     .locator("#screen")
     .screenshot({ path: "build/gate8-gpu.png" })
     .catch(() => {});
-  if (bib.verdict === "PASS" && gpuOn && !fellBack && probe1.ok && g4Ok) {
+  if (bib.verdict === "PASS" && gpuOn && !fellBack && probe1.ok && g4Ok && guardOk) {
     console.log("GATE8-GPU: PASS");
   } else {
     console.log("GATE8-GPU: FAIL");
