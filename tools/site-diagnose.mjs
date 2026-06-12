@@ -67,20 +67,21 @@ for (const target of sites) {
   for (let t = 0; t < 25 && !aborted; t++) await page.waitForTimeout(1000);
 
   const stats = await page
-    .evaluate(() => {
-      // Render ONCE and sample the framebuffer directly — __bib.probe()
-      // forces a full engine repaint per call, which is minutes of work
-      // for a grid on a heavy page.
-      const ptr = window.Module._bib_render(1);
-      if (!ptr) return null;
-      const w = window.Module._bib_frame_width();
-      const heap = window.Module.HEAPU8;
+    .evaluate(async () => {
+      // Render ONCE and sample the COPIED frame — __bib.probe() forces a
+      // full engine repaint per call, which is minutes of work for a grid
+      // on a heavy page. W-B1: pixels arrive via the async readback push
+      // (the engine thread owns the framebuffer now).
+      const frame = await window.__bib.readback();
+      if (!frame) return null;
+      const w = frame.w;
+      const heap = frame.data;
       let nonWhite = 0,
         samples = 0;
       const colors = new Set();
       for (let y = 2; y < 600; y += 6)
         for (let x = 2; x < 800; x += 10) {
-          const i = ptr + (y * w + x) * 4;
+          const i = (y * w + x) * 4;
           const r = heap[i], g = heap[i + 1], b = heap[i + 2];
           samples++;
           if (!(r === 255 && g === 255 && b === 255)) nonWhite++;

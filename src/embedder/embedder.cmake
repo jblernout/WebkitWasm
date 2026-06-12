@@ -31,9 +31,24 @@ target_include_directories(BibEmbedder SYSTEM PRIVATE
 target_link_libraries(BibEmbedder PRIVATE WebCore Skia::Skia)
 
 # Same engine-sized stack/heap as the Phase 1 jsc shell
-# (Source/JavaScriptCore/shell/CMakeLists.txt). NO -pthread: the entire
-# library stack (WTF/JSC/WebCore/sysroot) is compiled single-threaded.
+# (Source/JavaScriptCore/shell/CMakeLists.txt).
+#
+# W-B1: the engine runs on a dedicated pthread (-sPROXY_TO_PTHREAD moves
+# main() off the browser main thread). The whole tree compiles -pthread
+# (CMAKE_C/CXX_FLAGS at configure; sysroot deps were always -pthread).
+# W-B0 spike (2497a89) proved: SOCKFS sockets proxy to MAIN scope (wisp
+# dispatcher unchanged), 4GB growable shared memory instantiates, abort
+# stacks stay symbolized. POOL_SIZE=4: 1 taken by proxied main + headroom
+# for W-C real workers / future curl threads.
 target_link_options(BibEmbedder PRIVATE
+    "SHELL:-pthread"
+    "SHELL:-sPROXY_TO_PTHREAD"
+    "SHELL:-sPTHREAD_POOL_SIZE=4"
+    # Worker-scope Module hooks (pump, wasm2js, injection text): the engine
+    # pthread's EM_ASM blocks read the WORKER's Module, which inherits
+    # nothing from the page (W-B0). NOTE: cmake does not track pre-js edits —
+    # touch main.cpp to force a relink after changing it.
+    "SHELL:--pre-js ${BIB_EMBEDDER_DIR}/../../web/engine-pre.js"
     "SHELL:-sSTACK_SIZE=8MB"
     "SHELL:-sINITIAL_MEMORY=256MB"
     "SHELL:-sALLOW_MEMORY_GROWTH=1"

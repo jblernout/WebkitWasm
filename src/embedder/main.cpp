@@ -61,7 +61,10 @@
 #include <JavaScriptCore/InitializeThreading.h>
 #include <JavaScriptCore/JSCInlines.h>
 #include <JavaScriptCore/JSFunction.h>
+#include <atomic>
 #include <emscripten.h>
+#include <emscripten/proxying.h>
+#include <emscripten/threading.h>
 #include <pal/SessionID.h>
 #include <wtf/MainThread.h>
 #include <wtf/MonotonicTime.h>
@@ -341,17 +344,60 @@ static OptionSet<WebCore::PlatformEvent::Modifier> modifiersFromBits(int bits)
     return modifiers;
 }
 
+// ---------------------------------------------------------------------------
+// W-B1 cross-thread entry marshaling. Under -sPROXY_TO_PTHREAD, main() (and
+// all of WebCore/JSC) runs on a dedicated pthread, but the host page still
+// calls the bib_* exports from the BROWSER MAIN THREAD — a direct call there
+// would race the engine. Every export below self-proxies: called on the
+// wrong thread, it queues itself onto the engine thread via the emscripten
+// system proxying queue (processed whenever the engine pthread returns to
+// its event loop — which the event-driven pump guarantees) and returns.
+// High-frequency cadence entries (tick/pump) collapse bursts through an
+// atomic pending flag so a pegged engine never accumulates a task backlog.
+
+static pthread_t g_engineThread;
+static std::atomic<bool> g_engineThreadReady { false };
+
+static bool bibOnEngineThread()
+{
+    return g_engineThreadReady.load(std::memory_order_acquire)
+        && pthread_equal(pthread_self(), g_engineThread);
+}
+
+// Queue a task onto the engine thread; drops silently pre-main() (matches
+// the !g_engine early-outs every entry point already has).
+static bool bibProxyToEngine(void (*task)(void*), void* arg)
+{
+    if (!g_engineThreadReady.load(std::memory_order_acquire))
+        return false;
+    return emscripten_proxy_async(emscripten_proxy_get_system_queue(), g_engineThread, task, arg);
+}
+
 extern "C" {
 
 EMSCRIPTEN_KEEPALIVE int bib_frame_width() { return kWidth; }
 EMSCRIPTEN_KEEPALIVE int bib_frame_height() { return kHeight; }
 
+// W-B1 push-model rendering: defined after bib_render (which it drives).
+static void bibPushFrameIfDirty();
+
 // One non-blocking engine-RunLoop iteration: fires due WebCore timers and
 // dispatched main-thread functions (DOM timers, RenderingUpdateScheduler's
 // fallback timer, caret blink). Drive from requestAnimationFrame.
 // (RunMode::Iterate never sleeps — RunLoopGeneric's Drain-only waitUntil.)
+// W-B1: the host rAF still calls this for CADENCE, but the body runs on the
+// engine thread; the frame (if any) is PUSHED back via Module.bibBlit.
+static std::atomic<bool> g_tickQueued { false };
+static void bibRunTick(void*);
 EMSCRIPTEN_KEEPALIVE void bib_tick()
 {
+    if (!bibOnEngineThread()) {
+        if (g_tickQueued.exchange(true, std::memory_order_acq_rel))
+            return; // one tick already pending — collapse the burst
+        if (!bibProxyToEngine(bibRunTick, nullptr))
+            g_tickQueued.store(false, std::memory_order_release);
+        return;
+    }
     WTF::RunLoop::cycle();
     // Drive WebCore's "update the rendering" steps. This port has no
     // DisplayRefreshMonitor, so nothing else ever runs them — guest
@@ -368,25 +414,62 @@ EMSCRIPTEN_KEEPALIVE void bib_tick()
         g_engine->page->updateRendering();
         g_engine->page->finalizeRenderingUpdate({ });
     }
+    bibPushFrameIfDirty();
+}
+static void bibRunTick(void*)
+{
+    g_tickQueued.store(false, std::memory_order_release);
+    bib_tick();
 }
 
 // One engine-RunLoop iteration WITHOUT the rendering-update steps. The
-// host's wake-up plumbing (Module.bibWakeUp -> macrotask, Module.bibArmTimer
-// -> setTimeout) calls this, so engine work runs at event-loop rate while
-// rendering stays on bib_tick's rAF cadence.
+// wake-up plumbing (Module.bibWakeUp -> macrotask, Module.bibArmTimer ->
+// setTimeout — WORKER-scope under W-B1, see web/engine-pre.js) calls this,
+// so engine work runs at event-loop rate while rendering stays on
+// bib_tick's rAF cadence.
+static std::atomic<bool> g_pumpQueued { false };
+static void bibRunPump(void*);
 EMSCRIPTEN_KEEPALIVE void bib_pump()
 {
+    if (!bibOnEngineThread()) {
+        if (g_pumpQueued.exchange(true, std::memory_order_acq_rel))
+            return;
+        if (!bibProxyToEngine(bibRunPump, nullptr))
+            g_pumpQueued.store(false, std::memory_order_release);
+        return;
+    }
     WTF::RunLoop::cycle();
+}
+static void bibRunPump(void*)
+{
+    g_pumpQueued.store(false, std::memory_order_release);
+    bib_pump();
 }
 
 // Socket-data poke: one curl multi pass right now (the wisp shim calls this
 // when WebSocket bytes arrive — SOCKFS can't signal curl), then a RunLoop
 // cycle so completions dispatched via callOnMainThread run immediately
-// instead of waiting for the next wake-up.
+// instead of waiting for the next wake-up. The wisp dispatcher lives on the
+// browser main thread (W-B0: sockets proxy there), so this entry is ALWAYS
+// cross-thread in browser mode.
+static std::atomic<bool> g_netPumpQueued { false };
+static void bibRunNetPump(void*);
 EMSCRIPTEN_KEEPALIVE void bib_pump_network()
 {
+    if (!bibOnEngineThread()) {
+        if (g_netPumpQueued.exchange(true, std::memory_order_acq_rel))
+            return;
+        if (!bibProxyToEngine(bibRunNetPump, nullptr))
+            g_netPumpQueued.store(false, std::memory_order_release);
+        return;
+    }
     WebCore::CurlContext::singleton().scheduler().hostPump();
     WTF::RunLoop::cycle();
+}
+static void bibRunNetPump(void*)
+{
+    g_netPumpQueued.store(false, std::memory_order_release);
+    bib_pump_network();
 }
 
 // The region bib_render last repainted, as {x, y, w, h} for the host's
@@ -405,6 +488,10 @@ EMSCRIPTEN_KEEPALIVE const int* bib_dirty_box() { return g_dirtyBox; }
 //          sample anywhere in the buffer, first use).
 EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
 {
+    // W-B1: engine-thread-only (driven by bib_tick's push; the host no
+    // longer pulls frames). A stray main-thread caller gets nullptr.
+    if (!bibOnEngineThread())
+        return nullptr;
     if (!g_engine)
         return nullptr;
     if (!force && !BIB::g_frameDirty && BIB::g_uploadRect.isEmpty())
@@ -482,12 +569,50 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
     return g_blitPixels;
 }
 
+// W-B1 frame push: render (dirty-rect or forced-first), pack the dirty box
+// into a tight malloc'd copy (decoupled from g_blitPixels reuse — the main
+// thread consumes asynchronously), and hand it to the page. The receiving
+// EM_ASM runs on the browser main thread in module scope: it copies the
+// bytes OUT of the shared heap (ImageData rejects SAB-backed views),
+// frees the transfer buffer (dlmalloc is thread-safe under -pthread), and
+// calls Module.bibBlit. growMemViews() first — views go stale after a
+// cross-thread memory grow (W-B0 finding).
+static void bibPushFrameIfDirty()
+{
+    static bool firstFramePushed = false;
+    const uint8_t* pixels = bib_render(firstFramePushed ? 0 : 1);
+    if (!pixels)
+        return;
+    firstFramePushed = true;
+    const int x = g_dirtyBox[0], y = g_dirtyBox[1], w = g_dirtyBox[2], h = g_dirtyBox[3];
+    if (w <= 0 || h <= 0)
+        return;
+    uint8_t* copy = static_cast<uint8_t*>(malloc(static_cast<size_t>(w) * h * 4));
+    if (!copy)
+        return;
+    for (int row = 0; row < h; ++row) {
+        memcpy(copy + static_cast<size_t>(row) * w * 4,
+            pixels + (static_cast<size_t>(y + row) * kWidth + x) * 4,
+            static_cast<size_t>(w) * 4);
+    }
+    MAIN_THREAD_ASYNC_EM_ASM({
+        if (typeof growMemViews === "function")
+            growMemViews();
+        var bytes = HEAPU8.slice($0, $0 + $3 * $4 * 4);
+        _bib_wasm_free($0);
+        if (Module.bibBlit)
+            Module.bibBlit(bytes, $1, $2, $3, $4);
+    }, copy, x, y, w, h);
+}
+
 // Probe/gate path ONLY (G3, decision-005): force a repaint and return CPU
 // pixels in BOTH modes. CPU mode is bib_render(1) verbatim; GPU mode adds a
 // full-frame Ganesh readback into g_blitPixels — a deliberate GPU sync that
 // must never run per-frame (the render loop uses bib_render).
 EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render_readback()
 {
+    if (!bibOnEngineThread())
+        return nullptr; // W-B1: probes use bib_request_readback instead
     const uint8_t* ptr = bib_render(1);
     if (!g_gpu)
         return ptr;
@@ -504,10 +629,69 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render_readback()
     return g_blitPixels;
 }
 
-// --- Input forwarding (canvas events -> WebCore EventHandler) ---
+// W-B1 async probe readback: the page cannot pull pixels synchronously
+// anymore (a blocking main->engine call risks deadlock against the
+// engine's proxied syscalls). The page requests; the engine renders and
+// pushes the FULL frame to Module.bibReadbackReady as a copied-out
+// Uint8Array. Used by __bib.probe / gate harnesses.
+static void bibRunReadback(void*)
+{
+    const uint8_t* pixels = bib_render_readback();
+    uint8_t* copy = nullptr;
+    const size_t bytes = static_cast<size_t>(kWidth) * kHeight * 4;
+    if (pixels) {
+        copy = static_cast<uint8_t*>(malloc(bytes));
+        if (copy)
+            memcpy(copy, pixels, bytes);
+    }
+    MAIN_THREAD_ASYNC_EM_ASM({
+        var data = null;
+        if ($0) {
+            if (typeof growMemViews === "function")
+                growMemViews();
+            data = HEAPU8.slice($0, $0 + $1);
+            _bib_wasm_free($0);
+        }
+        if (Module.bibReadbackReady)
+            Module.bibReadbackReady(data, $2, $3);
+    }, copy, bytes, kWidth, kHeight);
+}
+// Collapsed like bib_tick: harness predicates poll probe() every ~100ms —
+// while the engine is pegged (Discord boot) the requests must not pile up
+// as queued forced repaints. One pending readback serves every waiter
+// (bibReadbackReady resolves them all with the same frame).
+static std::atomic<bool> g_readbackQueued { false };
+static void bibRunReadbackCollapsed(void*)
+{
+    g_readbackQueued.store(false, std::memory_order_release);
+    bibRunReadback(nullptr);
+}
+EMSCRIPTEN_KEEPALIVE void bib_request_readback()
+{
+    if (!bibOnEngineThread()) {
+        if (g_readbackQueued.exchange(true, std::memory_order_acq_rel))
+            return;
+        if (!bibProxyToEngine(bibRunReadbackCollapsed, nullptr))
+            g_readbackQueued.store(false, std::memory_order_release);
+        return;
+    }
+    bibRunReadback(nullptr);
+}
 
+// --- Input forwarding (canvas events -> WebCore EventHandler) ---
+// W-B1: each entry self-proxies with a heap-copied argument pack; events
+// run on the engine thread in arrival order (single FIFO proxy queue).
+
+struct BibMouseMoveTask { double x; double y; int mods; };
+static void bibRunMouseMove(void*);
 EMSCRIPTEN_KEEPALIVE void bib_mouse_move(double x, double y, int modifierBits)
 {
+    if (!bibOnEngineThread()) {
+        auto* task = new BibMouseMoveTask { x, y, modifierBits };
+        if (!bibProxyToEngine(bibRunMouseMove, task))
+            delete task; // pre-main: drop, matches !g_engine
+        return;
+    }
     if (!g_engine)
         return;
     WebCore::PlatformMouseEvent event({ x, y }, { x, y }, WebCore::MouseButton::None,
@@ -515,9 +699,23 @@ EMSCRIPTEN_KEEPALIVE void bib_mouse_move(double x, double y, int modifierBits)
         MonotonicTime::now(), 0, WebCore::SyntheticClickType::NoTap);
     g_engine->mainFrame->eventHandler().mouseMoved(event);
 }
+static void bibRunMouseMove(void* p)
+{
+    auto* t = static_cast<BibMouseMoveTask*>(p);
+    bib_mouse_move(t->x, t->y, t->mods);
+    delete t;
+}
 
+struct BibMouseButtonTask { int down; int jsButton; double x; double y; int clicks; int mods; };
+static void bibRunMouseButton(void*);
 EMSCRIPTEN_KEEPALIVE void bib_mouse_button(int down, int jsButton, double x, double y, int clickCount, int modifierBits)
 {
+    if (!bibOnEngineThread()) {
+        auto* task = new BibMouseButtonTask { down, jsButton, x, y, clickCount, modifierBits };
+        if (!bibProxyToEngine(bibRunMouseButton, task))
+            delete task;
+        return;
+    }
     if (!g_engine)
         return;
     auto button = WebCore::MouseButton::Other;
@@ -536,9 +734,23 @@ EMSCRIPTEN_KEEPALIVE void bib_mouse_button(int down, int jsButton, double x, dou
     else
         g_engine->mainFrame->eventHandler().handleMouseReleaseEvent(event);
 }
+static void bibRunMouseButton(void* p)
+{
+    auto* t = static_cast<BibMouseButtonTask*>(p);
+    bib_mouse_button(t->down, t->jsButton, t->x, t->y, t->clicks, t->mods);
+    delete t;
+}
 
+struct BibWheelTask { double x; double y; double dx; double dy; int mods; };
+static void bibRunWheel(void*);
 EMSCRIPTEN_KEEPALIVE void bib_wheel(double x, double y, double deltaX, double deltaY, int modifierBits)
 {
+    if (!bibOnEngineThread()) {
+        auto* task = new BibWheelTask { x, y, deltaX, deltaY, modifierBits };
+        if (!bibProxyToEngine(bibRunWheel, task))
+            delete task;
+        return;
+    }
     if (!g_engine)
         return;
     auto modifiers = modifiersFromBits(modifierBits);
@@ -553,10 +765,21 @@ EMSCRIPTEN_KEEPALIVE void bib_wheel(double x, double y, double deltaX, double de
     g_engine->mainFrame->eventHandler().handleWheelEvent(event,
         { WebCore::WheelEventProcessingSteps::SynchronousScrolling, WebCore::WheelEventProcessingSteps::BlockingDOMEventDispatch });
 }
+static void bibRunWheel(void* p)
+{
+    auto* t = static_cast<BibWheelTask*>(p);
+    bib_wheel(t->x, t->y, t->dx, t->dy, t->mods);
+    delete t;
+}
 
 // Diagnostics: dump script/scroll state to stdout (host console).
+static void bibRunDiag(void*);
 EMSCRIPTEN_KEEPALIVE void bib_diag()
 {
+    if (!bibOnEngineThread()) {
+        bibProxyToEngine(bibRunDiag, nullptr);
+        return;
+    }
     if (!g_engine)
         return;
     auto& frame = *g_engine->mainFrame;
@@ -577,27 +800,53 @@ EMSCRIPTEN_KEEPALIVE void bib_diag()
     auto result = frame.script().executeScriptIgnoringException("6*7"_s, JSC::SourceTaintedOrigin::Untainted);
     printf("DIAG: executeScript(6*7) isNumber=%d value=%d\n", result && result.isNumber(), result && result.isNumber() ? (int)result.asNumber() : -1);
 }
+static void bibRunDiag(void*) { bib_diag(); }
 
 // Diagnostics: programmatic scroll, bypassing the wheel-event path.
+static void bibRunScrollTo(void*);
 EMSCRIPTEN_KEEPALIVE void bib_scroll_to(int y)
 {
+    if (!bibOnEngineThread()) {
+        bibProxyToEngine(bibRunScrollTo, reinterpret_cast<void*>(static_cast<intptr_t>(y)));
+        return;
+    }
     if (!g_engine)
         return;
     if (RefPtr view = mainFrameView())
         view->setScrollPosition(WebCore::ScrollPosition(0, y));
 }
+static void bibRunScrollTo(void* p) { bib_scroll_to(static_cast<int>(reinterpret_cast<intptr_t>(p))); }
 
 // Diagnostic: run a script string in the guest main world. Output channel
 // is the guest console (wrap probes in console.log(...) — the forwarder
 // puts them on stderr as "BIB: console log: ..."). Returns 0 if the engine
 // is not up. Drives DOM/computed-style probes that are otherwise
 // impossible from the host side.
+// W-B1: proxied cross-thread; the optimistic `1` only means "queued" there
+// (results travel via the guest-console forwarder anyway).
+static void bibRunEval(void*);
 EMSCRIPTEN_KEEPALIVE int bib_eval(const char* source)
 {
+    if (!bibOnEngineThread()) {
+        if (!source)
+            return 0;
+        char* copy = strdup(source);
+        if (!bibProxyToEngine(bibRunEval, copy)) {
+            free(copy);
+            return 0;
+        }
+        return 1;
+    }
     if (!g_engine || !source)
         return 0;
     g_engine->mainFrame->script().executeScriptIgnoringException(String::fromUTF8(source), JSC::SourceTaintedOrigin::Untainted);
     return 1;
+}
+static void bibRunEval(void* p)
+{
+    char* source = static_cast<char*>(p);
+    bib_eval(source);
+    free(source);
 }
 
 // ---------------------------------------------------------------------------
@@ -620,6 +869,13 @@ EMSCRIPTEN_KEEPALIVE char* bib_wasm_alloc(int size)
     // EM_ASM blocks below allocate engine-heap buffers for returned strings;
     // malloc itself is not in the JS export set, KEEPALIVE exports are.
     return static_cast<char*>(malloc(size));
+}
+
+EMSCRIPTEN_KEEPALIVE void bib_wasm_free(char* ptr)
+{
+    // W-B1: the frame-push / readback EM_ASM blocks free their transfer
+    // buffers FROM THE MAIN THREAD — dlmalloc is thread-safe under -pthread.
+    free(ptr);
 }
 
 // The JSC host function and the WTF/JSC-typed helpers below need C++
@@ -703,8 +959,17 @@ extern "C" {
 
 // Phase 4: real navigation. Drives FrameLoader::load -> DocumentLoader ->
 // CachedResourceLoader -> EmbedderLoaderStrategy -> CurlRequest -> Wisp.
+static void bibRunLoadUrl(void*);
 EMSCRIPTEN_KEEPALIVE void bib_load_url(const char* url)
 {
+    if (!bibOnEngineThread()) {
+        if (!url)
+            return;
+        char* copy = strdup(url);
+        if (!bibProxyToEngine(bibRunLoadUrl, copy))
+            free(copy);
+        return;
+    }
     if (!g_engine)
         return;
     WebCore::ResourceRequest request { URL { String::fromUTF8(url) } };
@@ -712,11 +977,35 @@ EMSCRIPTEN_KEEPALIVE void bib_load_url(const char* url)
     printf("EMBEDDER: loading %s\n", url);
     g_engine->mainFrame->loader().load(WTF::move(frameLoadRequest));
 }
+static void bibRunLoadUrl(void* p)
+{
+    char* url = static_cast<char*>(p);
+    bib_load_url(url);
+    free(url);
+}
 
 // type: 0 = RawKeyDown, 1 = KeyUp, 2 = Char. Strings are UTF-8 (use ccall).
 // text is only meaningful for Char events.
+// W-B1: cross-thread returns 1 optimistically — the engine-side handled
+// verdict isn't knowable without a blocking round-trip (deadlock-prone).
+// The host only consumes the return for preventDefault, where over-eager
+// handling is the safe direction.
+struct BibKeyTask { int type; char* key; char* code; char* text; int vk; int repeat; int mods; };
+static void bibRunKey(void*);
 EMSCRIPTEN_KEEPALIVE int bib_key(int type, const char* key, const char* code, const char* text, int windowsVirtualKeyCode, int isAutoRepeat, int modifierBits)
 {
+    if (!bibOnEngineThread()) {
+        auto* task = new BibKeyTask { type, strdup(key ? key : ""), strdup(code ? code : ""),
+            strdup(text ? text : ""), windowsVirtualKeyCode, isAutoRepeat, modifierBits };
+        if (!bibProxyToEngine(bibRunKey, task)) {
+            free(task->key);
+            free(task->code);
+            free(task->text);
+            delete task;
+            return 0;
+        }
+        return 1;
+    }
     if (!g_engine)
         return 0;
     auto eventType = WebCore::PlatformEvent::Type::RawKeyDown;
@@ -731,17 +1020,37 @@ EMSCRIPTEN_KEEPALIVE int bib_key(int type, const char* key, const char* code, co
         modifiersFromBits(modifierBits), MonotonicTime::now());
     return g_engine->mainFrame->eventHandler().keyEvent(event);
 }
+static void bibRunKey(void* p)
+{
+    auto* t = static_cast<BibKeyTask*>(p);
+    bib_key(t->type, t->key, t->code, t->text, t->vk, t->repeat, t->mods);
+    free(t->key);
+    free(t->code);
+    free(t->text);
+    delete t;
+}
 
 } // extern "C"
 
 int main()
 {
+    // W-B1: record the engine thread FIRST — every export's self-proxy
+    // check needs it, and the host page starts calling exports the moment
+    // onEngineReady fires.
+    g_engineThread = pthread_self();
+    g_engineThreadReady.store(true, std::memory_order_release);
+    printf("EMBEDDER: engine thread=%p browser-main=%d\n",
+        reinterpret_cast<void*>(g_engineThread), emscripten_is_main_browser_thread());
     // Verbose libcurl tracing (?curldebug=1 on the host page). Set from C
     // because Module.ENV-based getenv proved unreliable here. MUST happen
     // before installEmbedderStrategies(): the cookie-session setup
     // constructs the CurlContext singleton, which reads DEBUG_CURL exactly
     // once in its constructor.
-    if (EM_ASM_INT({ return Module.bibCurlDebug ? 1 : 0; }))
+    // W-B1: all boot flags live on the PAGE's Module — the engine pthread's
+    // worker Module does not inherit them (W-B0 finding). MAIN_THREAD_EM_ASM
+    // blocks this thread briefly while the main thread answers; safe at
+    // boot, before the page starts driving us.
+    if (MAIN_THREAD_EM_ASM_INT({ return Module.bibCurlDebug ? 1 : 0; }))
         setenv("DEBUG_CURL", "1", 1);
     printf("EMBEDDER: curldebug=%s\n", getenv("DEBUG_CURL") ? "on" : "off");
 
@@ -749,7 +1058,7 @@ int main()
     // strategy refuses analytics/ads/telemetry subresources before they
     // download — CLoop parses every script byte on the main thread, so those
     // bundles are pure boot cost.
-    bool noBlock = EM_ASM_INT({ return Module.bibNoBlock ? 1 : 0; });
+    bool noBlock = MAIN_THREAD_EM_ASM_INT({ return Module.bibNoBlock ? 1 : 0; });
     BIB::setRequestBlocklistEnabled(!noBlock);
     printf("EMBEDDER: request blocklist=%s\n", noBlock ? "off" : "on");
     if (getenv("DEBUG_CURL")) {
@@ -773,31 +1082,25 @@ int main()
     // 13.9ms per setTimeout(0) hop, 93ms for a warm same-origin fetch).
     // The callback fires while the RunLoop lock is held: bibWakeUp must
     // only schedule, never call back into the engine synchronously.
+    // W-B1: this EM_ASM executes in the ENGINE pthread's worker scope —
+    // Module.bibWakeUp there is installed by web/engine-pre.js (worker-local
+    // MessageChannel calling _bib_pump on this same thread), NOT the page's.
     WTF::RunLoop::setWakeUpCallback([] {
         EM_ASM({ if (Module.bibWakeUp) Module.bibWakeUp(); });
     });
 
-    const bool interactive = EM_ASM_INT({ return Module.bibInteractive ? 1 : 0; });
+    const bool interactive = MAIN_THREAD_EM_ASM_INT({ return Module.bibInteractive ? 1 : 0; });
 
     // Skia GPU boot (decision-005 G2, opt-in via Module.bibGPU / ?gpu=1).
-    // Must run before ANY paint: GraphicsContextSkia consults the shared
-    // PlatformDisplay. Browser-only — gate/node mode has no canvas, and
-    // with the flag unset nothing here runs (sharedDisplay stays unset, so
-    // the CPU path is bit-for-bit the pre-G2 binary).
-    if (interactive && EM_ASM_INT({ return Module.bibGPU ? 1 : 0; })) {
-        if (WebCore::initializePlatformDisplayEmscripten("#screen")) {
-            // Force SkiaGLContext creation now; a null GrContext means the
-            // interface/caps stage failed — fall back to CPU raster.
-            auto& display = WebCore::PlatformDisplay::sharedDisplay();
-            g_gpu = display.skiaGLContext() && display.skiaGrContext();
-        }
-        printf("EMBEDDER: gpu=%s\n", g_gpu ? "on" : "REQUESTED-BUT-UNAVAILABLE (cpu fallback)");
-        // The host committed to GPU mode (no 2d context, ignores bib_render
-        // pointers) before the engine could fail — an engine-only fallback
-        // would leave the canvas permanently blank (Codex HIGH, G3). Tell
-        // the host so it can reload with ?gpu=0.
-        if (!g_gpu)
-            EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
+    // W-B1: DISABLED pending W-B2 — the WebGL2 context this path creates
+    // lives on the browser main thread's canvas, which the engine pthread
+    // can no longer drive directly (OffscreenCanvas transfer is the W-B2
+    // work). The host is told to reload in raster mode, same split-brain
+    // protocol as a failed GPU boot (Codex HIGH, G3). G2/G3 engine code is
+    // untouched behind this gate.
+    if (interactive && MAIN_THREAD_EM_ASM_INT({ return Module.bibGPU ? 1 : 0; })) {
+        printf("EMBEDDER: gpu=DISABLED-UNDER-PTHREAD (W-B2 re-enables; cpu fallback)\n");
+        MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
     }
 
     printf("EMBEDDER: init OK\n");
@@ -902,11 +1205,13 @@ int main()
     // JS heap via stringToUTF8 (forced into the runtime by
     // EXPORTED_RUNTIME_METHODS) into a malloc'd UTF-8 buffer.
     char* hostHTML = nullptr;
-    int hostHTMLBytes = EM_ASM_INT({ return Module.bibHTML ? lengthBytesUTF8(Module.bibHTML) + 1 : 0; });
+    int hostHTMLBytes = MAIN_THREAD_EM_ASM_INT({ return Module.bibHTML ? lengthBytesUTF8(Module.bibHTML) + 1 : 0; });
     if (hostHTMLBytes > 0) {
         hostHTML = static_cast<char*>(malloc(hostHTMLBytes));
         if (hostHTML)
-            EM_ASM({ stringToUTF8(Module.bibHTML, $0, $1); }, hostHTML, hostHTMLBytes);
+            // Sync proxy: stringToUTF8 runs on the main thread, writing
+            // through its view into the SHARED heap — visible here on return.
+            MAIN_THREAD_EM_ASM({ stringToUTF8(Module.bibHTML, $0, $1); }, hostHTML, hostHTMLBytes);
         else
             printf("EMBEDDER: bibHTML allocation failed (%d bytes) — using built-in page\n", hostHTMLBytes);
     }
@@ -957,8 +1262,9 @@ int main()
             g_gpu = false;
             // Same split-brain hazard as the boot-init fallback above: the
             // host is in GPU mode with no blit path — engine CPU raster
-            // would never reach the screen (Codex HIGH, G3).
-            EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
+            // would never reach the screen (Codex HIGH, G3). (Dead under
+            // W-B1 — g_gpu never sets — kept correct for W-B2.)
+            MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
         }
     }
     if (!g_gpu)
@@ -982,7 +1288,7 @@ int main()
     // re-upload per draw even under GPU. Gated on the SURVIVING g_gpu
     // (after the surface fallback above): texture canvases drawn into a
     // raster window surface would read back on every draw.
-    if (g_gpu && EM_ASM_INT({ return Module.bibCanvasGPU ? 1 : 0; }))
+    if (g_gpu && MAIN_THREAD_EM_ASM_INT({ return Module.bibCanvasGPU ? 1 : 0; }))
         g_engine->page->settings().setCanvasUsesAcceleratedDrawing(true);
 
     if (!paintFrame()) {
@@ -995,7 +1301,7 @@ int main()
         // Browser mode: hand control to the host page's rAF loop. The unwind
         // skips the rest of main and keeps the runtime (and g_engine) alive.
         printf("EMBEDDER: interactive — runtime stays alive\n");
-        EM_ASM({ if (Module.onEngineReady) Module.onEngineReady(); });
+        MAIN_THREAD_ASYNC_EM_ASM({ if (Module.onEngineReady) Module.onEngineReady(); });
         emscripten_exit_with_live_runtime();
     }
 

@@ -26,8 +26,8 @@ await page.waitForFunction(() => window.__bib && window.__bib.ready, {
 });
 // Wait for the boot page to be replaced (hello blue div gone).
 await page.waitForFunction(
-  () => {
-    const p = window.__bib.probe(50, 126);
+  async () => {
+    const p = await window.__bib.probe(50, 126);
     return p && !(p[0] === 0x00 && p[1] === 0x66 && p[2] === 0xcc);
   },
   { timeout: 90000 }
@@ -36,9 +36,10 @@ await page.waitForFunction(
 // checks are async (chained fetches through curl/Wisp, one with a 302).
 try {
   await page.waitForFunction(
-    () => {
+    async () => {
       const gray = (p) => p && p[0] === 0x77 && p[1] === 0x77 && p[2] === 0x77;
-      return [52, 152, 252, 352].every((x) => !gray(window.__bib.probe(x, 35)));
+      const ps = await Promise.all([52, 152, 252, 352].map((x) => window.__bib.probe(x, 35)));
+      return ps.every((p) => !gray(p));
     },
     { timeout: 30000 }
   );

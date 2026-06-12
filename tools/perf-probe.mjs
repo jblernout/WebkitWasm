@@ -40,8 +40,8 @@ await page.waitForFunction(() => window.__bib && window.__bib.ready, {
 });
 // Boot page replaced (hello blue div gone) = target navigation committed.
 await page.waitForFunction(
-  () => {
-    const p = window.__bib.probe(50, 126);
+  async () => {
+    const p = await window.__bib.probe(50, 126);
     return p && !(p[0] === 0x00 && p[1] === 0x66 && p[2] === 0xcc);
   },
   { timeout: 90000 }

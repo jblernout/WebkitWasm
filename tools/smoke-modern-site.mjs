@@ -42,8 +42,8 @@ function check(name, ok, detail = "") {
 // blue div sits at (50,126); the fetched site replaces it.
 try {
   await page.waitForFunction(
-    () => {
-      const p = window.__bib.probe(50, 126);
+    async () => {
+      const p = await window.__bib.probe(50, 126);
       return p && !(p[0] === 0x00 && p[1] === 0x66 && p[2] === 0xcc);
     },
     { timeout: 90000 }
@@ -54,20 +54,21 @@ try {
 // Let subresources (CSS) land and restyle.
 await page.waitForTimeout(15000);
 
-const sampled = await page.evaluate(() => {
-  // Render ONCE and sample the framebuffer directly — __bib.probe()
-  // forces a full engine repaint per call, which is minutes of work for
-  // a 15k-sample grid on an image-heavy page.
-  const ptr = window.Module._bib_render(1);
-  if (!ptr) return { nonWhite: 0, samples: 0, distinctColors: 0 };
-  const w = window.Module._bib_frame_width();
-  const heap = window.Module.HEAPU8;
+const sampled = await page.evaluate(async () => {
+  // Render ONCE and sample the COPIED frame — __bib.probe() forces a full
+  // engine repaint per call, which is minutes of work for a 15k-sample
+  // grid on an image-heavy page. W-B1: pixels arrive via the async
+  // readback push (the engine thread owns the framebuffer now).
+  const frame = await window.__bib.readback();
+  if (!frame) return { nonWhite: 0, samples: 0, distinctColors: 0 };
+  const w = frame.w;
+  const heap = frame.data;
   let nonWhite = 0,
     samples = 0;
   const colors = new Set();
   for (let y = 2; y < 600; y += 4)
     for (let x = 2; x < 800; x += 8) {
-      const i = ptr + (y * w + x) * 4;
+      const i = (y * w + x) * 4;
       const r = heap[i], g = heap[i + 1], b = heap[i + 2];
       samples++;
       if (!(r === 255 && g === 255 && b === 255)) nonWhite++;

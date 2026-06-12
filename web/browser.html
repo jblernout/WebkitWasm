@@ -57,12 +57,13 @@
     // (Ganesh renders straight into it). Touching getContext("2d") here
     // would lock the canvas to 2d and the engine's context creation would
     // fail — so in GPU mode there is no 2d context and no blit at all.
-    // Default-on (G3, M2-measured 2.6-3.4×) for humans; automation
-    // (navigator.webdriver) defaults to raster because Playwright's
-    // headless-shell loses WebGL contexts at first composite — GPU probes
-    // opt in with ?gpu=1 + BIB_CHANNEL=chromium. ?gpu=0 forces raster.
+    // W-B1: GPU mode DISABLED BY DEFAULT — the engine runs on a pthread and
+    // cannot drive the page-side WebGL2 context until the OffscreenCanvas
+    // transfer lands (W-B2). ?gpu=1 still opts in; the engine refuses and
+    // bibGpuFallback reloads to ?gpu=0. (Pre-W-B1 default was !webdriver —
+    // G3/M2 measured 2.6-3.4×; restore when W-B2 ships.)
     const gpuParam = new URLSearchParams(location.search).get("gpu");
-    const gpuMode = gpuParam !== null ? gpuParam !== "0" : !navigator.webdriver;
+    const gpuMode = gpuParam !== null ? gpuParam !== "0" : false; // W-B2: restore !webdriver default
     const ctx = gpuMode ? null : canvas.getContext("2d");
 
     // --- Event-driven engine pump (perf) --------------------------------
@@ -236,28 +237,41 @@
       "</body></html>";
 
     // Machine-readable state for the gate tests.
+    // W-B1: the engine renders on its own pthread — the page cannot pull
+    // pixels synchronously. probe() is now ASYNC: it requests a readback
+    // and resolves when the engine pushes the frame to bibReadbackReady.
+    // playwright's evaluate() awaits returned promises, so gate harnesses
+    // calling `__bib.probe(x, y)` keep working unchanged.
+    let readbackWaiters = [];
     const bib = (window.__bib = {
       ready: false, dead: false, ticks: 0, frames: 0, verdict: "pending",
       exactBlue: -1, redGlyph: -1,
       // Force a repaint and read one pixel straight from the engine's
       // unpremultiplied RGBA buffer (NOT canvas getImageData — the canvas
-      // premul round-trip is lossy).
+      // premul round-trip is lossy). Resolves null if the engine is dead
+      // or the readback failed.
       probe(x, y) {
-        if (this.dead) return null;
-        // bib_render_readback is bib_render(1) in CPU mode; in GPU mode it
-        // adds a full-frame Ganesh readback (probe-only GPU sync — G3).
-        const ptr = Module._bib_render_readback();
-        if (!ptr) return null;
-        const w = Module._bib_frame_width();
-        const h = Module._bib_frame_height();
-        x |= 0; y |= 0;
-        if (x < 0 || y < 0 || x >= w || y >= h) return null;
-        const i = ptr + (y * w + x) * 4;
-        const heap = Module.HEAPU8;
-        return [heap[i], heap[i + 1], heap[i + 2]];
+        return this.readback().then((frame) => {
+          if (!frame) return null;
+          x |= 0; y |= 0;
+          if (x < 0 || y < 0 || x >= frame.w || y >= frame.h) return null;
+          const i = (y * frame.w + x) * 4;
+          return [frame.data[i], frame.data[i + 1], frame.data[i + 2]];
+        });
+      },
+      // Full-frame async readback: {data (tightly packed RGBA copy), w, h}
+      // or null. Harnesses that sample many pixels use ONE of these instead
+      // of per-pixel probes (each probe forces a full engine repaint).
+      readback() {
+        if (this.dead) return Promise.resolve(null);
+        return new Promise((resolve) => {
+          readbackWaiters.push(resolve);
+          Module._bib_request_readback();
+        });
       },
       // Diagnostic: run JS in the GUEST page's main world. Results come
       // back via the guest-console forwarder (wrap in console.log).
+      // W-B1: queued to the engine thread; 1 = queued, not yet executed.
       eval(code) {
         return Module.ccall("bib_eval", "number", ["string"], [code]);
       },
@@ -315,51 +329,42 @@
       });
     }
 
+    // W-B1: the rAF loop only provides CADENCE — _bib_tick self-proxies to
+    // the engine thread (bursts collapse engine-side, so a pegged engine
+    // never accumulates a backlog) and the engine PUSHES painted frames
+    // back through Module.bibBlit below. The page never touches engine
+    // pixels synchronously anymore.
     function blitLoop() {
       if (bib.dead) return; // ends the rAF chain after an abort
       flushPendingMove();
       Module._bib_tick();
-      // force only the very first frame; afterwards the engine returns null
-      // for clean frames and we skip the blit entirely.
-      const ptr = Module._bib_render(bib.frames === 0 ? 1 : 0);
-      if (gpuMode) {
-        // GPU present happens engine-side; bib_render returns null by
-        // design. Count the forced first frame so force=1 fires only once,
-        // and judge the hello gate through the G3 readback path (one-time
-        // GPU sync — never per-frame).
-        if (bib.frames === 0) {
-          if (demo === "hello") {
-            const rb = Module._bib_render_readback();
-            if (rb) {
-              const w = Module._bib_frame_width();
-              const h = Module._bib_frame_height();
-              judgeHelloFrame(new Uint8ClampedArray(Module.HEAPU8.buffer, rb, w * h * 4), w, h, 2);
-            }
-          }
-          bib.frames++;
-          blitsEl.textContent = bib.frames;
-        }
-      } else if (ptr) {
-        const w = Module._bib_frame_width();
-        const h = Module._bib_frame_height();
-        // Rebuild the heap view every frame: ALLOW_MEMORY_GROWTH detaches
-        // the ArrayBuffer when the wasm memory grows.
-        const pixels = new Uint8ClampedArray(Module.HEAPU8.buffer, ptr, w * h * 4);
-        // Partial upload: the engine repainted only bib_dirty_box. The
-        // ImageData stays full-frame (zero-copy heap view); putImageData's
-        // dirty-rect args limit the canvas upload to the damaged region.
-        // (View built from HEAPU8.buffer — HEAP32 isn't an exported
-        // runtime view in this build.)
-        const box = new Int32Array(Module.HEAPU8.buffer, Module._bib_dirty_box(), 4);
-        ctx.putImageData(new ImageData(pixels, w, h), 0, 0, box[0], box[1], box[2], box[3]);
-        if (bib.frames === 0 && demo === "hello") judgeHelloFrame(pixels, w, h);
-        bib.frames++;
-        blitsEl.textContent = bib.frames;
-      }
       bib.ticks++;
       // A DOM write per frame is pointless churn; the counter is cosmetic.
       if (!(bib.ticks % 30)) ticksEl.textContent = bib.ticks;
       requestAnimationFrame(blitLoop);
+    }
+
+    // Frame push receiver: `bytes` is a tightly-packed COPY of the dirty
+    // box (the engine copied it out of the shared heap — ImageData rejects
+    // SAB-backed views). The first push is always the forced full frame,
+    // which is when the hello gate judges.
+    function bibBlit(bytes, x, y, w, h) {
+      if (bib.dead || !ctx) return;
+      const pixels = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, w * h * 4);
+      ctx.putImageData(new ImageData(pixels, w, h), x, y);
+      if (bib.frames === 0 && demo === "hello") judgeHelloFrame(pixels, w, h);
+      bib.frames++;
+      blitsEl.textContent = bib.frames;
+    }
+
+    // Readback push receiver (async __bib.probe): resolve every waiter
+    // with the same frame; `data` is null when the engine-side render
+    // failed.
+    function bibReadbackReady(data, w, h) {
+      const waiters = readbackWaiters;
+      readbackWaiters = [];
+      const frame = data ? { data, w, h } : null;
+      for (const resolve of waiters) resolve(frame);
     }
 
     // --- Input forwarding: canvas events -> engine EventHandler ---
@@ -573,9 +578,15 @@
       // the loader strategy reads this once at boot). Strict "1" so
       // ?noblock=0 doesn't silently disable it (Codex).
       bibNoBlock: params.get("noblock") === "1",
-      // Event-driven pump hooks (see plumbing above the wisp section).
+      // Event-driven pump hooks. W-B1: the ENGINE-side pokes now land in
+      // the pthread worker's Module (web/engine-pre.js) — these page-side
+      // copies are kept as a harmless fallback for single-threaded builds.
       bibWakeUp: schedulePump,
       bibArmTimer: armPumpTimer,
+      // W-B1 push receivers: the engine thread pushes painted frames and
+      // probe readbacks to the page (it cannot be pulled synchronously).
+      bibBlit,
+      bibReadbackReady,
       preRun: [function () {
         // fontconfig's compiled-in cache dir must exist in MEMFS.
         Module.FS.mkdirTree("/var/cache/fontconfig");
