@@ -233,6 +233,87 @@
       }, 500);
     }
 
+    // --- Media bridge (M-A, audio-only, ?media=1) -------------------------
+    // The engine's BibMediaPlayer mirrors guest <audio> elements to host
+    // Audio() elements living HERE: host does fetch + decode + clock,
+    // engine does DOM semantics. NOTE the flagged wisp exception: these
+    // elements fetch media URLs directly from the host browser.
+    // Event/op codes mirror src/embedder/BibMediaPlayer.cpp — keep in sync.
+    const mediaEnabled = params.get("media") === "1";
+    const mediaPlayers = new Map();
+    const bibMediaCanPlay = (type) => {
+      try {
+        const answer = new Audio().canPlayType(type);
+        return answer === "probably" ? 2 : answer === "maybe" ? 1 : 0;
+      } catch {
+        return 0;
+      }
+    };
+    const bibMediaCreate = (id) => {
+      const el = new Audio();
+      el.preload = "auto";
+      const send = (code, a = 0, b = 0) => {
+        try {
+          if (window.Module && Module._bib_media_event)
+            Module._bib_media_event(id, code, a, b);
+        } catch {}
+      };
+      el.addEventListener("loadedmetadata", () => send(1, el.duration));
+      el.addEventListener("canplay", () => send(2));
+      el.addEventListener("canplaythrough", () => send(3));
+      el.addEventListener("playing", () => send(4));
+      el.addEventListener("pause", () => send(5));
+      el.addEventListener("timeupdate", () => send(6, el.currentTime));
+      el.addEventListener("ended", () => send(7, el.currentTime));
+      el.addEventListener("error", () => send(8, (el.error && el.error.code) || 2));
+      el.addEventListener("durationchange", () => send(9, el.duration));
+      el.addEventListener("progress", () =>
+        send(10, el.buffered.length ? el.buffered.end(el.buffered.length - 1) : 0));
+      el.addEventListener("seeked", () => send(11, el.currentTime));
+      mediaPlayers.set(id, { el, send });
+    };
+    const bibMediaLoad = (id, url) => {
+      const p = mediaPlayers.get(id);
+      if (!p) return;
+      log("media: load " + url);
+      p.el.src = url;
+      p.el.load();
+    };
+    const bibMediaCtl = (id, op, a) => {
+      const p = mediaPlayers.get(id);
+      if (!p) return;
+      const el = p.el;
+      switch (op) {
+        case 1:
+          // Autoplay policy applies to the HOST element; guest clicks land
+          // on our canvas, so a user gesture usually exists. A rejection is
+          // surfaced as MediaError.code 2 (network) — closest spec fit the
+          // engine can map without a play-promise channel.
+          el.play().catch((e) => {
+            log("media: play rejected: " + e.name);
+            p.send(8, 2);
+          });
+          break;
+        case 2: el.pause(); break;
+        case 3: try { el.currentTime = a; } catch {} break;
+        case 4: el.volume = Math.min(1, Math.max(0, a)); break;
+        case 5: el.muted = !!a; break;
+        case 6: el.playbackRate = a; break;
+        case 7: el.pause(); el.removeAttribute("src"); el.load(); break;
+      }
+    };
+    const bibMediaDestroy = (id) => {
+      const p = mediaPlayers.get(id);
+      if (!p) return;
+      p.el.pause();
+      p.el.removeAttribute("src");
+      p.el.load(); // run the unload algorithm — releases the resource (Codex)
+      mediaPlayers.delete(id);
+    };
+    // Harness/diagnostics: the bridge elements are DETACHED Audio()s —
+    // invisible to querySelectorAll, only reachable through this map.
+    window.__bibMedia = mediaPlayers;
+
     // --- Wisp transport (Phase 4) ---------------------------------------
     // The engine's BSD sockets surface as SOCKFS WebSockets. With
     // Module.websocket.url = 'ws://', SOCKFS builds exactly
@@ -713,6 +794,14 @@
       // engine script loads.
       bibPersist,
       bibSeedState: null,
+      // M-A media bridge (?media=1): engine-side BibMediaPlayer drives
+      // these; bibMedia gates registration at boot.
+      bibMedia: mediaEnabled,
+      bibMediaCanPlay,
+      bibMediaCreate,
+      bibMediaLoad,
+      bibMediaCtl,
+      bibMediaDestroy,
       preRun: [function () {
         // fontconfig's compiled-in cache dir must exist in MEMFS.
         Module.FS.mkdirTree("/var/cache/fontconfig");

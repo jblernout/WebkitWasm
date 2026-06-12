@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<!-- M-A acceptance page: loaded INSIDE the engine (?url=...&media=1).
+     Reports the audio element's lifecycle to the guest console, where
+     tools/media-test.mjs asserts on the forwarded lines. -->
+<html>
+<head><title>media gate</title></head>
+<body style="background:#ffffff; margin:0">
+  <h1 style="margin:16px; font-size:24px">audio bridge gate</h1>
+  <div id="state" style="margin:16px; font-size:18px">init</div>
+  <audio id="a" src="/media/beep.wav"></audio>
+  <script>
+    var el = document.getElementById("a");
+    var stateEl = document.getElementById("state");
+    function report(s) {
+      stateEl.textContent = s;
+      console.log("MEDIAGATE " + s);
+    }
+    report("canPlayType wav=[" + el.canPlayType("audio/wav") + "] mp3=[" + el.canPlayType("audio/mpeg") + "]");
+    ["loadedmetadata", "canplay", "playing", "pause", "ended", "error"].forEach(function (name) {
+      el.addEventListener(name, function () {
+        report("event " + name + " t=" + el.currentTime.toFixed(2) + " d=" + (el.duration || 0).toFixed(2)
+          + (el.error ? " err=" + el.error.code : ""));
+      });
+    });
+    // The harness drives window.mediaGatePlay() via bib_eval once loaded.
+    window.mediaGatePlay = function () {
+      report("play() called");
+      var p = el.play();
+      if (p && p.then)
+        p.then(function () { report("play resolved"); },
+               function (e) { report("play REJECTED " + e.name); });
+    };
+  </script>
+</body>
+</html>

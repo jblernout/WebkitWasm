@@ -17,6 +17,7 @@
 #include "config.h"
 
 #include "BibIDBServer.h"
+#include "BibMediaPlayer.h" // g_mediaEnabled boot flag
 #include "BibPageClients.h"
 #include "BibSocketProvider.h"
 #include "BibStorage.h"
@@ -388,6 +389,12 @@ static bool bibProxyToEngine(void (*task)(void*), void* arg)
     if (!g_engineThreadReady.load(std::memory_order_acquire))
         return false;
     return emscripten_proxy_async(emscripten_proxy_get_system_queue(), g_engineThread, task, arg);
+}
+
+// Shared with BibMediaPlayer.cpp's bib_media_event export (BibMediaPlayer.h).
+namespace BIB {
+bool onEngineThread() { return bibOnEngineThread(); }
+bool proxyToEngine(void (*task)(void*), void* arg) { return bibProxyToEngine(task, arg); }
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,6 +1293,13 @@ int main()
 
     const bool interactive = MAIN_THREAD_EM_ASM_INT({ return Module.bibInteractive ? 1 : 0; });
 
+    // M-A media bridge gate (?media=1): must be set before the first
+    // MediaPlayer construction — buildMediaEnginesVector runs once and
+    // caches for the session.
+    BIB::g_mediaEnabled = interactive && MAIN_THREAD_EM_ASM_INT({ return Module.bibMedia ? 1 : 0; });
+    if (BIB::g_mediaEnabled)
+        printf("EMBEDDER: media bridge ENABLED (audio-only, direct host fetch)\n");
+
     // Skia GPU boot (decision-005 G2, opt-in via Module.bibGPU / ?gpu=1).
     // W-B1: DISABLED pending W-B2 — the WebGL2 context this path creates
     // lives on the browser main thread's canvas, which the engine pthread
@@ -1300,7 +1314,13 @@ int main()
 
     printf("EMBEDDER: init OK\n");
 
-    auto pageConfiguration = WebCore::pageConfigurationWithEmptyClients(std::nullopt, PAL::SessionID::defaultSessionID());
+    // PageIdentifier: the empty-clients recipe (SVGImage) passes nullopt,
+    // but Page::mediaSessionManager() hard-returns null for identifier-less
+    // pages — playInternal() then parks every <audio>/<video> play() forever
+    // ("returning because of interruption", M-A root cause). Real pages
+    // always carry one; generating it also unlocks the default
+    // PlatformMediaSessionManager factory.
+    auto pageConfiguration = WebCore::pageConfigurationWithEmptyClients(WebCore::PageIdentifier::generate(), PAL::SessionID::defaultSessionID());
     pageConfiguration.chromeClient = makeUniqueRef<BIB::BibChromeClient>();
     pageConfiguration.editorClient = makeUniqueRef<BIB::BibEditorClient>();
     // Real cookie jar over the embedder's in-memory NetworkStorageSession.

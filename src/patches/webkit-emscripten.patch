@@ -1709,6 +1709,40 @@ index 1c8e16fe23..479997e2ff 100644
  }
  
  void ImageFrameWorkQueue::stop()
+diff --git a/Source/WebCore/platform/graphics/MediaPlayer.cpp b/Source/WebCore/platform/graphics/MediaPlayer.cpp
+index b5733a1218..bbe18359ba 100644
+--- a/Source/WebCore/platform/graphics/MediaPlayer.cpp
++++ b/Source/WebCore/platform/graphics/MediaPlayer.cpp
+@@ -106,6 +106,14 @@
+ #include "MediaPlayerPrivateHolePunch.h"
+ #endif
+ 
++#if defined(__EMSCRIPTEN__)
++// BrowserInBrowser embedder media engine — implementation lives outside the
++// WebKit tree (src/embedder/BibMediaPlayer.cpp); see registration below.
++namespace BIB {
++void registerBibMediaEngine(WebCore::MediaEngineRegistrar);
++}
++#endif
++
+ #if ENABLE(WIRELESS_PLAYBACK_MEDIA_PLAYER)
+ #include "MediaDeviceRouteController.h"
+ #include "MediaPlayerPrivateWirelessPlayback.h"
+@@ -366,6 +374,14 @@ static void buildMediaEnginesVector() WTF_REQUIRES_LOCK(mediaEngineVectorLock)
+     MediaPlayerPrivateHolePunch::registerMediaEngine(addMediaEngine);
+ #endif
+ 
++#if defined(__EMSCRIPTEN__)
++    // BrowserInBrowser host-bridge engine (audio-only M-A): defined in the
++    // embedder (src/embedder/BibMediaPlayer.cpp, linked into the final
++    // binary); runtime-gated on Module.bibMedia, so without ?media=1 this
++    // registers nothing and the zero-engine A2 behavior is unchanged.
++    BIB::registerBibMediaEngine(addMediaEngine);
++#endif
++
+ #if ENABLE(WIRELESS_PLAYBACK_MEDIA_PLAYER)
+     if (!hasPlatformStrategies() || platformStrategies()->mediaStrategy()->wirelessPlaybackMediaPlayerEnabled()) {
+         if (registerRemoteEngine && !mockMediaDeviceRouteControllerEnabled())
 diff --git a/Source/WebCore/platform/graphics/emscripten/GLStubsEmscripten.cpp b/Source/WebCore/platform/graphics/emscripten/GLStubsEmscripten.cpp
 new file mode 100644
 index 0000000000..539cdf6a24
