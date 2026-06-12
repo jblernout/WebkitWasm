@@ -23,6 +23,13 @@ sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
 ## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~15:30)
 
+**🏁 MILESTONE (user-confirmed, 2026-06-12 ~16:00): live Discord chat
+with a friend INSIDE the engine — login, auth, gateway socket, messaging
+all working end-to-end on the merged W-B1 build.** The login peg that
+defined the last two weeks of work is fully dead. First gaps a real user
+hits from here: no sounds (media M-A), session lost on host reload
+(cookie OPFS), voice calls out of scope (WebRTC).
+
 **W-B1 SHIPPED (task #66, branch wb1-pthread): the engine runs on a
 dedicated pthread and THE acceptance is met — discord.com/login boots
 with the host tab responsive (maxGap 386-460ms, ZERO gaps >500ms over a
