@@ -85,6 +85,7 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 
 namespace BIB {
 void installEmbedderStrategies(); // EmbedderStrategies.cpp
+void setRequestBlocklistEnabled(bool); // EmbedderStrategies.cpp
 Ref<WebCore::StorageSessionProvider> createEmbedderStorageSessionProvider(); // EmbedderStrategies.cpp
 }
 
@@ -743,6 +744,14 @@ int main()
     if (EM_ASM_INT({ return Module.bibCurlDebug ? 1 : 0; }))
         setenv("DEBUG_CURL", "1", 1);
     printf("EMBEDDER: curldebug=%s\n", getenv("DEBUG_CURL") ? "on" : "off");
+
+    // Request blocklist (?noblock=1 on the host page disables it): the loader
+    // strategy refuses analytics/ads/telemetry subresources before they
+    // download — CLoop parses every script byte on the main thread, so those
+    // bundles are pure boot cost.
+    bool noBlock = EM_ASM_INT({ return Module.bibNoBlock ? 1 : 0; });
+    BIB::setRequestBlocklistEnabled(!noBlock);
+    printf("EMBEDDER: request blocklist=%s\n", noBlock ? "off" : "on");
     if (getenv("DEBUG_CURL")) {
         // Constructs the CurlContext singleton NOW (post-setenv) and reports
         // whether the verbose flag actually latched — splits env plumbing

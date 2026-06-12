@@ -48,6 +48,8 @@ for (const target of sites) {
   const url =
     "http://127.0.0.1:8080/browser.html?demo=hello" +
     (process.env.BIB_GPU ? "&gpu=" + process.env.BIB_GPU : "") +
+    (process.env.BIB_NOBLOCK === "1" ? "&noblock=1" : "") +
+    (process.env.BIB_CURLDEBUG === "1" ? "&curldebug=1" : "") +
     "&url=" +
     encodeURIComponent(target);
   await page.goto(url);
@@ -128,6 +130,16 @@ for (const target of sites) {
   if (other.length) {
     console.log(`other stderr/page errors (${other.length}):`);
     for (const l of other.slice(0, 25)) console.log("  " + l);
+  }
+  // BIB_STDERR_FILE=path -> dump the UNCAPPED stderr/console stream there
+  // (the sections above cap; curldebug traces run to thousands of lines).
+  if (process.env.BIB_STDERR_FILE) {
+    const { appendFileSync } = await import("node:fs");
+    appendFileSync(
+      process.env.BIB_STDERR_FILE,
+      `\n=== ${target} ===\n` + errLines.join("\n") + "\n"
+    );
+    console.log(`full stderr dump: ${process.env.BIB_STDERR_FILE} (${errLines.length} lines)`);
   }
   console.log(`screenshot: build/diagnose-${slug}.png`);
   await page.close();

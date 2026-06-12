@@ -28,6 +28,7 @@
 
 #include "BlobRegistry.h"
 #include "BlobRegistryImpl.h"
+#include "CachedResource.h"
 #include "CookieJar.h"
 #include "CookieJarDB.h"
 #include "CurlRequest.h"
@@ -421,6 +422,83 @@ private:
     int m_redirectCount { 0 };
 };
 
+// --- Request blocklist ------------------------------------------------------
+// CLoop parses every byte of script on the main thread, so analytics/ads/
+// telemetry bundles (GTM, adsbygoogle, sentry, segment, ...) are pure boot
+// cost — and several also fail over wisp with curl=35 noise. Refusing them in
+// loadResource() means they never download OR parse. Main resources are
+// exempt (navigations and iframe documents still load), and consent managers
+// (OneTrust/cookielaw) are deliberately NOT listed — sites gate functionality
+// on their callbacks. ?noblock=1 on the host page disables the list.
+static bool g_requestBlocklistEnabled = true;
+
+void setRequestBlocklistEnabled(bool enabled)
+{
+    g_requestBlocklistEnabled = enabled;
+}
+
+static bool isBlocklistedHost(StringView host)
+{
+    static constexpr ASCIILiteral blockedSuffixes[] = {
+        // Google ads + analytics. GTM is a known tradeoff: rare sites wire
+        // functional logic through it, but gtm.js + the tags it injects are
+        // the single biggest parse cost on marketing pages — ?noblock=1 is
+        // the escape hatch.
+        "google-analytics.com"_s,
+        "googletagmanager.com"_s,
+        "googletagservices.com"_s,
+        "googlesyndication.com"_s,
+        "googleadservices.com"_s,
+        "adservice.google.com"_s,
+        "doubleclick.net"_s,
+        // Error/telemetry reporters
+        "sentry.io"_s,
+        "sentry-cdn.com"_s,
+        "bugsnag.com"_s,
+        "nr-data.net"_s,
+        "newrelic.com"_s,
+        "datadoghq-browser-agent.com"_s,
+        "browser-intake-datadoghq.com"_s,
+        "cloudflareinsights.com"_s,
+        // Product analytics
+        "segment.com"_s,
+        "segment.io"_s,
+        "mixpanel.com"_s,
+        "amplitude.com"_s,
+        "hotjar.com"_s,
+        "fullstory.com"_s,
+        "clarity.ms"_s,
+        "quantserve.com"_s,
+        "scorecardresearch.com"_s,
+        "chartbeat.com"_s,
+        "mc.yandex.ru"_s,
+        // Social pixels / ad networks. facebook.net is deliberately absent:
+        // connect.facebook.net also serves the FB Login SDK (FB.login()),
+        // so blocking it breaks "Login with Facebook" (Codex).
+        "analytics.tiktok.com"_s,
+        "static.ads-twitter.com"_s,
+        "analytics.twitter.com"_s,
+        "bat.bing.com"_s,
+        "snap.licdn.com"_s,
+        "px.ads.linkedin.com"_s,
+        "amazon-adsystem.com"_s,
+        "criteo.com"_s,
+        "criteo.net"_s,
+        "taboola.com"_s,
+        "outbrain.com"_s,
+    };
+    // URL hosts are canonicalized to lowercase, so exact suffix matching is
+    // enough; the dot check stops "notsentry.io" from matching "sentry.io".
+    for (auto literal : blockedSuffixes) {
+        StringView blocked { literal };
+        if (host.length() < blocked.length() || !host.endsWith(blocked))
+            continue;
+        if (host.length() == blocked.length() || host[host.length() - blocked.length() - 1] == '.')
+            return true;
+    }
+    return false;
+}
+
 class EmbedderLoaderStrategy final : public LoaderStrategy {
 public:
     void scheduleLoad(ResourceLoader& loader)
@@ -447,6 +525,14 @@ public:
 private:
     void loadResource(LocalFrame& frame, CachedResource& resource, ResourceRequest&& request, const ResourceLoaderOptions& options, CompletionHandler<void(RefPtr<SubresourceLoader>&&)>&& completionHandler) final
     {
+        // Null loader -> CachedResource::failBeforeStarting(): the documented
+        // creation-failure path, so blocked scripts get ordinary error events.
+        if (g_requestBlocklistEnabled && resource.type() != CachedResource::Type::MainResource && isBlocklistedHost(request.url().host())) {
+            WTFLogAlways("BIB: blocked %s (request blocklist; ?noblock=1 to disable)", request.url().string().utf8().data());
+            completionHandler(nullptr);
+            return;
+        }
+
         SubresourceLoader::create(frame, resource, WTF::move(request), options, [this, completionHandler = WTF::move(completionHandler)](RefPtr<SubresourceLoader>&& loader) mutable {
             if (loader)
                 scheduleLoad(*loader);
@@ -486,6 +572,14 @@ private:
         // self-owning curl client — erroring these out made beacon-gated
         // code paths fail and spammed the console on every analytics-bearing
         // site. originalRequestHeaders/CORS are not applied (documented gap).
+        if (g_requestBlocklistEnabled && isBlocklistedHost(request.url().host())) {
+            // Complete as success: beacon callers cannot observe delivery,
+            // and an error here would only trip SDK retry loops.
+            WTFLogAlways("BIB: blocked beacon %s (request blocklist)", request.url().string().utf8().data());
+            if (completionHandler)
+                completionHandler({ }, { });
+            return;
+        }
         BibPingLoad::start(ResourceRequest { request }, WTF::move(completionHandler));
     }
 

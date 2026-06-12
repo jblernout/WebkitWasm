@@ -569,6 +569,10 @@
       // ?curldebug=1 -> libcurl verbose tracing via printErr. Read from C
       // in main() via setenv — Module.ENV-based getenv proved unreliable.
       bibCurlDebug: !!params.get("curldebug"),
+      // ?noblock=1 -> disable the analytics/ads request blocklist (A/B knob;
+      // the loader strategy reads this once at boot). Strict "1" so
+      // ?noblock=0 doesn't silently disable it (Codex).
+      bibNoBlock: params.get("noblock") === "1",
       // Event-driven pump hooks (see plumbing above the wisp section).
       bibWakeUp: schedulePump,
       bibArmTimer: armPumpTimer,
