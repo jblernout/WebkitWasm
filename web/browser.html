@@ -272,11 +272,16 @@
       el.addEventListener("seeked", () => send(11, el.currentTime));
       mediaPlayers.set(id, { el, send });
     };
-    const bibMediaLoad = (id, url) => {
+    // WISP INVARIANT: the engine fetched these bytes itself (guest curl
+    // over wisp, guest cookies); the host element only decodes a Blob —
+    // it never touches the network.
+    const bibMediaLoadBytes = (id, bytes, mime) => {
       const p = mediaPlayers.get(id);
       if (!p) return;
-      log("media: load " + url);
-      p.el.src = url;
+      if (p.url) URL.revokeObjectURL(p.url);
+      p.url = URL.createObjectURL(new Blob([bytes], { type: mime || "application/octet-stream" }));
+      log(`media: ${bytes.length} bytes (${mime}) -> blob`);
+      p.el.src = p.url;
       p.el.load();
     };
     const bibMediaCtl = (id, op, a) => {
@@ -299,7 +304,12 @@
         case 4: el.volume = Math.min(1, Math.max(0, a)); break;
         case 5: el.muted = !!a; break;
         case 6: el.playbackRate = a; break;
-        case 7: el.pause(); el.removeAttribute("src"); el.load(); break;
+        case 7:
+          el.pause();
+          el.removeAttribute("src");
+          el.load();
+          if (p.url) { URL.revokeObjectURL(p.url); p.url = null; }
+          break;
       }
     };
     const bibMediaDestroy = (id) => {
@@ -308,6 +318,7 @@
       p.el.pause();
       p.el.removeAttribute("src");
       p.el.load(); // run the unload algorithm — releases the resource (Codex)
+      if (p.url) URL.revokeObjectURL(p.url);
       mediaPlayers.delete(id);
     };
     // Harness/diagnostics: the bridge elements are DETACHED Audio()s —
@@ -799,7 +810,7 @@
       bibMedia: mediaEnabled,
       bibMediaCanPlay,
       bibMediaCreate,
-      bibMediaLoad,
+      bibMediaLoadBytes,
       bibMediaCtl,
       bibMediaDestroy,
       preRun: [function () {

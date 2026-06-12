@@ -65,7 +65,9 @@
 #include <JavaScriptCore/JSFunction.h>
 #include <atomic>
 #include <emscripten.h>
+#ifdef __EMSCRIPTEN_PTHREADS__
 #include <emscripten/proxying.h>
+#endif
 #include <emscripten/threading.h>
 #include <pal/SessionID.h>
 #include <wtf/JSONValues.h>
@@ -384,11 +386,21 @@ static bool bibOnEngineThread()
 
 // Queue a task onto the engine thread; drops silently pre-main() (matches
 // the !g_engine early-outs every entry point already has).
+// BIB_PTHREAD=OFF build: there is only one thread, so after main() runs
+// every caller IS the engine thread (bibOnEngineThread() true — emscripten
+// stubs pthread_self/pthread_equal) and this path is unreachable; before
+// main() it returns false, matching the pthread build's pre-ready drop.
 static bool bibProxyToEngine(void (*task)(void*), void* arg)
 {
+#ifdef __EMSCRIPTEN_PTHREADS__
     if (!g_engineThreadReady.load(std::memory_order_acquire))
         return false;
     return emscripten_proxy_async(emscripten_proxy_get_system_queue(), g_engineThread, task, arg);
+#else
+    (void)task;
+    (void)arg;
+    return false;
+#endif
 }
 
 // Shared with BibMediaPlayer.cpp's bib_media_event export (BibMediaPlayer.h).
@@ -1298,7 +1310,7 @@ int main()
     // caches for the session.
     BIB::g_mediaEnabled = interactive && MAIN_THREAD_EM_ASM_INT({ return Module.bibMedia ? 1 : 0; });
     if (BIB::g_mediaEnabled)
-        printf("EMBEDDER: media bridge ENABLED (audio-only, direct host fetch)\n");
+        printf("EMBEDDER: media bridge ENABLED (audio-only, wisp-routed fetch)\n");
 
     // Skia GPU boot (decision-005 G2, opt-in via Module.bibGPU / ?gpu=1).
     // W-B1: DISABLED pending W-B2 — the WebGL2 context this path creates

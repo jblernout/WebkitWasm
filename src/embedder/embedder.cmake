@@ -41,10 +41,22 @@ target_link_libraries(BibEmbedder PRIVATE WebCore Skia::Skia)
 # dispatcher unchanged), 4GB growable shared memory instantiates, abort
 # stacks stay symbolized. POOL_SIZE=4: 1 taken by proxied main + headroom
 # for W-C real workers / future curl threads.
+# BIB_PTHREAD=OFF (tools/build-webcore.sh knob): single-threaded engine for
+# no-SAB deployments. The TREE's compile flags must match (the script keeps
+# them in sync — a -pthread-compiled tree links fine either way, but a
+# plain tree cannot link -sPROXY_TO_PTHREAD). The embedder C++ is dual-mode:
+# entries run direct when the caller IS the engine thread, and
+# engine-pre.js's worker hooks self-disable outside workers (browser.html
+# keeps page-side pump fallbacks).
+option(BIB_PTHREAD "Run the engine on a dedicated pthread (needs COOP/COEP + SharedArrayBuffer)" ON)
+if (BIB_PTHREAD)
+    target_link_options(BibEmbedder PRIVATE
+        "SHELL:-pthread"
+        "SHELL:-sPROXY_TO_PTHREAD"
+        "SHELL:-sPTHREAD_POOL_SIZE=4"
+    )
+endif ()
 target_link_options(BibEmbedder PRIVATE
-    "SHELL:-pthread"
-    "SHELL:-sPROXY_TO_PTHREAD"
-    "SHELL:-sPTHREAD_POOL_SIZE=4"
     # Worker-scope Module hooks (pump, wasm2js, injection text): the engine
     # pthread's EM_ASM blocks read the WORKER's Module, which inherits
     # nothing from the page (W-B0). NOTE: cmake does not track pre-js edits —

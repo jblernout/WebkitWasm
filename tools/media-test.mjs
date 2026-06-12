@@ -19,6 +19,7 @@ const browser = await chromium.launch({
 });
 
 const consoleLines = [];
+const hostRequests = [];
 let page;
 
 const fail = async (msg) => {
@@ -41,8 +42,10 @@ const waitConsole = async (pred, timeoutMs) => {
 
 const boot = async (media, label) => {
   consoleLines.length = 0;
+  hostRequests.length = 0;
   page = await browser.newPage();
   page.on("console", (m) => consoleLines.push(m.text()));
+  page.on("request", (r) => hostRequests.push(r.url()));
   await page.goto(pageURL(media));
   await page.waitForFunction(() => window.__bib && window.__bib.ready === true && !window.__bib.dead,
     null, { polling: 250, timeout: 120000 }).catch(() => fail(`${label}: engine never ready`));
@@ -83,6 +86,15 @@ const hostState = await page.evaluate(() => {
 });
 console.log(`MEDIA-TEST: host elements: ${JSON.stringify(hostState)}`);
 if (!hostState.some((a) => a.ended)) await fail("phase 1: no host element reached ended");
+
+// WISP INVARIANT witness: the media bytes must arrive via the ENGINE's
+// wisp-routed fetch (engine logs "-> blob"); the HOST page must never
+// issue a network request for the media URL itself.
+if (!consoleLines.some((l) => l.includes("-> blob")))
+  await fail("phase 1: no blob push — media did not go through the engine fetch");
+const hostLeak = hostRequests.find((u) => u.includes("beep.wav"));
+if (hostLeak) await fail(`phase 1: WISP INVARIANT VIOLATED — host fetched ${hostLeak}`);
+console.log("MEDIA-TEST: wisp invariant held (blob push, zero host media requests)");
 await page.close();
 
 // --- Phase 2: default (no flag) — A2 behavior unchanged ---------------------

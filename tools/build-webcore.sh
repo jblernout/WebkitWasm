@@ -56,19 +56,39 @@ if [ ! -f "$FSROOT/ssl/cacert.pem" ]; then
   echo "CA BUNDLE STAGING: OK ($(du -h "$FSROOT/ssl/cacert.pem" | cut -f1))"
 fi
 
+# BIB_PTHREAD=0: single-threaded engine build for deployments that cannot
+# ship SharedArrayBuffer (no COOP/COEP header control — static/edge hosts).
+# Trade-off: the W-B1 win reverses — heavy pages peg the host tab again.
+# Default ON (the daily-driver mode).
+BIB_PTHREAD="${BIB_PTHREAD:-1}"
+WASM_FLAGS="-msimd128"
+BIB_PTHREAD_CMAKE=OFF
+if [ "$BIB_PTHREAD" = 1 ]; then
+  WASM_FLAGS="-msimd128 -pthread"
+  BIB_PTHREAD_CMAKE=ON
+fi
+
 EMBEDDER_FLAGS=(
   -DEMSCRIPTEN_EMBEDDER_CMAKE="$ROOT/src/embedder/embedder.cmake"
   -DBIB_FONTCONFIG_ETC_DIR="$FSROOT/etc-fonts"
   -DBIB_FONTS_DIR="$FSROOT/fonts"
   -DBIB_CA_BUNDLE="$FSROOT/ssl/cacert.pem"
+  # Threading mode (BIB_PTHREAD=0 -> single-threaded engine for hosts that
+  # cannot serve COOP/COEP, i.e. no SharedArrayBuffer). These live in the
+  # cache-sync list so flipping the env var RECONFIGURES the existing cache
+  # — pre-W-B1 the -pthread flags were only applied by hand, so a fresh
+  # checkout silently built a tree that could not link the pthread embedder.
+  # Flag change => ninja rebuilds the whole tree (~1.5-2h); use a separate
+  # build dir per mode if toggling often.
+  "-DCMAKE_C_FLAGS=$WASM_FLAGS"
+  "-DCMAKE_CXX_FLAGS=$WASM_FLAGS"
+  "-DBIB_PTHREAD=$BIB_PTHREAD_CMAKE"
 )
 
 if [ ! -f "$BUILD/build.ninja" ]; then
   emcmake cmake -S "$TP/WebKit" -B "$BUILD" -GNinja \
     -DPORT=Emscripten \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_C_FLAGS=-msimd128 \
-    -DCMAKE_CXX_FLAGS=-msimd128 \
     -DENABLE_JIT=OFF \
     -DENABLE_C_LOOP=ON \
     -DENABLE_STATIC_JSC=ON \

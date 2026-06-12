@@ -7,12 +7,14 @@
 // the engine thread (W-B1 marshaling) before touching any player state —
 // so all player fields are engine-thread-only, no locks.
 //
-// State model: the host element is the source of truth for the CLOCK
-// (currentTime/duration/buffered, cached here on events at timeupdate
-// cadence); the guest element is the source of truth for INTENT
-// (play/pause/seek/volume, forwarded fire-and-forget). paused() flips
-// optimistically on play()/pause() so HTMLMediaElement's synchronous
-// paused-flag semantics hold; the host's playing/pause events reconcile.
+// State model: the ENGINE fetches the bytes (wisp-routed — see
+// BibMediaResourceClient); the host element is the source of truth for
+// the CLOCK (currentTime/duration/buffered, cached here on events at
+// timeupdate cadence); the guest element is the source of truth for
+// INTENT (play/pause/seek/volume, forwarded fire-and-forget). paused()
+// flips optimistically on play()/pause() so HTMLMediaElement's
+// synchronous paused-flag semantics hold; the host's playing/pause
+// events reconcile.
 
 #include "config.h"
 
@@ -20,8 +22,14 @@
 
 #include "ContentType.h"
 #include "DestinationColorSpace.h"
+#include "FrameLoaderTypes.h" // ShouldContinuePolicyCheck
 #include "MediaPlayerPrivate.h"
+#include "NetworkLoadMetrics.h"
+#include "PlatformMediaResourceLoader.h"
 #include "PlatformTimeRanges.h"
+#include "ResourceRequest.h"
+#include "ResourceResponse.h"
+#include "SharedBuffer.h"
 #include <cmath>
 #include <cstring>
 #include <emscripten.h>
@@ -60,6 +68,29 @@ static HashMap<int, BibMediaPlayer*>& playerRegistry()
     return registry;
 }
 
+// Wisp-preserving media fetch: the ENGINE downloads the resource through
+// the guest's own network stack (MediaPlayer::mediaResourceLoader() ->
+// CachedResourceLoader -> our loader strategy -> curl -> wisp, guest
+// cookies attached), then pushes the COMPLETED bytes to the host, which
+// plays them from a Blob URL. No bytes ever leave the tab outside wisp.
+// Tradeoff (accepted): download-before-play + a size cap — fine for
+// notification sounds/clips; hour-long streams fail like a network error
+// until M-C MSE mirroring. Callbacks land on the default targetDispatcher
+// (the WebCore main thread == the engine pthread) — same thread as the
+// player, no locks.
+class BibMediaResourceClient final : public PlatformMediaResourceClient {
+public:
+    explicit BibMediaResourceClient(BibMediaPlayer&);
+
+private:
+    void responseReceived(PlatformMediaResource&, const ResourceResponse&, CompletionHandler<void(ShouldContinuePolicyCheck)>&&) final;
+    void dataReceived(PlatformMediaResource&, const SharedBuffer&) final;
+    void loadFailed(PlatformMediaResource&, const ResourceError&) final;
+    void loadFinished(PlatformMediaResource&, const NetworkLoadMetrics&) final;
+
+    WeakPtr<BibMediaPlayer> m_player;
+};
+
 // Host canPlayType answers, cached per full content-type string: the query
 // is a SYNC proxy hop to the main thread (bibHTML pattern) and supportsType
 // runs for every <source> candidate.
@@ -95,40 +126,95 @@ public:
         }, m_id);
     }
 
-    ~BibMediaPlayer()
-    {
-        playerRegistry().remove(m_id);
-        MAIN_THREAD_ASYNC_EM_ASM({
-            if (Module.bibMediaDestroy) Module.bibMediaDestroy($0);
-        }, m_id);
-    }
-
     // EXTERNAL_HOLEPUNCH is off in this build, so nothing downcasts on this
     // value — reusing it avoids patching the MediaPlayerType enum.
     constexpr MediaPlayerType mediaPlayerType() const final { return MediaPlayerType::HolePunch; }
 
-    void load(const String& url) final
+    void load(const String& urlString) final
     {
         resetResourceState(); // src change must not bleed prior state (Codex)
         m_networkState = MediaPlayer::NetworkState::Loading;
-        CString utf8 = url.utf8();
-        char* copy = strdup(utf8.data());
-        if (copy) {
-            // Async cross-heap string: freed main-thread-side, the
-            // bibPushFrameIfDirty protocol.
-            MAIN_THREAD_ASYNC_EM_ASM({
-                if (typeof growMemViews === "function") growMemViews();
-                var url = UTF8ToString($1);
-                _bib_wasm_free($1);
-                if (Module.bibMediaLoad) Module.bibMediaLoad($0, url);
-            }, m_id, copy);
-        } else {
-            // No host load was queued — permanent Loading would wedge the
-            // element; fail like an unreachable resource (Codex).
-            m_networkState = MediaPlayer::NetworkState::NetworkError;
+        auto player = m_player.get();
+        URL url { String { urlString } };
+        if (!player || !url.isValid()) {
+            m_networkState = MediaPlayer::NetworkState::FormatError;
+            if (player)
+                player->networkStateChanged();
+            return;
         }
+        // Wisp invariant: fetch through the GUEST network stack (see
+        // BibMediaResourceClient above), not the host element.
+        if (!m_loader)
+            m_loader = player->mediaResourceLoader();
+        ResourceRequest request { WTF::move(url) };
+        request.setAllowCookies(true);
+        m_resource = m_loader->requestResource(WTF::move(request), PlatformMediaResourceLoader::BufferData);
+        if (!m_resource) {
+            m_networkState = MediaPlayer::NetworkState::NetworkError;
+            player->networkStateChanged();
+            return;
+        }
+        m_resource->setClient(adoptRef(*new BibMediaResourceClient(*this)));
+        player->networkStateChanged();
+    }
+
+    // --- BibMediaResourceClient callbacks (engine thread) ---------------
+    void mediaResponseReceived(const ResourceResponse& response)
+    {
+        m_mimeType = response.mimeType();
+        if (response.httpStatusCode() >= 400)
+            m_httpFailed = true; // body may still stream; verdict at finish
+    }
+
+    void mediaDataReceived(const SharedBuffer& buffer)
+    {
+        m_data.append(buffer);
+        m_didProgress = true;
+        if (m_data.size() > kMaxMediaBytes) {
+            // Bounded: the whole file crosses the wasm heap + the JS heap.
+            // Streams/giant files fail like a network error until M-C MSE.
+            shutdownResource();
+            mediaLoadFailed();
+        }
+    }
+
+    void mediaLoadFailed()
+    {
+        m_data.reset();
+        m_networkState = MediaPlayer::NetworkState::NetworkError;
         if (auto player = m_player.get())
             player->networkStateChanged();
+    }
+
+    void mediaLoadFinished()
+    {
+        if (m_httpFailed) {
+            mediaLoadFailed();
+            return;
+        }
+        auto buffer = m_data.takeBufferAsContiguous();
+        size_t size = buffer->size();
+        char* copy = static_cast<char*>(malloc(size ? size : 1));
+        char* mimeCopy = strdup(m_mimeType.utf8().data());
+        if (!copy || !mimeCopy) {
+            free(copy);
+            free(mimeCopy);
+            mediaLoadFailed();
+            return;
+        }
+        memcpy(copy, buffer->span().data(), size);
+        // Cross-heap push (bibPushFrameIfDirty protocol): main thread
+        // copies the bytes OUT of the shared heap (Blob over a SAB view is
+        // rejected, same as ImageData) and frees both allocations.
+        MAIN_THREAD_ASYNC_EM_ASM({
+            if (typeof growMemViews === "function") growMemViews();
+            var bytes = HEAPU8.slice($1, $1 + $2);
+            var mime = UTF8ToString($3);
+            _bib_wasm_free($1);
+            _bib_wasm_free($3);
+            if (typeof Module !== "undefined" && Module && Module.bibMediaLoadBytes)
+                Module.bibMediaLoadBytes($0, bytes, mime);
+        }, m_id, copy, (int)size, mimeCopy);
     }
 #if ENABLE(MEDIA_SOURCE)
     void load(const URL&, const LoadOptions&, MediaSourcePrivateClient&) final { } // M-C
@@ -140,6 +226,15 @@ public:
     {
         resetResourceState();
         ctl(7);
+    }
+
+    ~BibMediaPlayer() override
+    {
+        shutdownResource();
+        playerRegistry().remove(m_id);
+        MAIN_THREAD_ASYNC_EM_ASM({
+            if (Module.bibMediaDestroy) Module.bibMediaDestroy($0);
+        }, m_id);
     }
 
     void play() final
@@ -275,9 +370,25 @@ public:
     }
 
 private:
+    // 64MB: the whole resource transits BOTH heaps (wasm accumulation +
+    // host Blob). Covers sounds/clips/songs; streams are M-C's problem.
+    static constexpr size_t kMaxMediaBytes = 64 * 1024 * 1024;
+
+    void shutdownResource()
+    {
+        if (m_resource) {
+            m_resource->shutdown();
+            m_resource = nullptr;
+        }
+    }
+
     // Per-resource state must not bleed across src changes (Codex).
     void resetResourceState()
     {
+        shutdownResource();
+        m_data.reset();
+        m_mimeType = String();
+        m_httpFailed = false;
         m_networkState = MediaPlayer::NetworkState::Empty;
         m_readyState = MediaPlayer::ReadyState::HaveNothing;
         m_duration = 0;
@@ -311,6 +422,13 @@ private:
     int m_id { 0 };
     static int s_nextID;
 
+    // Wisp-routed fetch state (engine thread only).
+    RefPtr<PlatformMediaResourceLoader> m_loader;
+    RefPtr<PlatformMediaResource> m_resource;
+    SharedBufferBuilder m_data;
+    String m_mimeType;
+    bool m_httpFailed { false };
+
     MediaPlayer::NetworkState m_networkState { MediaPlayer::NetworkState::Empty };
     MediaPlayer::ReadyState m_readyState { MediaPlayer::ReadyState::HaveNothing };
     double m_duration { 0 };
@@ -323,6 +441,36 @@ private:
 };
 
 int BibMediaPlayer::s_nextID = 0;
+
+BibMediaResourceClient::BibMediaResourceClient(BibMediaPlayer& player)
+    : m_player(player)
+{
+}
+
+void BibMediaResourceClient::responseReceived(PlatformMediaResource&, const ResourceResponse& response, CompletionHandler<void(ShouldContinuePolicyCheck)>&& completionHandler)
+{
+    if (auto player = m_player.get())
+        player->mediaResponseReceived(response);
+    completionHandler(ShouldContinuePolicyCheck::Yes);
+}
+
+void BibMediaResourceClient::dataReceived(PlatformMediaResource&, const SharedBuffer& buffer)
+{
+    if (auto player = m_player.get())
+        player->mediaDataReceived(buffer);
+}
+
+void BibMediaResourceClient::loadFailed(PlatformMediaResource&, const ResourceError&)
+{
+    if (auto player = m_player.get())
+        player->mediaLoadFailed();
+}
+
+void BibMediaResourceClient::loadFinished(PlatformMediaResource&, const NetworkLoadMetrics&)
+{
+    if (auto player = m_player.get())
+        player->mediaLoadFinished();
+}
 
 class BibMediaPlayerFactory final : public MediaPlayerFactory {
     WTF_MAKE_TZONE_ALLOCATED_INLINE(BibMediaPlayerFactory);

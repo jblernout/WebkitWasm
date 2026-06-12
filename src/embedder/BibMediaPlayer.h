@@ -14,10 +14,12 @@
 // gating features on canPlayType get untested paths otherwise (scoping doc
 // risk #1).
 //
-// WISP INVARIANT EXCEPTION (flagged, accepted in scoping): the host
-// element fetches the media URL DIRECTLY from the host browser, bypassing
-// wisp and guest cookies. Progressive audio only; MSE mirroring (M-C)
-// keeps the invariant when it lands.
+// WISP INVARIANT HOLDS: the ENGINE fetches the media bytes through the
+// guest network stack (MediaPlayer::mediaResourceLoader -> our loader
+// strategy -> curl -> wisp, guest cookies attached) and pushes the
+// completed buffer to the host, which plays it from a Blob URL. Nothing
+// leaves the tab outside wisp. Tradeoff: download-before-play + 64MB cap
+// (sounds/clips/songs fine; true streaming waits for M-C MSE mirroring).
 
 #pragma once
 
