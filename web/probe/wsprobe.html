@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<!-- In-guest probe for WS-0 fail-fast WebSocket (BibSocketProvider). Before
+     WS-0 any `new WebSocket()` RELEASE_ASSERTed the engine away; now it must
+     behave like a connection to an unreachable server: error event, then
+     close with wasClean=false / code 1006, engine alive throughout. Run:
+     browser.html?url=http://localhost:8080/probe/wsprobe.html -->
+<html>
+<head><meta charset="utf-8"><title>websocket probe</title></head>
+<body>
+<h1>websocket probe</h1>
+<script>
+(function () {
+  var passes = 0, fails = 0, pending = 0, settled = false;
+  function report(name, ok, extra) {
+    if (ok) passes++; else fails++;
+    console.log("WSPROBE: " + name + " " + (ok ? "PASS" : "FAIL") + (extra ? " " + extra : ""));
+  }
+  function verdict() {
+    if (settled || pending > 0) return;
+    settled = true;
+    console.log("WSPROBE-VERDICT: " + (fails === 0 ? "PASS" : "FAIL") +
+      " (" + passes + " pass, " + fails + " fail)");
+  }
+
+  report("global", typeof WebSocket === "function");
+
+  var ws;
+  try {
+    // The construction itself was the engine-killer.
+    ws = new WebSocket("wss://gateway.example.invalid/?v=1");
+    report("construct-survives", true);
+  } catch (e) {
+    report("construct-survives", false, String(e));
+    verdict();
+    return;
+  }
+  report("connecting-state", ws.readyState === WebSocket.CONNECTING,
+    "readyState=" + ws.readyState);
+
+  var sawError = false;
+  pending++;
+  var timer = setTimeout(function () {
+    report("events", false, "timeout: error=" + sawError);
+    pending--; verdict();
+  }, 3000);
+  ws.onerror = function () { sawError = true; };
+  ws.onclose = function (e) {
+    clearTimeout(timer);
+    report("error-before-close", sawError);
+    report("close-unclean-1006", e.wasClean === false && e.code === 1006,
+      "wasClean=" + e.wasClean + " code=" + e.code);
+    report("closed-state", ws.readyState === WebSocket.CLOSED);
+    // Engine must still run script after the failed socket.
+    var alive = 6 * 7;
+    report("engine-alive", alive === 42);
+    pending--; verdict();
+  };
+})();
+</script>
+</body>
+</html>

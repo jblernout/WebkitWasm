@@ -21,49 +21,75 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: Audio gap two-tier plan (scoped, ready)
+## ⟶ NEXT SESSION STARTS HERE: Discord paints + survives; chase the login form
 
-**AUDIO GAP SCOPED 2026-06-11 ~20:30.** `Can't find variable: Audio`
-kills Discord's login because a webpack module runs
-`""!==new Audio().canPlayType("audio/ogg; codecs=opus")` at TOP LEVEL —
-one ReferenceError fails the chunk graph. Tree facts: the Audio legacy
-factory is `Conditional=VIDEO` (HTMLAudioElement.idl:29 — strictly
-compile-time, no runtime flag). ALL media engines are behind USE()
-flags we don't set (MediaPlayer.cpp buildMediaEnginesVector), so
-**ENABLE_VIDEO=ON with ZERO engines is legal**: canPlayType() returns
-"" for everything (MediaPlayer.cpp:1257 — bestMediaEngine null →
-IsNotSupported), load/play fails with spec-honest error events.
-Generic fallbacks exist for the usual link hazards
-(PlatformMediaSessionManager.cpp:57 non-Cocoa create; AudioSession
-base class). Discord's actual usage: notification sounds
-(`new Audio(url); .volume; .play()`) + the canPlayType probe — all
-fine with honest can't-play behavior.
+**TIER A1 SHIPPED 2026-06-11 ~22:20 (commit 7c8f153, task #56 closed).**
+web/media-stub.js through the S-A injection pipe (browser.html
+concatenates it after wasm-polyfill.js into Module.bibWasmPolyfill —
+zero engine changes). It went ONE GLOBAL DEEPER than scoped: after
+Audio was stubbed, Discord's next webpack top-level chunk killer was
+`"requestVideoFrameCallback" in HTMLVideoElement.prototype` — so the
+stub is structured as HTMLMediaElement base + HTMLAudioElement/
+HTMLVideoElement siblings + MediaError + always-empty TimeRanges
+(buffered/played/seekable), honest semantics throughout (canPlayType
+"", play() rejects NotSupportedError, async error event code 4). IDL
+attributes are PROTOTYPE accessors like real bindings (Codex MED —
+`"volume" in HTMLMediaElement.prototype` probes); {once:true} +
+mid-dispatch removal honored; per-load token. Only those two top-level
+prototype probes exist in the whole Discord bundle set; AudioContext
+refs are all guarded (login path safe, voice post-login). Validation:
+node smoke build/media-stub-smoke.mjs 40/40, gate9 PASS, in-guest
+web/probe/audioprobe.html 12/12. **Result: discord.com/login went
+nonWhite=0/8000 → 8000/8000** (dark app shell + brand loading bar);
+the old `NetworkError: Load failed` no longer kills anything. Tier A2
+(ENABLE_VIDEO=ON zero-engine build, OptionsEmscripten.cmake:62) is
+still the "real fix" backlog item — stub self-disables when it lands.
 
-**Tier A1 — media-stub.js (quick win, NO rebuild, do first):** new
-web/media-stub.js defining window.Audio/HTMLAudioElement — own
-add/removeEventListener (no EventTarget ctor dependency),
-canPlayType()=>"" (honest), play()=>Promise.reject(NotSupportedError)
-(matches engine-less WebKit), pause/load no-ops, src/volume/paused/
-muted/loop/currentTime props; early-return if window.Audio exists.
-Host concatenates wasm-polyfill.js + media-stub.js into
-Module.bibWasmPolyfill — the S-A injection pipe is generic, ZERO
-engine changes. Validate: gate9 still green, re-diagnose discord
-login; expect the ReferenceError gone → either paint or the next
-blocker surfaces (the `NetworkError: Load failed` — diagnose then;
-candidates: their canvas_advanced.wasm fetch 404s, science endpoint).
+**WS-0 SHIPPED 2026-06-11 ~22:45 (task #58 phase 1).** Discord then
+died deeper: ANY guest `new WebSocket()` hit
+RELEASE_ASSERT(m_channel) (WebSocket.cpp:302) because
+pageConfigurationWithEmptyClients' EmptySocketProvider returns a null
+channel — login page constructs wss://remote-auth-gateway.discord.gg
+(QR login) and the ENGINE aborted. WebKit ≥2.46 has NO in-WebCore
+channel impl left (moved to the WebKit2 network process);
+createWebSocketChannel is pure virtual — IndexedDB déjà-vu. New
+src/embedder/BibSocketProvider.h: BibFailFastWebSocketChannel —
+connect() logs a console warning then drives didReceiveMessageError +
+didClose(1006, not-clean) SYNCHRONOUSLY (both self-queue via
+queueTaskKeepingObjectAlive inside WebSocket, so events fire
+post-constructor; didClose nulls m_channel making double-fires no-ops).
+Looks exactly like an unreachable server; sites run their reconnect/
+offline paths. ref()/deref() forwarded from RefCounted
+(AbstractRefCounted, WorkerThreadableWebSocketChannel idiom);
+WebTransport same reject as Empty. Wired in main.cpp
+(pageConfiguration.socketProvider). Validation: gate2 PASS, gate9
+PASS, web/probe/wsprobe.html 7/7 (error-before-close, wasClean=false
+code=1006, engine alive), audioprobe 12/12, discord login NO abort —
+their useAuthWebsocket handles the failure gracefully.
 
-**Tier A2 — ENABLE_VIDEO=ON zero-engine build (the real fix):** flip
-OptionsEmscripten.cmake:62 PRIVATE ON. No USE(GSTREAMER/AVFOUNDATION/
-MEDIA_FOUNDATION) → empty engine vector by construction. Expect the
-playbook families: __EMSCRIPTEN__ platform-guard joins, a link-stub
-batch (watch AudioHardwareListener, NowPlaying bits), WebCore-layer
-settings defaults, full WebCore recompile (cmakeconfig.h regen).
-Stub self-disables once the real constructor exists. Bonus: kills the
-whole media-element-presence failure class site-wide (HTMLVideoElement,
-TimeRanges, MediaError globals). OUT of scope: actual playback (needs
-a real engine — future host-bridge epic) and WEB_AUDIO/AudioContext
-(separate flag; Discord's login path guards it, voice needs it
-post-login).
+**Discord login state now:** paints the dark shell + loading bar,
+runs deep (ResizeObserver, PostMessageTransport iframe chatter), no
+crash — but the login FORM doesn't render within the diagnose window.
+Open leads, in order: (1) `NetworkError: Load failed` at :1 still
+appears (non-fatal now) — name the failing fetch via DEBUG_CURL
+tracing (ff6ff82) and see if the form waits on it; (2) the ×10
+`[PostMessageTransport] Protocol error: event data should be an
+Array!` — their iframe messaging may be stuck in a retry loop (check
+what we deliver in MessageEvent.data across frames); (3) maybe just
+CLoop-slow boot — try a longer diagnose window first (cheapest);
+(4) #57: one earlier run aborted in JSC::JSCell::toObjectSlow via
+slow_path_get_property_enumerator (for...in base = non-object/string/
+bigint/symbol cell — internal cell leak or corruption). NOT
+reproduced since (2 clean runs after); if it recurs, patch
+toObjectSlow to dataLog the JSType before the secure cast and rebuild.
+
+**WS-1 (the real WebSocket, task #58 phase 2):** channel over curl's
+native WebSocket API (curl 8.17 in-tree: CURLOPT ws://+wss://,
+curl_ws_send/curl_ws_recv) on the existing curl+OpenSSL+wisp stack —
+TLS in-engine, Origin header controlled, single-threaded RunLoop
+integration like the rest of the curl backend. Needed for the Discord
+gateway post-login and tons of real-time sites. Replaces
+BibFailFastWebSocketChannel only; the provider wiring stays.
 
 **#55 S-A SHIPPED 2026-06-11 ~19:30 — guest WebAssembly polyfill live
 (decision-006 "Phase S-A").** Guest pages now get a working WebAssembly
@@ -125,21 +151,24 @@ loss → raster fallback. Full record: decision-005 "M2 results" + "G3
 results". **Ask the user to re-run MotionMark** (32 was scored BEFORE
 canvas acceleration — expect higher now).
 
-Next, in order (task #56 tracks 1–2):
-1. **Tier A1 media stub** (above) → re-diagnose Discord login → chase
-   the NetworkError if still white. Goal: login page paints.
-2. **Tier A2 ENABLE_VIDEO=ON zero-engine build** once A1 confirms the
-   path (or immediately if stub semantics prove insufficient).
-3. **G4 — in-place context-loss recreate** (no reload: recreate WebGL2
+Next, in order (A1 ✅ 7c8f153, WS-0 ✅ — see NEXT SESSION block):
+1. **Discord login form chase** (leads in the NEXT SESSION block:
+   longer window → DEBUG_CURL the NetworkError fetch →
+   PostMessageTransport data shape → #57 toObjectSlow if it recurs).
+2. **WS-1 real WebSocket over curl-ws** (task #58 phase 2) — Discord
+   gateway needs it post-login regardless.
+3. **Tier A2 ENABLE_VIDEO=ON zero-engine build** (real media elements;
+   stub self-disables) — batch with other build-flag work.
+4. **G4 — in-place context-loss recreate** (no reload: recreate WebGL2
    context + GrDirectContext + surfaces, re-point the GLContext facades —
    they hold the boot handle by value) + full validation sweep (5-site,
    gates, memwatch) on the GPU default. MotionMark ladder on record:
    2-3 → 32 (G2) → **109.87 @ 144fps** (G3, user-run).
-4. **Shim S-B** (only if a real site demands it before then):
+5. **Shim S-B** (only if a real site demands it before then):
    translation cache, Memory/Table shared growth, import/export
    metadata, worker-scope injection, CSP unsafe-eval fallback,
    tree_sitter_vim stack-overflow retry (host Worker / pre-translate).
-5. Backlog unchanged: request blocklist (best real-site JS lever), #32
+6. Backlog unchanged: request blocklist (best real-site JS lever), #32
    guest WebGL (cheap post-G2 — can share the live context), wave-3
    sweeps, Phase 5 chrome, cookie OPFS, HTTP auth, W-B pthreads HOLD.
 

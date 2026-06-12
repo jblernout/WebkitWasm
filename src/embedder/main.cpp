@@ -18,6 +18,7 @@
 
 #include "BibIDBServer.h"
 #include "BibPageClients.h"
+#include "BibSocketProvider.h"
 #include "BibStorage.h"
 #include "CommonAtomStrings.h"
 #include "CookieJar.h"
@@ -812,6 +813,13 @@ int main()
     // (discord.com/login went blank exactly there). WebKitLegacy's
     // InProcessIDBServer recipe, in-memory backing store.
     pageConfiguration.databaseProvider = BIB::BibDatabaseProvider::create();
+    // Fail-fast WebSocket provider (WS-0): the empty-clients SocketProvider
+    // returns a null channel and WebSocket::create RELEASE_ASSERTs on it —
+    // any guest `new WebSocket()` aborted the engine (discord.com/login dies
+    // on its remote-auth gateway socket). This one fails the connection like
+    // an unreachable server (error event + close 1006) instead. WS-1 (real
+    // channel over curl-ws) replaces the channel, not this wiring.
+    pageConfiguration.socketProvider = BIB::BibSocketProvider::create();
 
     // pageConfigurationWithEmptyClients hardcodes SandboxFlags::all() on the
     // main frame (it exists for SVGImage, which must never run script) —
