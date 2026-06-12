@@ -21,7 +21,49 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: G4 or Discord Audio gap (S-A SHIPPED)
+## ⟶ NEXT SESSION STARTS HERE: Audio gap two-tier plan (scoped, ready)
+
+**AUDIO GAP SCOPED 2026-06-11 ~20:30.** `Can't find variable: Audio`
+kills Discord's login because a webpack module runs
+`""!==new Audio().canPlayType("audio/ogg; codecs=opus")` at TOP LEVEL —
+one ReferenceError fails the chunk graph. Tree facts: the Audio legacy
+factory is `Conditional=VIDEO` (HTMLAudioElement.idl:29 — strictly
+compile-time, no runtime flag). ALL media engines are behind USE()
+flags we don't set (MediaPlayer.cpp buildMediaEnginesVector), so
+**ENABLE_VIDEO=ON with ZERO engines is legal**: canPlayType() returns
+"" for everything (MediaPlayer.cpp:1257 — bestMediaEngine null →
+IsNotSupported), load/play fails with spec-honest error events.
+Generic fallbacks exist for the usual link hazards
+(PlatformMediaSessionManager.cpp:57 non-Cocoa create; AudioSession
+base class). Discord's actual usage: notification sounds
+(`new Audio(url); .volume; .play()`) + the canPlayType probe — all
+fine with honest can't-play behavior.
+
+**Tier A1 — media-stub.js (quick win, NO rebuild, do first):** new
+web/media-stub.js defining window.Audio/HTMLAudioElement — own
+add/removeEventListener (no EventTarget ctor dependency),
+canPlayType()=>"" (honest), play()=>Promise.reject(NotSupportedError)
+(matches engine-less WebKit), pause/load no-ops, src/volume/paused/
+muted/loop/currentTime props; early-return if window.Audio exists.
+Host concatenates wasm-polyfill.js + media-stub.js into
+Module.bibWasmPolyfill — the S-A injection pipe is generic, ZERO
+engine changes. Validate: gate9 still green, re-diagnose discord
+login; expect the ReferenceError gone → either paint or the next
+blocker surfaces (the `NetworkError: Load failed` — diagnose then;
+candidates: their canvas_advanced.wasm fetch 404s, science endpoint).
+
+**Tier A2 — ENABLE_VIDEO=ON zero-engine build (the real fix):** flip
+OptionsEmscripten.cmake:62 PRIVATE ON. No USE(GSTREAMER/AVFOUNDATION/
+MEDIA_FOUNDATION) → empty engine vector by construction. Expect the
+playbook families: __EMSCRIPTEN__ platform-guard joins, a link-stub
+batch (watch AudioHardwareListener, NowPlaying bits), WebCore-layer
+settings defaults, full WebCore recompile (cmakeconfig.h regen).
+Stub self-disables once the real constructor exists. Bonus: kills the
+whole media-element-presence failure class site-wide (HTMLVideoElement,
+TimeRanges, MediaError globals). OUT of scope: actual playback (needs
+a real engine — future host-bridge epic) and WEB_AUDIO/AudioContext
+(separate flag; Discord's login path guards it, voice needs it
+post-login).
 
 **#55 S-A SHIPPED 2026-06-11 ~19:30 — guest WebAssembly polyfill live
 (decision-006 "Phase S-A").** Guest pages now get a working WebAssembly
@@ -83,20 +125,21 @@ loss → raster fallback. Full record: decision-005 "M2 results" + "G3
 results". **Ask the user to re-run MotionMark** (32 was scored BEFORE
 canvas acceleration — expect higher now).
 
-Next, pick one:
-1. **Discord Audio gap** (new top blocker post-S-A): `Can't find
-   variable: Audio` — HTMLAudioElement's named constructor needs
-   ENABLE(VIDEO); scope whether a stub constructor / partial enable is
-   sane, plus the remaining login NetworkError. Goal: login page paints.
-2. **G4 — in-place context-loss recreate** (no reload: recreate WebGL2
+Next, in order (task #56 tracks 1–2):
+1. **Tier A1 media stub** (above) → re-diagnose Discord login → chase
+   the NetworkError if still white. Goal: login page paints.
+2. **Tier A2 ENABLE_VIDEO=ON zero-engine build** once A1 confirms the
+   path (or immediately if stub semantics prove insufficient).
+3. **G4 — in-place context-loss recreate** (no reload: recreate WebGL2
    context + GrDirectContext + surfaces, re-point the GLContext facades —
    they hold the boot handle by value) + full validation sweep (5-site,
    gates, memwatch) on the GPU default. MotionMark ladder on record:
    2-3 → 32 (G2) → **109.87 @ 144fps** (G3, user-run).
-3. **Shim S-B** (only if a real site demands it before then):
+4. **Shim S-B** (only if a real site demands it before then):
    translation cache, Memory/Table shared growth, import/export
-   metadata, worker-scope injection, CSP unsafe-eval fallback.
-4. Backlog unchanged: request blocklist (best real-site JS lever), #32
+   metadata, worker-scope injection, CSP unsafe-eval fallback,
+   tree_sitter_vim stack-overflow retry (host Worker / pre-translate).
+5. Backlog unchanged: request blocklist (best real-site JS lever), #32
    guest WebGL (cheap post-G2 — can share the live context), wave-3
    sweeps, Phase 5 chrome, cookie OPFS, HTTP auth, W-B pthreads HOLD.
 
