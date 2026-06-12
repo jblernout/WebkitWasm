@@ -21,7 +21,86 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE: Discord paints + survives; chase the login form
+## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~00:40)
+
+**Shipped this session (commits 0caafd9 → ede840e):**
+
+1. **Request blocklist SHIPPED (#60, commit 0caafd9).** The loader
+   strategy refuses ~35 analytics/ads/telemetry host suffixes before
+   download (loadResource → null loader → failBeforeStarting; beacons
+   complete as success). `?noblock=1` / `BIB_NOBLOCK=1` to disable;
+   `BIB_CURLDEBUG=1` + `BIB_STDERR_FILE=path` now give uncapped curl
+   traces through site-diagnose. Measured: tekeye = 14 adsbygoogle
+   loads blocked with zero network attempts; **discord.com/login
+   requests ZERO blocklisted hosts** — the blocklist is a general win
+   but a non-factor for the login peg (it's all their own bundle).
+   facebook.net deliberately NOT listed (FB Login SDK); consent
+   managers NOT listed.
+
+2. **NetworkError NAMED — #61 CLOSED.** Full DEBUG_CURL trace: 518/518
+   requests succeed over 3 multiplexed H2 connections; zero curl
+   errors. netprobe.html: caches/serviceWorker/storage.estimate don't
+   exist in this build, fetch fine. The console `NetworkError: Load
+   failed (:1)` correlates 3/3 runs with `Failed to import
+   libdiscore-wasm` — it is Discord's own second, uncaught consumer of
+   that failed wasm import (the first consumer catches it: "Unsupported
+   browser, skipping libdiscore" — graceful). COSMETIC, non-blocking.
+   Stop chasing it.
+
+3. **WS-1 SHIPPED (#58 CLOSED, commit ede840e).** Real RFC 6455 guest
+   WebSocket: src/embedder/BibWebSocketChannel.h (WebSocketTaskCurl
+   adaptation driving WebSocketChannelClient directly) over CurlStream.
+   WebKit-tree (in the patch): CurlStream Emscripten branch reworked
+   from fail-everything stub to non-blocking connect via a private
+   CurlMultiHandle (tryToConnect pumped by the scheduler until
+   CURLMSG_DONE). HARD-WON: the multi must outlive the connect — multi
+   cleanup closes the CONNECT_ONLY connection (ACTIVESOCKET → BAD →
+   FD_SET(-1) → wasm memory corruption; guards added). Scheduler got an
+   8ms idle backoff so a session-long socket doesn't spin the host loop.
+   Validation: NEW web/probe/wsecho.html 6/6 vs wss://echo.websocket.org
+   (TLS-over-wisp handshake, text+binary echo, clean close 1000);
+   wsprobe 7/7; gates 2/3/8/9. **Discord QR-login socket
+   (remote-auth-gateway) now CONNECTS — wispStreams 3→4.** Gaps:
+   send(Blob) drops w/ warning; bufferedAmount unreported; trust
+   failure terminal. The Discord GATEWAY (post-login) now has a real
+   transport waiting for it.
+
+4. **#57 instrumented (in the patch, same commit).** The toObjectSlow
+   for...in abort fired ONCE more (mid-boot, before the WS stage — not
+   WS-correlated), then 2 clean runs. JSCell::toObjectSlow now logs
+   `BIB: toObjectSlow on unexpected cell: JSType=N classInfo=X` before
+   the fatal cast. Next recurrence names the cell — then root-cause.
+
+5. **Tier A2 SHIPPED (#62 CLOSED)**: ENABLE_VIDEO=ON zero-engine build —
+   compiled with ZERO source fixes (no media backends registered, so no
+   platform-specific code came in; MediaPlayer uses its null private).
+   CACHE TRAP hit again: WEBKIT_OPTION_DEFAULT_PORT_VALUE only affects
+   fresh caches — needed explicit `cmake -B build/webcore
+   -DENABLE_VIDEO=ON` + verify cmakeconfig.h BEFORE building (first
+   "build" was a no-op that exited 0). Acceptance MET: tekeye fallback
+   text gone (real blank <video> boxes, paint 1416→1286/202→187);
+   audioprobe 12/12 against the REAL bindings (incl. Discord's two
+   top-level probes; canPlayType "", play()→NotSupportedError, error
+   code 4 — the zero-engine semantics match the A1 stub exactly). A1
+   stub (web/media-stub.js) self-disables and STAYS in the pipe as a
+   safety net. wsecho 6/6 + gates green on the full rebuild. Playback =
+   future host-bridge media-engine epic.
+
+**Discord login picture after tonight:** every functional blocker found
+so far is dead (Audio/Video globals ✅, WebSocket ✅, NetworkError =
+cosmetic ✅, postMessage ✅ refuted, blocklist ✅ shipped-but-irrelevant
+-to-login). What remains is the structural one: single-threaded CLoop
+boot of their multi-MB bundle pegs the host main thread (Chrome "wait
+or close") — the form never renders within patience. Levers left, in
+order: (a) W-B engine-off-main-thread (pthread) — THE fix, big; (b)
+wasm2js translation off the host main thread (host Web Worker — host
+side may thread freely, engine stays single-threaded); (c) #57
+recurrence now self-names. Next session: run the A2 acceptance if the
+build finished, then start the W-B scoping/spike.
+
+---
+
+## (superseded 2026-06-12) Previous opener: Discord paints + survives; chase the login form
 
 **TIER A1 SHIPPED 2026-06-11 ~22:20 (commit 7c8f153, task #56 closed).**
 web/media-stub.js through the S-A injection pipe (browser.html

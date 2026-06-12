@@ -3181,10 +3181,10 @@ index 1b4f47b117..32d0ee3910 100644
      });
 diff --git a/Source/cmake/OptionsEmscripten.cmake b/Source/cmake/OptionsEmscripten.cmake
 new file mode 100644
-index 0000000000..e74f5413af
+index 0000000000..b8c090ce71
 --- /dev/null
 +++ b/Source/cmake/OptionsEmscripten.cmake
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,169 @@
 +# PORT=Emscripten: WebCore + JavaScriptCore compiled to WebAssembly with
 +# Emscripten. Single-process WebKit1-style embedder; no WebKit2, no tools.
 +#
@@ -3246,7 +3246,13 @@ index 0000000000..e74f5413af
 +# mid-parse, leaving ONLY "file" allowed => every http(s) load dies with
 +# CURLE_UNSUPPORTED_PROTOCOL ("Protocol \"http\" disabled").
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_FTPDIR PRIVATE OFF)
-+WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_VIDEO PRIVATE OFF)
++# Tier A2 (task #62): VIDEO on with ZERO media engines registered — no
++# USE(GSTREAMER)/AVFOUNDATION, so MediaPlayer falls back to its null
++# private. <video>/<audio> become real DOM elements with spec-correct
++# error events (MEDIA_ERR_SRC_NOT_SUPPORTED) and canPlayType() == "";
++# actual playback is a later host-bridge epic. Replaces the A1 JS stub
++# (web/media-stub.js self-disables when the real bindings exist).
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_VIDEO PRIVATE ON)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEB_AUDIO PRIVATE OFF)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBGL PRIVATE OFF)
 +WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_SOURCE PRIVATE OFF)
