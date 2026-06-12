@@ -1744,6 +1744,68 @@ int main()
             // would never reach the screen (Codex HIGH, G3).
             MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
         }
+        if (g_gpu) {
+            // W-B2 software-renderer guard: shielded/forked browsers can
+            // hand a worker OffscreenCanvas a SOFTWARE WebGL device
+            // (SwiftShader/llvmpipe) — and the same browsers MASK the
+            // renderer string, so don't trust it: MEASURE. Three full
+            // presents with a 1x1 readback sync: real GPUs run ~1-3ms per
+            // frame (G1: 0.9-1.3ms); software takes tens of ms (live
+            // report: ~1 frame/MINUTE on a Chromium fork). Slow → raster,
+            // which IS the better engine on that hardware.
+            char rendererBuf[128] = { 0 };
+            EM_ASM({
+                var ctx = GL.currentContext && GL.currentContext.GLctx;
+                var s = "";
+                if (ctx) {
+                    var ext = ctx.getExtension("WEBGL_debug_renderer_info");
+                    s = String((ext ? ctx.getParameter(ext.UNMASKED_RENDERER_WEBGL) : ctx.getParameter(ctx.RENDERER)) || "");
+                }
+                stringToUTF8(s.slice(0, 120), $0, 127);
+            }, rendererBuf);
+            uint32_t benchPixel = 0;
+            auto benchInfo = SkImageInfo::Make(1, 1, kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
+            // WARMUP, not measured: the first frames on a fresh context pay
+            // one-time pipeline/shader compiles (G1: frame0 ≈ 100ms on real
+            // hardware) — measuring them reads a healthy GPU as "software"
+            // (observed: Intel UHD 630 "26.67ms/frame" on first-3-frames).
+            // Software renderers stay slow on EVERY frame; that's the
+            // discriminator, so bench only post-warmup steady state.
+            // 8x overdraw per frame: a single fill+quad is so simple that
+            // SwiftShader steady-states at ~5ms (measured) — too close to
+            // real GPUs for a safe threshold. Overdraw multiplies software
+            // raster cost (~40ms) while hardware barely notices (~1ms).
+            for (int i = 0; i < 2; ++i) {
+                surface->getCanvas()->drawColor(SK_ColorWHITE);
+                for (int j = 0; j < 8; ++j)
+                    surface->draw(g_fbo0Surface->getCanvas(), 0, 0);
+                skgpu::ganesh::FlushAndSubmit(g_fbo0Surface.get());
+            }
+            g_fbo0Surface->readPixels(SkPixmap(benchInfo, &benchPixel, 4), 0, 0);
+            auto benchStart = MonotonicTime::now();
+            for (int i = 0; i < 3; ++i) {
+                surface->getCanvas()->drawColor(SK_ColorWHITE);
+                for (int j = 0; j < 8; ++j)
+                    surface->draw(g_fbo0Surface->getCanvas(), 0, 0);
+                skgpu::ganesh::FlushAndSubmit(g_fbo0Surface.get());
+            }
+            // The readback is the sync: WebGL queues are deep and flush is
+            // advisory — readPixels forces completion everywhere.
+            g_fbo0Surface->readPixels(SkPixmap(benchInfo, &benchPixel, 4), 0, 0);
+            double msPerFrame = (MonotonicTime::now() - benchStart).milliseconds() / 3.0;
+            printf("EMBEDDER: gpu renderer \"%s\" present-bench %.2fms/frame\n", rendererBuf, msPerFrame);
+            // ?gpubench=0 (gate8): measure but don't enforce — playwright
+            // headless IS SwiftShader, where the pipeline is correct but
+            // raster is the faster engine.
+            bool enforceBench = MAIN_THREAD_EM_ASM_INT({ return Module.bibGpuBench === false ? 0 : 1; });
+            if (enforceBench && msPerFrame > 12.0) {
+                printf("EMBEDDER: gpu looks SOFTWARE-RENDERED — cpu fallback\n");
+                g_fbo0Surface = nullptr;
+                surface = nullptr;
+                g_gpu = false;
+                MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
+            }
+        }
     }
     if (!g_gpu)
         surface = SkSurfaces::Raster(info);

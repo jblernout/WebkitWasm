@@ -10,14 +10,18 @@
 // asserted through engine console lines, not page-side GL.
 // Requires a REAL GPU-capable Chromium: Playwright's headless-shell loses
 // WebGL contexts at first composite, so this gate launches channel
-// "chromium" (override with BIB_CHANNEL).
+// "chromium" (override with BIB_CHANNEL). NOTE headless chromium runs
+// WebGL on SWIFTSHADER (~40ms/frame present, verified 2026-06-12) — the
+// gate validates pipeline CORRECTNESS there and passes &gpubench=0 so the
+// engine's software-renderer guard (which would correctly bail to raster)
+// measures but doesn't enforce. Real-GPU perf is a headed/user concern.
 // Serve first:
 //   node tools/dev-server.mjs web --mount /engine=build/webcore/bin
 // then:
 //   node tools/gate8-gpu-test.mjs [url]
 import { chromium } from "playwright";
 
-const url = process.argv[2] ?? "http://127.0.0.1:8080/browser.html?demo=hello&gpu=1";
+const url = process.argv[2] ?? "http://127.0.0.1:8080/browser.html?demo=hello&gpu=1&gpubench=0";
 const browser = await chromium.launch({ channel: process.env.BIB_CHANNEL || "chromium" });
 const page = await browser.newPage();
 
@@ -30,6 +34,7 @@ page.on("console", (m) => {
   // Late fallback: surface/FBO-wrap failure AFTER gpu=on (Codex, G3) —
   // the engine paints CPU raster the GPU-mode host never displays.
   if (t.includes("gpu surface setup failed")) fellBack = true;
+  if (t.includes("SOFTWARE-RENDERED")) fellBack = true;
   if (t.includes("reloading in raster mode")) fellBack = true;
   if (t.includes("gpu restore REBUILD FAILED")) fellBack = true;
   if (t.includes("gpu restore TIMED OUT")) fellBack = true;

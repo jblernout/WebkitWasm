@@ -786,6 +786,12 @@
       // G4 fallback: engine-side context restore never arrived or the
       // Ganesh rebuild failed — reload (?gpulost=1, second loss ?gpu=0).
       bibGpuLostReload: gpuLostReload,
+      // ?gpubench=0 disables the software-renderer present-bench POLICY
+      // (the engine still prints the measurement). Worker OffscreenCanvas
+      // contexts land on SwiftShader in many environments — including
+      // playwright headless — where GPU mode is correct but slower than
+      // raster; gate8 uses this to validate the pipeline there.
+      bibGpuBench: params.get("gpubench") !== "0",
       bibHTML: demo === "hello" ? helloHTML : demo === "scripttest" ? scriptTestHTML : interactiveHTML,
       // Guest wasm shim: the engine reads the polyfill source once at first
       // window-object setup and calls bibWasm2js per module (see shim block
