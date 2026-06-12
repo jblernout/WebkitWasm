@@ -21,7 +21,53 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~17:30)
+## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~18:15)
+
+**W-B2 SHIPPED (task #69, commit 2b96e64): GPU mode works under the
+pthread — gate8 GREEN with G4 folded in, GPU default restored for humans
+(!webdriver, ?gpu= overrides). The W-B1 "raster-only" regression is dead.**
+- Canvas reaches the engine thread as an OffscreenCanvas transferred at
+  proxied-main spawn. RUNTIME-decided via `-Wl,--wrap=pthread_create`
+  (crt1_proxy_main's (char*)-1 sentinel → "#screen" only when
+  Module.bibGPU). NOT -sOFFSCREENCANVASES_TO_PTHREAD — that compile-time
+  list FAILS pthread_create on a missing canvas (node gates have no DOM,
+  raster keeps the page 2d context). Playbook entry added.
+- **G4 in-place context-loss recovery, ZERO new WebKit patch hunks for
+  the rebuild**: lost → preventDefault + park rendering (damage
+  accumulates); restored → abandon GrContext, drop surfaces, upstream
+  `PlatformDisplay::clearGLContexts()` (public wrapper over the private
+  clearSkiaGLContext) rebuilds over the SAME restored handle, full-frame
+  repaint. 8s no-restore deadline → page reload fallback
+  (Module.bibGpuLostReload; page-side lost listener REMOVED — transferred
+  placeholders get no events). gate8 exercises the full cycle via
+  bib_gpu_test_lose_restore (WEBGL_lose_context), probe pixel-exact after.
+- **TRAP FOUND: worker OffscreenCanvas contexts advertise extensions that
+  main-thread contexts didn't** (GL_NV_shader_noperspective_interpolation)
+  and emscripten's enableExtensionsByDefault only enables its curated
+  list → Skia emits #extension directives ANGLE rejects → shader-compile
+  death on first texture draw. Fix: bibEnableAllWebGLExtensions() EM_JS
+  (PlatformDisplayEmscripten.cpp) at boot AND after every restore
+  (restoration invalidates enabled extensions per WebGL spec).
+- Hello judging under GPU rides the async readback push (bib.readback()
+  → judgeHelloFrame tol=2) — G3's sync pull died with W-B1.
+- Board on the final binary: gate8(+G4) PASS, gate2 PASS, persist PASS,
+  media PASS, urlbar PASS, old.reddit ?gpu=1 smoke 3/3 (wisp TLS +
+  styled paint). Codex: MEDIUM (boot-window loss → handlers now install
+  before the caps stage, exports guard-relaxed) + LOW (gpuLostReload
+  gpuMode guard) fixed; LOW lost-paint race accepted (restore queues a
+  full-frame repaint).
+- ⚠ BIB_PTHREAD=0 + GPU: single-thread path compiles (handlers fall back
+  to the DOM canvas, no transfer needed) but remains UNVERIFIED — same
+  caveat as the W-B1 toggle itself.
+- **NEXT (user-ordered queue)**: M-B video overlay (hole-punch — engine
+  transparent rect + host <video> positioned over the canvas; bytes
+  already wisp-clean via blob path; M-C MSE mirror for streaming). Then
+  W-B3 (real curl threads — fetch 69→44ms, sync XHR, real workers).
+  Audio default-on after a media=1 sweep. BIB_PTHREAD=0 verification
+  build still pending. User may want a MotionMark re-run (GPU is back on
+  the human default path).
+
+(previous update, 2026-06-12 ~17:30, below)
 
 **WISP INVARIANT RESTORED + PTHREAD TOGGLE (commit ecaf329, after the
 user caught the media exception — "everything must be under wisp"):**
