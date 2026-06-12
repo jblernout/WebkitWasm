@@ -21,7 +21,28 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~17:15)
+## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~17:30)
+
+**WISP INVARIANT RESTORED + PTHREAD TOGGLE (commit ecaf329, after the
+user caught the media exception — "everything must be under wisp"):**
+- Media bytes now fetch through the GUEST stack (MediaPlayer::
+  mediaResourceLoader → loader strategy → curl → wisp, cookies attached)
+  and reach the host as a Blob — host element NEVER touches the network.
+  media-test ASSERTS it (blob push + zero host media requests). 64MB cap,
+  download-before-play; streaming waits for M-C MSE (invariant-safe by
+  construction). EVERYTHING is wisp-routed again, no exceptions.
+- `BIB_PTHREAD=0 bash tools/build-webcore.sh` → single-threaded engine
+  (no SAB, no COOP/COEP — edge/static hosts). Also fixed: fresh checkouts
+  used to configure WITHOUT -pthread and fail the embedder link (flags
+  only lived in the old cache). Toggle = full tree rebuild per flip.
+  ⚠ TODO: BIB_PTHREAD=0 full verification build (~2h) never run —
+  dual-mode is compile-level reasoning only (proxying API guarded,
+  worker hooks self-disable, page pump fallbacks kept).
+- Audio default-on decision PENDING a `media=1` wave sweep (now
+  invariant-clean, just the canPlayType-flip risk). Recommended default
+  after sweep: `params.get("media") !== "0" && !navigator.webdriver`.
+
+(previous update, 2026-06-12 ~17:15, below)
 
 **PERSISTENCE + AUDIO SHIPPED (tasks #67/#68, commits dc5cc9e + 07fcbc7,
 both on main, Codex-reviewed, full board green after each):**
