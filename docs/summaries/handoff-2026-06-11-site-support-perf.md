@@ -21,29 +21,40 @@ near-perfect, fal.ai fine. Perf numbers on record: MessageChannel hop
 0.003ms. The TWO repeated engine gaps from the
 sweep are now ONE: ~~Workers~~ (W-A live) and **WebGL (#32)**.
 
-## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~19:30)
+## ⟶ NEXT SESSION STARTS HERE (updated 2026-06-12 ~20:30)
 
-**POST-SHIP LIVE REGRESSION + FIX (commits ff62439 + dc6cd1a): GPU
-default + a browser whose WORKER contexts are SwiftShader = ~1
-frame/minute (user's live fork on Discord). Hardware GL is granted
-PER-CONTEXT-LOCATION, not per-browser — the user's MotionMark-109 fork
-accelerates main-thread canvases but software-renders worker ones, and
-W-B1 moved our context into a worker. Fix: boot present-bench (2 warmup
-frames to absorb G1's ~100ms frame0 pipeline compiles — without warmup a
-healthy Intel UHD 630 read as 26.67ms "software"; then 3 timed frames at
-8x overdraw — single fills are too easy, SwiftShader steady-states at
-5ms on them; 1x1 readPixels as sync). >12ms/frame → raster fallback via
-bibGpuFallback. Measured: UHD 630 headed 1-2ms (gpu stays), SwiftShader
-18.67-28.67ms (falls back). ?gpubench=0 = measure-only (gate8 phase 1 —
-playwright headless IS SwiftShader); gate8 phase 2 asserts the ENFORCED
-path end-to-end (fallback fires, page lands green on ?gpu=0). Codex 0
-real bugs, LOWs accepted/fixed. Persistence exonerated for the parallel
-raster-lag report (build/persist-cost.mjs: 4MB mutating LS profile holds
-57-61 rAF/s through dump cycles); residual suspect for the user's
-raster 5-10fps = build-load on the machine during their test (their
-retest pending). MotionMark answer: returns ONLY where workers get real
-GL (stock Chromium on this box: yes, verified; their fork: raster until
-its GPU/shield settings change).**
+**W-B2 LIVE REGRESSION SAGA — RESOLVED, USER-CONFIRMED SMOOTH (commits
+ff62439 → dc6cd1a → 8e88a3e → babf7fc → this one). Three stacked real
+bugs behind the user's "~1 frame/minute on Discord" report:**
+1. **Bench guard (ff62439)**: software-GL worker contexts must demote to
+   raster — boot present-bench, 2 warmup frames (frame0 pipeline
+   compiles read a healthy UHD 630 as 26.67ms "software" without them),
+   3 timed frames at 8x overdraw (SwiftShader steady-states at 5ms on
+   single fills — too close to call), 1x1 readPixels sync, >12ms →
+   bibGpuFallback. UHD 630 1-2ms stays; SwiftShader 18-40ms falls back.
+   ?gpubench=0 = measure-only (gate8 phase 1: playwright headless IS
+   SwiftShader); gate8 phase 2 asserts the enforced path end-to-end.
+2. **THE ACTUAL LIVE BUG (babf7fc): OffscreenCanvas commit starvation.**
+   The user's fork has REAL hardware GL in workers (their own log:
+   UHD 630, bench 2.67ms) — but only presents transferred-canvas frames
+   on WORKER rAF, which the engine never issued (rAF virtualized via
+   bib_tick). Engine painted 94 rAF/s; SCREEN updated seconds apart.
+   Stock Chromium commits implicitly at task end, so EVERY harness
+   signal (rAF rates, probe readbacks, bench) was green — all
+   engine-side, structurally blind to frame DELIVERY. Fix: presentGPU
+   schedules one no-op worker rAF per present (guarded collapse).
+   **MEASUREMENT LESSON: tools/gpu-visible-test.mjs (committed)
+   screenshots the on-screen canvas during a guest animation and asserts
+   pixels CHANGE — run it for anything touching the present path.**
+3. GPU default OFF→ON round trip (8e88a3e → here): restored to
+   !webdriver after the user confirmed smooth live on the heaviest
+   animated page (discord.com marketing) in their fork.
+**Also settled: raster ~10fps on discord.com marketing is NOT a
+regression — measured 11 guest rAF/s in harness; that page was never
+smooth without GPU (the app/chat is raster-fine). Persistence exonerated
+(build/persist-cost.mjs: 4MB mutating LS profile holds 57-61 rAF/s
+through dump cycles). MotionMark should be back at G3 levels on the
+default path — worth a user re-run.**
 
 **W-B2 SHIPPED (task #69, commit 2b96e64): GPU mode works under the
 pthread — gate8 GREEN with G4 folded in, GPU default restored for humans
