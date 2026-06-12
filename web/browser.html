@@ -456,13 +456,22 @@
     const wasmShimReady = Promise.allSettled([
       import("./vendor/binaryen.js").then((m) => { binaryen = m.default; }),
       fetch("wasm-polyfill.js").then((r) => (r.ok ? r.text() : "")),
-    ]).then(([, polyfill]) => {
-      const text = polyfill.status === "fulfilled" ? polyfill.value : "";
-      if (!binaryen || !text) {
+      fetch("media-stub.js").then((r) => (r.ok ? r.text() : "")),
+    ]).then(([, polyfill, media]) => {
+      // The injection payload is generic guest-startup script: wasm polyfill
+      // first (it consumes the __bibWasm2js bridge), then the Audio media
+      // stub (Tier A1 — independent of binaryen, self-disables once an
+      // ENABLE_VIDEO build provides the real elements). Either half may be
+      // absent without breaking the other.
+      let wasmText = polyfill.status === "fulfilled" ? polyfill.value : "";
+      if (!binaryen || !wasmText) {
         log("wasm shim unavailable" + (binaryen ? "" : " (binaryen.js failed to load)"));
-        return "";
+        wasmText = "";
       }
-      return text;
+      const mediaText = media.status === "fulfilled" ? media.value : "";
+      if (!mediaText)
+        log("media stub unavailable (media-stub.js failed to load)");
+      return wasmText + (wasmText && mediaText ? "\n;\n" : "") + mediaText;
     });
     function bibWasm2js(payload, mode) {
       if (!binaryen)
@@ -584,11 +593,11 @@
       },
     };
 
-    // Engine boot gate: the polyfill text must be on Module before the
+    // Engine boot gate: the injection text must be on Module before the
     // engine's first window-object setup (it is read ONCE and cached), so
     // the engine script is appended only after the shim prep settles. If
-    // binaryen or the polyfill failed to load, bibWasmPolyfill stays "" and
-    // the engine skips injection — today's no-wasm behavior.
+    // every piece failed to load, bibWasmPolyfill stays "" and the engine
+    // skips injection — the old no-wasm, no-Audio behavior.
     wasmShimReady.then((polyfillText) => {
       Module.bibWasmPolyfill = polyfillText;
       const s = document.createElement("script");

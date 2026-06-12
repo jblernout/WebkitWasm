@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<!-- In-guest probe for the Audio media stub (Tier A1). Mirrors how real
+     sites touch the surface: Discord's webpack top-level canPlayType probe
+     and the notification-sound idiom. Run through the engine:
+     browser.html?url=http://localhost:8080/probe/audioprobe.html -->
+<html>
+<head><meta charset="utf-8"><title>audio probe</title></head>
+<body>
+<h1>audio probe</h1>
+<script>
+(function () {
+  var passes = 0, fails = 0, pending = 0, settled = false;
+  function report(name, ok, extra) {
+    if (ok) passes++; else fails++;
+    console.log("AUDIOPROBE: " + name + " " + (ok ? "PASS" : "FAIL") + (extra ? " " + extra : ""));
+  }
+  function verdict() {
+    if (settled || pending > 0) return;
+    settled = true;
+    console.log("AUDIOPROBE-VERDICT: " + (fails === 0 ? "PASS" : "FAIL") +
+      " (" + passes + " pass, " + fails + " fail)");
+  }
+
+  // 1. Discord's exact webpack top-level statement — the chunk-graph killer.
+  try {
+    var supported = "" !== new Audio().canPlayType("audio/ogg; codecs=opus");
+    report("discord-top-level-probe", supported === false, "supported=" + supported);
+  } catch (e) {
+    report("discord-top-level-probe", false, String(e));
+  }
+
+  // 1b. Discord's second top-level statement (chunk killer #2).
+  try {
+    var hasRVFC = "requestVideoFrameCallback" in HTMLVideoElement.prototype;
+    report("discord-top-level-video-probe", hasRVFC === false, "rvfc=" + hasRVFC);
+  } catch (e) {
+    report("discord-top-level-video-probe", false, String(e));
+  }
+
+  try {
+    report("globals", typeof Audio === "function" && typeof HTMLAudioElement === "function"
+      && typeof HTMLMediaElement === "function" && typeof HTMLVideoElement === "function"
+      && typeof MediaError === "function" && typeof TimeRanges === "function");
+    report("instanceof", new Audio() instanceof HTMLAudioElement
+      && new Audio() instanceof HTMLMediaElement
+      && !(new Audio() instanceof HTMLVideoElement));
+    report("media-error-constants", MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED === 4);
+    report("prototype-attrs", "volume" in HTMLMediaElement.prototype
+      && "readyState" in HTMLMediaElement.prototype
+      && "videoWidth" in HTMLVideoElement.prototype);
+    report("buffered-empty", new Audio().buffered instanceof TimeRanges && new Audio().buffered.length === 0);
+    report("canPlayType-empty", new Audio().canPlayType("audio/mpeg") === "");
+    report("wasm-coexists", typeof WebAssembly === "object" && typeof WebAssembly.instantiate === "function");
+
+    // 2. Notification-sound idiom: new Audio(url); volume; play().catch().
+    var snd = new Audio("http://localhost:8080/probe/missing-sound.ogg");
+    snd.volume = 0.4;
+    report("volume-prop", snd.volume === 0.4);
+    pending++;
+    snd.play().then(function () {
+      report("play-rejects", false, "resolved?!");
+      pending--; verdict();
+    }, function (e) {
+      report("play-rejects", e && e.name === "NotSupportedError", "name=" + (e && e.name));
+      pending--; verdict();
+    });
+
+    // 3. Honest async error event with MediaError-shaped .error.
+    pending++;
+    var timer = setTimeout(function () {
+      report("error-event", false, "timeout");
+      pending--; verdict();
+    }, 2000);
+    snd.addEventListener("error", function (e) {
+      clearTimeout(timer);
+      report("error-event", snd.error && snd.error.code === 4,
+        "code=" + (snd.error && snd.error.code));
+      pending--; verdict();
+    });
+  } catch (e) {
+    report("surface", false, String(e));
+  }
+  verdict();
+})();
+</script>
+</body>
+</html>
