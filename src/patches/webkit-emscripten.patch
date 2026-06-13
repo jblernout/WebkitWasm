@@ -93,10 +93,10 @@ index 26e825ace4..fbb5c47baf 100644
              Dl_info info { };
              if (!dladdr(jsFunctionAddr, &info))
 diff --git a/Source/JavaScriptCore/runtime/JSCell.cpp b/Source/JavaScriptCore/runtime/JSCell.cpp
-index 1e8be796f4..b8ab92a62e 100644
+index 1e8be796f4..7ee4da5303 100644
 --- a/Source/JavaScriptCore/runtime/JSCell.cpp
 +++ b/Source/JavaScriptCore/runtime/JSCell.cpp
-@@ -177,6 +177,24 @@ JSObject* JSCell::toObjectSlow(JSGlobalObject* globalObject) const
+@@ -177,6 +177,35 @@ JSObject* JSCell::toObjectSlow(JSGlobalObject* globalObject) const
          return string->toObject(globalObject);
      if (const auto* bigInt = jsDynamicCast<const JSBigInt*>(this))
          return bigInt->toObject(globalObject);
@@ -112,11 +112,22 @@ index 1e8be796f4..b8ab92a62e 100644
 +    // Only a cell that is genuinely neither object nor Symbol falls through
 +    // to the original (aborting) path.
 +    if (auto* object = jsDynamicCast<const JSObject*>(this)) {
-+        WTFLogAlways("BIB: toObjectSlow recovered object cell (JSType=%u classInfo=%s)", static_cast<unsigned>(type()), classInfo()->className.characters());
++        // Log ONCE: if the flake is frequent (Discord's Flux/React enumerate
++        // constantly), a WTFLogAlways per recovery is a cross-thread console
++        // storm that would itself freeze the app. Recovery is silent after
++        // the first. (JSC is single-threaded — a plain static is safe.)
++        static bool loggedRecovery = false;
++        if (!loggedRecovery) {
++            loggedRecovery = true;
++            WTFLogAlways("BIB: toObjectSlow recovered object cell (JSType=%u classInfo=%s) — silenced after first", static_cast<unsigned>(type()), classInfo()->className.characters());
++        }
 +        return const_cast<JSObject*>(object);
 +    }
-+    if (!jsDynamicCast<const Symbol*>(this))
++    static bool loggedUnexpected = false;
++    if (!loggedUnexpected && !jsDynamicCast<const Symbol*>(this)) {
++        loggedUnexpected = true;
 +        WTFLogAlways("BIB: toObjectSlow on unexpected non-object cell: JSType=%u classInfo=%s", static_cast<unsigned>(type()), classInfo()->className.characters());
++    }
 +#endif
      return jsSecureCast<const Symbol*>(this)->toObject(globalObject);
  }
