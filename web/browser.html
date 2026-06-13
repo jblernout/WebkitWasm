@@ -53,22 +53,21 @@
     }
 
     const canvas = document.getElementById("screen");
-    // GPU mode: the ENGINE owns the canvas through its own WebGL2 context
-    // (Ganesh renders straight into it). W-B2: under the pthread build the
-    // canvas is transferred to the engine thread as an OffscreenCanvas at
-    // proxied-main spawn (the engine's __wrap_pthread_create reads
-    // Module.bibGPU below — it must be final before the engine script
-    // runs). Touching getContext("2d") here would lock the canvas to 2d
-    // and make the transfer/context creation fail — so in GPU mode there
-    // is no 2d context and no blit at all.
-    // Default GPU for humans (G3/M2: 2.6-3.4× paint; W-B2 user-validated
-    // live 2026-06-12 ~20:30 — smooth on the heaviest animated page after
-    // the presentGPU rAF nudge), raster for automation so the pixel-exact
-    // gates keep their semantics; ?gpu=0/1 overrides either way. The boot
-    // present-bench demotes software-GL contexts to raster automatically.
+    // W-B2 v2 (commit-starvation fix): #screen is ALWAYS a host-owned 2d
+    // canvas now, in BOTH raster and GPU mode. We no longer transfer it to the
+    // engine thread as an OffscreenCanvas — that path painted ~47fps but the
+    // placeholder commit was starved under PROXY_TO_PTHREAD, so the screen
+    // updated ~0.2fps. GPU mode still gets the fast Ganesh PAINT (it renders
+    // into a worker-private OffscreenCanvas, "#bibgpu"), then the engine reads
+    // the frame back and pushes it here via Module.bibBlit → putImageData —
+    // the same proven delivery raster uses. So host display is identical for
+    // both modes; the 2d context is always created.
+    // Default GPU for humans (G3/M2: 2.6-3.4× paint), raster for automation so
+    // the pixel-exact gates keep their semantics; ?gpu=0/1 overrides. The boot
+    // present-bench still demotes software-GL contexts to raster automatically.
     const gpuParam = new URLSearchParams(location.search).get("gpu");
     const gpuMode = gpuParam !== null ? gpuParam !== "0" : !navigator.webdriver;
-    const ctx = gpuMode ? null : canvas.getContext("2d");
+    const ctx = canvas.getContext("2d");
 
     // --- Event-driven engine pump (perf) --------------------------------
     // The engine pokes Module.bibWakeUp on every RunLoop wake-up (dispatch,
@@ -575,7 +574,9 @@
       if (bib.dead || !ctx) return;
       const pixels = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, w * h * 4);
       ctx.putImageData(new ImageData(pixels, w, h), x, y);
-      if (bib.frames === 0 && demo === "hello") judgeHelloFrame(pixels, w, h);
+      // tol=2 in GPU mode absorbs driver-level rounding (Ganesh paint differs
+      // from CPU raster by ≤1-2 LSB); raster stays pixel-exact (tol=0).
+      if (bib.frames === 0 && demo === "hello") judgeHelloFrame(pixels, w, h, gpuMode ? 2 : 0);
       bib.frames++;
       blitsEl.textContent = bib.frames;
     }
@@ -845,11 +846,9 @@
         wireInput();
         canvas.focus();
         requestAnimationFrame(blitLoop);
-        // GPU mode never pushes CPU pixels through bibBlit, so the hello
-        // gate judges through the async readback instead (G3's one-time
-        // GPU sync, W-B1's push path). tol=2: driver-level rounding.
-        if (gpuMode && demo === "hello")
-          bib.readback().then((f) => { if (f) judgeHelloFrame(f.data, f.w, f.h, 2); });
+        // W-B2 v2: GPU now pushes CPU pixels through bibBlit like raster, so
+        // the hello gate is judged there (first frame) — no separate readback
+        // judge needed.
         urlbarEl.disabled = false;
         gobtnEl.disabled = false;
         // Same allowlist as the URL bar — ?url= arrives from arbitrary

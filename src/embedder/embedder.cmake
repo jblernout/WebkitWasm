@@ -62,6 +62,11 @@ if (BIB_PTHREAD)
         # pthread_create outright (node gates have no DOM; raster mode
         # must keep the page's 2d context on the canvas).
         "SHELL:-sOFFSCREENCANVAS_SUPPORT=1"
+        # LOAD-BEARING for Approach R GPU readback: renderViaOffscreenBackBuffer
+        # (set on the context in PlatformDisplayEmscripten) needs this to force
+        # preserveDrawingBuffer=true, else readPixels returns stale frames and
+        # the screen freezes on frame 1 (verified 2026-06-13). Do NOT remove.
+        "SHELL:-sOFFSCREEN_FRAMEBUFFER=1"
         "SHELL:-Wl,--wrap=pthread_create"
     )
 endif ()

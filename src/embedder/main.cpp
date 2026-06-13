@@ -72,6 +72,7 @@
 #include <pal/SessionID.h>
 #include <wtf/JSONValues.h>
 #include <wtf/MainThread.h>
+#include <wtf/Assertions.h> // WTFLogAlways — perf-log breakdown from the engine thread
 #include <wtf/MonotonicTime.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/ProcessPrivilege.h>
@@ -136,9 +137,18 @@ extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* at
         const char* canvases = nullptr;
         emscripten_pthread_attr_gettransferredcanvases(attr, &canvases);
         if (canvases == reinterpret_cast<const char*>(-1)) {
+            // W-B2 v2 (commit-starvation fix): NEVER transfer #screen. The old
+            // path transferred #screen to this engine thread as an
+            // OffscreenCanvas and presented through its placeholder — but the
+            // placeholder commit is starved under PROXY_TO_PTHREAD (engine
+            // paints ~47fps, screen saw ~0.2fps). GPU now renders into a
+            // worker-PRIVATE OffscreenCanvas (registered as "#bibgpu" at GPU
+            // boot) and delivers frames to the host #screen via the SAME
+            // readback+putImageData path raster uses (host owns #screen's 2d
+            // context). So the transfer list is always empty; the sentinel is
+            // just neutralized (keeps it away from UTF8ToString((char*)-1)).
             pthread_attr_t patched = *attr;
-            bool gpu = EM_ASM_INT({ return typeof Module !== "undefined" && Module && Module.bibGPU ? 1 : 0; });
-            emscripten_pthread_attr_settransferredcanvases(&patched, gpu ? "#screen" : "");
+            emscripten_pthread_attr_settransferredcanvases(&patched, "");
             return __real_pthread_create(thread, &patched, startRoutine, arg);
         }
     }
@@ -195,31 +205,36 @@ static sk_sp<SkSurface> g_fbo0Surface; // present target, GPU mode only
 // single-threaded build's main-thread handlers honest too).
 static std::atomic<bool> g_gpuLost { false };
 
-static void presentGPU()
-{
-    // Defensive make-current: host-page JS could have bound another GL
-    // context since the last frame; Ganesh assumes ITS context is current.
-    WebCore::PlatformDisplay::sharedDisplay().skiaGLContext()->makeContextCurrent();
-    // Full-canvas composite, not dirty-rect: with preserveDrawingBuffer off
-    // the FBO 0 content is undefined after each composite, so every present
-    // must cover the whole frame (G1-measured at 0.9-1.3ms).
-    g_engine->surface->draw(g_fbo0Surface->getCanvas(), 0, 0);
-    skgpu::ganesh::FlushAndSubmit(g_fbo0Surface.get());
-    // Nudge the rendering update: the HTML spec ties OffscreenCanvas
-    // placeholder commits to rAF processing in the OWNING scope. Stock
-    // Chromium also commits implicitly at task end, but forks/older builds
-    // may only present on worker rAF — without this the engine paints at
-    // full speed while the SCREEN updates seconds apart (live-fork report,
-    // 2026-06-12: bench 2.67ms, guest 94 rAF/s, visible ~1 frame/min).
-    // No-op callback (cadence is bib_tick's job); guard collapses presents
-    // that outpace the display into one pending rAF.
-    EM_ASM({
-        if (typeof requestAnimationFrame === "function" && !Module.bibRafNudge) {
-            Module.bibRafNudge = true;
-            requestAnimationFrame(function() { Module.bibRafNudge = false; });
-        }
-    });
+// ?perflog=1 (read once in main, host-page URL): accumulate per-phase
+// engine-thread timing and WTFLogAlways a one-line breakdown once a second.
+// The whole point of this investigation is to stop GUESSING whether Discord's
+// near-frozen render is a spin loop, heavy guest JS, layout, paint, or GPU
+// present — this measures it. Off by default; when off it costs a handful of
+// branch checks per tick. All fields are engine-thread-only (no atomics
+// needed — bib_tick/bib_render run on the engine thread).
+static bool g_perfLog = false;
+namespace {
+struct PerfAccum {
+    double windowStart = 0;  // MonotonicTime ms at window open (0 = not yet)
+    double runloop = 0;      // RunLoop::cycle — guest JS, timers, microtasks
+    double renderUpdate = 0; // updateRendering + finalizeRenderingUpdate (rAF/style/IO)
+    double layout = 0;       // updateLayoutIgnorePendingStylesheets
+    double paint = 0;        // paintFrameRect loop + CPU readback
+    double present = 0;      // presentGPU (GPU mode only)
+    double pushTotal = 0;    // whole bibPushFrameIfDirty (render + memcpy + dispatch)
+    double persist = 0;      // bibMaybePersist
+    int ticks = 0;           // bib_tick bodies run this window
+    int painted = 0;         // frames that actually painted >=1 rect
+};
+PerfAccum g_perf;
 }
+static inline double bibNowMs() { return MonotonicTime::now().secondsSinceEpoch().milliseconds(); }
+
+// W-B2 v2: there is no presentGPU() anymore. GPU frames are NOT presented
+// through the (starved) OffscreenCanvas placeholder; instead bib_render reads
+// the painted Ganesh surface back to CPU and the host puts it on #screen via
+// Module.bibBlit (same path as raster). g_fbo0Surface is retained only for the
+// boot software-detection bench (it draws+flushes there directly).
 
 // Dump RGBA pixels as a binary PPM (P6, alpha dropped) into the wasm FS.
 // The node runner extracts it afterwards.
@@ -642,7 +657,9 @@ EMSCRIPTEN_KEEPALIVE void bib_tick()
             g_tickQueued.store(false, std::memory_order_release);
         return;
     }
+    const double _perfT0 = g_perfLog ? bibNowMs() : 0;
     WTF::RunLoop::cycle();
+    const double _perfT1 = g_perfLog ? bibNowMs() : 0;
     // Drive WebCore's "update the rendering" steps. This port has no
     // DisplayRefreshMonitor, so nothing else ever runs them — guest
     // requestAnimationFrame callbacks NEVER fired (root cause #16), which
@@ -658,8 +675,39 @@ EMSCRIPTEN_KEEPALIVE void bib_tick()
         g_engine->page->updateRendering();
         g_engine->page->finalizeRenderingUpdate({ });
     }
-    bibPushFrameIfDirty();
+    const double _perfT2 = g_perfLog ? bibNowMs() : 0;
+    bibPushFrameIfDirty(); // layout/paint/present accumulate inside bib_render
+    const double _perfT3 = g_perfLog ? bibNowMs() : 0;
     bibMaybePersist(false);
+    if (g_perfLog) {
+        const double _perfT4 = bibNowMs();
+        g_perf.runloop += _perfT1 - _perfT0;
+        g_perf.renderUpdate += _perfT2 - _perfT1;
+        g_perf.pushTotal += _perfT3 - _perfT2;
+        g_perf.persist += _perfT4 - _perfT3;
+        g_perf.ticks++;
+        if (!g_perf.windowStart)
+            g_perf.windowStart = _perfT0;
+        const double elapsed = _perfT4 - g_perf.windowStart;
+        if (elapsed >= 1000.0) {
+            // pushOther = bibPushFrameIfDirty minus the painted phases =
+            // dirty-rect bookkeeping + the malloc/memcpy/cross-thread dispatch.
+            double pushOther = g_perf.pushTotal - g_perf.layout - g_perf.paint - g_perf.present;
+            if (pushOther < 0)
+                pushOther = 0;
+            const double busy = g_perf.runloop + g_perf.renderUpdate + g_perf.layout
+                + g_perf.paint + g_perf.present + g_perf.persist + pushOther;
+            WTFLogAlways("BIBPERF/s ticks=%d painted=%d elapsed=%.0fms busy=%.0f%% | "
+                "runloop(JS)=%.0f renderUpd=%.0f layout=%.0f paint=%.0f present=%.0f pushOther=%.0f persist=%.0f ms | "
+                "avgPaintedFrame=%.1fms",
+                g_perf.ticks, g_perf.painted, elapsed, 100.0 * busy / elapsed,
+                g_perf.runloop, g_perf.renderUpdate, g_perf.layout, g_perf.paint,
+                g_perf.present, pushOther, g_perf.persist,
+                g_perf.painted ? (g_perf.layout + g_perf.paint + g_perf.present) / g_perf.painted : 0.0);
+            g_perf = PerfAccum { };
+            g_perf.windowStart = _perfT4;
+        }
+    }
 }
 static void bibRunTick(void*)
 {
@@ -751,7 +799,11 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
         return nullptr;
     // Layout BEFORE snapshotting the damage union — layout itself reports
     // damage through BibChromeClient, and it must land in THIS frame.
+    const double _perfL0 = g_perfLog ? bibNowMs() : 0;
     g_engine->mainFrame->protectedDocument()->updateLayoutIgnorePendingStylesheets();
+    const double _perfPaint0 = g_perfLog ? bibNowMs() : 0;
+    if (g_perfLog)
+        g_perf.layout += _perfPaint0 - _perfL0;
     const WebCore::IntRect frameRect(0, 0, kWidth, kHeight);
     // Two regions, two meanings: `dirty` = WebCore repaints + we read back;
     // `upload` = pixels bibScrollBlit already shifted in BOTH mirrors — the
@@ -778,9 +830,23 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
         const WebCore::IntRect& r = dirty[i];
         bool painted = paintFrameRect(r);
         bool readBack = painted;
-        // GPU mode keeps no g_blitPixels mirror — pixels stay on the GPU
-        // until presentGPU() composites them to the canvas below.
-        if (painted && !g_gpu) {
+        // W-B2 v2: BOTH modes read the painted rect back into g_blitPixels and
+        // deliver it to the host #screen via putImageData (bibPushFrameIfDirty
+        // → Module.bibBlit). In GPU mode g_engine->surface is a Ganesh texture
+        // surface, so readPixels is a GPU→CPU readback (~few ms) — the price of
+        // not relying on the starved OffscreenCanvas placeholder commit. The
+        // GPU win is the PAINT (Ganesh ~5ms vs CPU raster ~111ms/full frame);
+        // readback delivery is the same proven path raster already uses.
+        if (painted) {
+            // GPU mode: paintFrameRect only RECORDS Ganesh commands; the GPU
+            // hasn't executed them yet. readPixels would read stale/blank
+            // pixels (the bug that made the screen look frozen while the engine
+            // "painted" 60fps — 2026-06-13). Force the paint onto the GPU
+            // before reading it back. Raster has no async GPU stage, so it
+            // skips this. (The old presentGPU did this FlushAndSubmit; Approach
+            // R dropped presentGPU, so the readback path must do it.)
+            if (g_gpu)
+                skgpu::ganesh::FlushAndSubmit(g_engine->surface.get());
             auto dstInfo = SkImageInfo::Make(r.width(), r.height(), kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
             uint8_t* dst = g_blitPixels + (static_cast<size_t>(r.y()) * kWidth + r.x()) * 4;
             readBack = g_engine->surface->readPixels(SkPixmap(dstInfo, dst, kWidth * 4), r.x(), r.y());
@@ -802,20 +868,21 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
         }
         paintedBounds.unite(r);
     }
+    if (g_perfLog) {
+        g_perf.paint += bibNowMs() - _perfPaint0;
+        g_perf.painted++;
+    }
     WebCore::IntRect box = paintedBounds;
     box.unite(upload);
     g_dirtyBox[0] = box.x();
     g_dirtyBox[1] = box.y();
     g_dirtyBox[2] = box.width();
     g_dirtyBox[3] = box.height();
-    if (g_gpu) {
-        // The canvas updates when control returns to the event loop
-        // (implicit WebGL commit); on clean frames the early-outs above ran
-        // and the canvas keeps showing the last presented frame. Null tells
-        // the host there is no CPU pixel buffer — it must not putImageData.
-        presentGPU();
-        return nullptr;
-    }
+    // W-B2 v2: GPU mode no longer presents through the (starved) OffscreenCanvas
+    // placeholder. Both modes now return g_blitPixels (filled by the readback
+    // above) and the host puts it on #screen via Module.bibBlit. presentGPU()
+    // and g_fbo0Surface are retained only for the boot software-detection
+    // bench; they are not on the steady-state path.
     return g_blitPixels;
 }
 
@@ -1034,18 +1101,18 @@ EMSCRIPTEN_KEEPALIVE void bib_gpu_restore_timed_out()
 }
 }
 
-// Registered from main() after a successful GPU boot. Worker scope
-// (pthread build) sees the transferred OffscreenCanvas in
-// GL.offscreenCanvases; the single-threaded build falls back to the DOM
-// canvas. Both are EventTargets firing webglcontextlost/restored. The
-// handlers run between engine tasks (worker/main event loop), never
-// mid-paint, so calling the exports directly is safe.
+// Registered from main() after a successful GPU boot. W-B2 v2: the GL context
+// is backed by the worker-private "#bibgpu" OffscreenCanvas (created at GPU
+// boot, registered in GL.offscreenCanvases) — NOT #screen, which is no longer
+// transferred. Attach the loss/restore listeners to that OffscreenCanvas (it
+// is an EventTarget firing webglcontextlost/restored). The handlers run
+// between engine tasks (worker/main event loop), never mid-paint, so calling
+// the exports directly is safe.
 static void installGpuContextLossHandlers()
 {
     EM_ASM({
-        var entry = typeof GL !== "undefined" && GL.offscreenCanvases && GL.offscreenCanvases["screen"];
-        var canvas = entry ? entry.offscreenCanvas
-            : (typeof document !== "undefined" ? document.querySelector("#screen") : null);
+        var entry = typeof GL !== "undefined" && GL.offscreenCanvases && GL.offscreenCanvases["bibgpu"];
+        var canvas = entry ? entry.offscreenCanvas : null;
         if (!canvas) {
             out("EMBEDDER: gpu loss handlers NOT installed (no canvas handle)");
             return;
@@ -1504,6 +1571,16 @@ int main()
         setenv("DEBUG_CURL", "1", 1);
     printf("EMBEDDER: curldebug=%s\n", getenv("DEBUG_CURL") ? "on" : "off");
 
+    // ?perflog=1 on the host page: emit a per-second engine-thread phase
+    // breakdown (BIBPERF/s). Read straight from the host URL so no
+    // browser.html wiring is needed — purely a diagnostic knob, off by
+    // default. See PerfAccum / bib_tick.
+    g_perfLog = MAIN_THREAD_EM_ASM_INT({
+        try { return new URLSearchParams(location.search).get("perflog") === "1" ? 1 : 0; }
+        catch (e) { return 0; }
+    });
+    printf("EMBEDDER: perflog=%s\n", g_perfLog ? "on" : "off");
+
     // Request blocklist (?noblock=1 on the host page disables it): the loader
     // strategy refuses analytics/ads/telemetry subresources before they
     // download — CLoop parses every script byte on the main thread, so those
@@ -1557,7 +1634,30 @@ int main()
     // creates the context on the page canvas directly (pre-W-B1 path).
     // With the flag unset nothing here runs — the CPU path is unchanged.
     if (interactive && MAIN_THREAD_EM_ASM_INT({ return Module.bibGPU ? 1 : 0; })) {
-        if (WebCore::initializePlatformDisplayEmscripten("#screen")) {
+        // W-B2 v2: back the GL context with a worker-PRIVATE OffscreenCanvas
+        // (we no longer transfer #screen). Register it in emscripten's
+        // GL.offscreenCanvases under "bibgpu" so create_context("#bibgpu")
+        // resolves to it: findCanvasEventTarget checks GL.offscreenCanvases
+        // first, and create unwraps the `.offscreenCanvas` field
+        // (libhtml5_webgl.js). This runs on the engine thread (== this GL's
+        // owner). The canvas is NEVER displayed — frames reach #screen via the
+        // raster readback+putImageData path.
+        // NOTE: no object literal here — a brace-comma ({a: x, b: y}) would be
+        // split by the C preprocessor as an EM_ASM macro-arg separator (braces
+        // don't group for cpp, only parens do). Build the info object with
+        // dotted assignments so the only commas are paren-protected.
+        EM_ASM({
+            try {
+                var oc = new OffscreenCanvas($0, $1);
+                var info = {};
+                info.offscreenCanvas = oc;
+                info.id = 'bibgpu';
+                GL.offscreenCanvases['bibgpu'] = info;
+            } catch (e) {
+                console.error('EMBEDDER: bibgpu OffscreenCanvas create failed: ' + e);
+            }
+        }, kWidth, kHeight);
+        if (WebCore::initializePlatformDisplayEmscripten("#bibgpu")) {
             // G4 handlers go on FIRST (Codex MEDIUM): a loss between
             // context creation and handler install would miss
             // preventDefault and be unrestorable. A loss DURING the caps
