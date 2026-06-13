@@ -124,8 +124,10 @@
   function definedTableCount(bytes) {
     try {
       if (bytes.length < 8 || bytes[0] !== 0x00 || bytes[1] !== 0x61 ||
-          bytes[2] !== 0x73 || bytes[3] !== 0x6d)
-        return -1; // not wasm — let the bridge decide
+          bytes[2] !== 0x73 || bytes[3] !== 0x6d ||
+          bytes[4] !== 0x01 || bytes[5] !== 0x00 || bytes[6] !== 0x00 || bytes[7] !== 0x00)
+        return -1; // not a v1 wasm module — let the bridge decide (validate
+                   // must not green-light malformed bytes via the fast path)
       var p = 8;
       function u32() { // LEB128 unsigned
         var r = 0, sh = 0, b;

@@ -93,21 +93,30 @@ index 26e825ace4..fbb5c47baf 100644
              Dl_info info { };
              if (!dladdr(jsFunctionAddr, &info))
 diff --git a/Source/JavaScriptCore/runtime/JSCell.cpp b/Source/JavaScriptCore/runtime/JSCell.cpp
-index 1e8be796f4..8e4fb4a73b 100644
+index 1e8be796f4..b8ab92a62e 100644
 --- a/Source/JavaScriptCore/runtime/JSCell.cpp
 +++ b/Source/JavaScriptCore/runtime/JSCell.cpp
-@@ -177,6 +177,15 @@ JSObject* JSCell::toObjectSlow(JSGlobalObject* globalObject) const
+@@ -177,6 +177,24 @@ JSObject* JSCell::toObjectSlow(JSGlobalObject* globalObject) const
          return string->toObject(globalObject);
      if (const auto* bigInt = jsDynamicCast<const JSBigInt*>(this))
          return bigInt->toObject(globalObject);
 +#if defined(__EMSCRIPTEN__)
-+    // BIB diagnostic (task #57): a for...in base intermittently reaches
-+    // here as neither String/BigInt/Symbol on discord.com/login, and the
-+    // secure cast below aborts the whole engine. The structure audit above
-+    // passed, so the cell header is intact — name it before dying so the
-+    // flake is diagnosable from the crash log.
++    // BIB (task #57): a for...in base INTERMITTENTLY reaches toObjectSlow
++    // with type() reading 0 (CellType) even though classInfo says it IS a
++    // JSObject — observed on authenticated discord.com (channel load); some
++    // loads dodge it, some hit it. The structure audit above passed (header
++    // intact) and classInfo-based casts don't consult the stale type byte,
++    // so jsDynamicCast<JSObject> still resolves it. toObject() of an object
++    // is the object itself, so RECOVER here instead of letting the
++    // secure-cast-to-Symbol abort the WHOLE engine over one bad enumeration.
++    // Only a cell that is genuinely neither object nor Symbol falls through
++    // to the original (aborting) path.
++    if (auto* object = jsDynamicCast<const JSObject*>(this)) {
++        WTFLogAlways("BIB: toObjectSlow recovered object cell (JSType=%u classInfo=%s)", static_cast<unsigned>(type()), classInfo()->className.characters());
++        return const_cast<JSObject*>(object);
++    }
 +    if (!jsDynamicCast<const Symbol*>(this))
-+        WTFLogAlways("BIB: toObjectSlow on unexpected cell: JSType=%u classInfo=%s", static_cast<unsigned>(type()), classInfo()->className.characters());
++        WTFLogAlways("BIB: toObjectSlow on unexpected non-object cell: JSType=%u classInfo=%s", static_cast<unsigned>(type()), classInfo()->className.characters());
 +#endif
      return jsSecureCast<const Symbol*>(this)->toObject(globalObject);
  }
