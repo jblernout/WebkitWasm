@@ -1804,10 +1804,10 @@ index 0000000000..539cdf6a24
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.cpp b/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.cpp
 new file mode 100644
-index 0000000000..d5b0382f2c
+index 0000000000..c7b1bdfa23
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.cpp
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,323 @@
 +/*
 + * PORT=Emscripten PlatformDisplay + GLContext (Skia GPU phase, G2).
 + *
@@ -2084,17 +2084,19 @@ index 0000000000..d5b0382f2c
 +    attributes.antialias = false;
 +    attributes.preserveDrawingBuffer = false;
 +    attributes.enableExtensionsByDefault = true;
-+#ifdef __EMSCRIPTEN_PTHREADS__
-+    // LOAD-BEARING for Approach R's GPU readback — do NOT remove (verified
-+    // 2026-06-13: removing these makes the engine read back STALE pixels, so
-+    // the screen freezes on the first frame). renderViaOffscreenBackBuffer
-+    // (needs -sOFFSCREEN_FRAMEBUFFER in embedder.cmake) forces
-+    // preserveDrawingBuffer=true and routes rendering through an offscreen FBO;
-+    // without it the worker context's buffer content is discarded before
-+    // g_engine->surface->readPixels() captures the new frame. (Originally added
-+    // for an explicit-swap present that we no longer use; the present is gone
-+    // but this buffer-preservation side effect turns out to be required.)
-+    // Exact mechanism not fully understood — see handoff-2026-06-13.
++#if defined(__EMSCRIPTEN_PTHREADS__) && defined(BIB_GPU_READBACK_PRESENT)
++    // LEGACY (Approach R, GPU→CPU readback present) ONLY — off by default.
++    // renderViaOffscreenBackBuffer (needs -sOFFSCREEN_FRAMEBUFFER in
++    // embedder.cmake) forces preserveDrawingBuffer=true and routes rendering
++    // through an offscreen FBO so a per-frame readback didn't capture stale
++    // pixels. The current zero-copy present (transferToImageBitmap → page
++    // bitmaprenderer) deliberately does NOT enable these: an offscreen
++    // backbuffer would make GL FBO 0 an intermediate buffer, and the
++    // OffscreenCanvas' transferToImageBitmap captures the REAL default
++    // framebuffer — so the indirection produces blank/stale ImageBitmaps.
++    // Define BIB_GPU_READBACK_PRESENT (+ keep -sOFFSCREEN_FRAMEBUFFER) only to
++    // resurrect the old readback path for debugging. See
++    // handoff-2026-06-13-gpu-present-rearchitecture.md.
 +    attributes.explicitSwapControl = true;
 +    attributes.renderViaOffscreenBackBuffer = true;
 +#endif

@@ -38,6 +38,12 @@
   <!-- wisp-js client polyfill (global `wisp_client`), vendored from
        node_modules/@mercuryworkshop/wisp-js@0.4.1/dist/wisp-client.js -->
   <script src="vendor/wisp-client.js"></script>
+  <!-- Build-stamped engine-threading mode (window.BIB_PTHREAD_BUILD). Emitted
+       into build/webcore/bin by embedder.cmake; served at /engine/. The host
+       MUST know this before choosing #screen's context (context type is
+       exclusive: 2d vs bitmaprenderer vs engine-owned webgl2). Missing (stale
+       build) => the inline script defaults to true (the pthread daily-driver). -->
+  <script src="engine/bib-build-config.js"></script>
   <script>
     document.getElementById("coi").textContent = String(globalThis.crossOriginIsolated);
     const logEl = document.getElementById("log");
@@ -53,21 +59,116 @@
     }
 
     const canvas = document.getElementById("screen");
-    // W-B2 v2 (commit-starvation fix): #screen is ALWAYS a host-owned 2d
-    // canvas now, in BOTH raster and GPU mode. We no longer transfer it to the
-    // engine thread as an OffscreenCanvas — that path painted ~47fps but the
-    // placeholder commit was starved under PROXY_TO_PTHREAD, so the screen
-    // updated ~0.2fps. GPU mode still gets the fast Ganesh PAINT (it renders
-    // into a worker-private OffscreenCanvas, "#bibgpu"), then the engine reads
-    // the frame back and pushes it here via Module.bibBlit → putImageData —
-    // the same proven delivery raster uses. So host display is identical for
-    // both modes; the 2d context is always created.
+    // Present mode is chosen ONCE per page load — a <canvas>'s context type is
+    // EXCLUSIVE (2d vs bitmaprenderer vs engine-owned webgl2), so the host must
+    // pick #screen's context before the engine boots:
+    //   raster-2d    : CPU pixels via Module.bibBlit → putImageData (safety net;
+    //                  pixel-exact gates; automation default).
+    //   gpu-bitmap   : BIB_PTHREAD build — the engine paints on its worker and
+    //                  ships zero-copy ImageBitmaps to a bitmaprenderer #screen
+    //                  (fixes the W-B2 OffscreenCanvas commit starvation).
+    //   gpu-implicit : BIB_PTHREAD=OFF build — the engine owns #screen's webgl2
+    //                  context on the main thread and presents implicitly (the
+    //                  pre-W-B1 MotionMark 109@144fps path; no SharedArrayBuffer).
     // Default GPU for humans (G3/M2: 2.6-3.4× paint), raster for automation so
     // the pixel-exact gates keep their semantics; ?gpu=0/1 overrides. The boot
     // present-bench still demotes software-GL contexts to raster automatically.
     const gpuParam = new URLSearchParams(location.search).get("gpu");
-    const gpuMode = gpuParam !== null ? gpuParam !== "0" : !navigator.webdriver;
-    const ctx = canvas.getContext("2d");
+    const requestedGPU = gpuParam !== null ? gpuParam !== "0" : !navigator.webdriver;
+    // Build-stamped (bib-build-config.js, emitted by embedder.cmake). Missing
+    // (stale build) => default true, the pthread daily-driver. Must NOT be
+    // inferred after getContext() — context acquisition is one-way.
+    const BIB_PTHREAD_BUILD =
+      (typeof window.BIB_PTHREAD_BUILD === "boolean") ? window.BIB_PTHREAD_BUILD : true;
+    function supportsBitmapPresent() {
+      if (typeof OffscreenCanvas !== "function") return false;
+      try { return !!document.createElement("canvas").getContext("bitmaprenderer"); }
+      catch { return false; }
+    }
+    // A pthread build needs bitmaprenderer to present GPU frames; if it's
+    // unsupported, fall back to raster rather than show a blank screen.
+    const gpuMode = requestedGPU && (!BIB_PTHREAD_BUILD || supportsBitmapPresent());
+    const presentMode =
+      !gpuMode ? "raster-2d" :
+      BIB_PTHREAD_BUILD ? "gpu-bitmap" : "gpu-implicit";
+    let ctx = null;        // raster putImageData target
+    let bitmapCtx = null;  // gpu-bitmap ImageBitmap present target
+    if (presentMode === "raster-2d") {
+      ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("BIB: failed to create #screen 2d context");
+    } else if (presentMode === "gpu-bitmap") {
+      bitmapCtx = canvas.getContext("bitmaprenderer");
+      if (!bitmapCtx) throw new Error("BIB: failed to create #screen bitmaprenderer context");
+    } // gpu-implicit: leave #screen untouched — the engine creates webgl2 on it.
+    log(`present mode: ${presentMode} (pthreadBuild=${BIB_PTHREAD_BUILD})`);
+
+    // gpu-bitmap present receiver: catch the engine worker's one-time hello
+    // (self.postMessage from C++ → engine-pre.js), take the transferred
+    // MessagePort, and paint each ImageBitmap onto #screen via bitmaprenderer.
+    // Triple-buffered: ack {t:"ready"} (a returned credit) IMMEDIATELY on
+    // receive — before compositing — so the engine runs up to maxInFlight
+    // frames ahead instead of serializing behind each present round-trip (the
+    // GPU stutter fix; see engine-pre.js bibBitmapPresentReady). Memory stays
+    // bounded by maxInFlight; the shared main-thread rAF caps production.
+    // The Worker subclass MUST be installed before embedder.js so Emscripten's
+    // pthread pool is constructed through it.
+    const bibPresent = { bound: false, port: null, frames: 0, lastFrameId: 0 };
+    function installBibPresentWorkerHook() {
+      if (presentMode !== "gpu-bitmap") return;
+      const NativeWorker = window.Worker;
+      window.Worker = class BIBPresentWorker extends NativeWorker {
+        constructor(url, options) {
+          super(url, options);
+          this.addEventListener("message", (e) => {
+            const d = e.data || {};
+            // Only the proxied-main engine worker sends this exact hello;
+            // Emscripten's own cmd-tagged messages never match.
+            if (d.__bibPresent !== "hello" || bibPresent.bound) return;
+            const port = e.ports && e.ports[0];
+            if (!port) { log("present: hello arrived without a port"); return; }
+            bibPresent.bound = true;
+            bibPresent.port = port;
+            port.onmessage = (ev) => {
+              const m = ev.data || {};
+              if (m.t !== "frame") return;
+              const bitmap = m.bitmap, id = m.id || 0;
+              // Return the credit IMMEDIATELY — before compositing — so the
+              // engine can render the next frame concurrently (triple-buffered,
+              // never blocked on the transferFromImageBitmap round-trip). The
+              // old code acked only AFTER compositing, serializing the engine
+              // behind every present and causing the hard-graphics stutter.
+              port.postMessage({ t: "ready", id });
+              if (!bitmap) return;
+              try {
+                bitmapCtx.transferFromImageBitmap(bitmap); // consumes the bitmap
+                bibPresent.frames++;
+                bibPresent.lastFrameId = id;
+                if (typeof bib !== "undefined") bib.frames = bibPresent.frames;
+                blitsEl.textContent = bibPresent.frames;
+              } catch (err) {
+                console.error("BIB: bitmap present failed:", err);
+                try { bitmap.close(); } catch {}
+              }
+            };
+            if (port.start) port.start();
+            // Optional present-depth tuning/debug knob: ?inflight=N (default 3,
+            // 1 = legacy strict one-in-flight, for A/B). Sent before the first
+            // ready so it applies from the very first frame.
+            const inflightParam = new URLSearchParams(location.search).get("inflight");
+            if (inflightParam !== null) {
+              const n = Math.max(1, Math.min(8, parseInt(inflightParam, 10) || 3));
+              port.postMessage({ t: "config", maxInFlight: n });
+              log("present: maxInFlight=" + n);
+            }
+            port.postMessage({ t: "ready", id: 0 }); // unblock the worker's first frame
+            log("present: gpu-bitmap port bound");
+          });
+        }
+      };
+      // Preserve enough constructor shape for Emscripten-generated code.
+      Object.setPrototypeOf(window.Worker, NativeWorker);
+      window.Worker.prototype = NativeWorker.prototype;
+    }
 
     // --- Event-driven engine pump (perf) --------------------------------
     // The engine pokes Module.bibWakeUp on every RunLoop wake-up (dispatch,
@@ -846,9 +947,18 @@
         wireInput();
         canvas.focus();
         requestAnimationFrame(blitLoop);
-        // W-B2 v2: GPU now pushes CPU pixels through bibBlit like raster, so
-        // the hello gate is judged there (first frame) — no separate readback
-        // judge needed.
+        // Hello-gate verdict: raster-2d judges in bibBlit (first putImageData).
+        // gpu-bitmap/gpu-implicit never call bibBlit (frames go via
+        // bitmaprenderer / implicit present), so judge from a readback instead
+        // — gate8 waits on __bib.verdict. The readback reads the engine's
+        // texture surface, independent of the present path. tol=2 (GPU rounding).
+        if (demo === "hello" && presentMode !== "raster-2d") {
+          const judgeViaReadback = (tries) => bib.readback().then((frame) => {
+            if (frame) judgeHelloFrame(frame.data, frame.w, frame.h, 2);
+            else if (tries > 0) setTimeout(() => judgeViaReadback(tries - 1), 100);
+          });
+          judgeViaReadback(20);
+        }
         urlbarEl.disabled = false;
         gobtnEl.disabled = false;
         // Same allowlist as the URL bar — ?url= arrives from arbitrary
@@ -892,6 +1002,10 @@
       // localStorage waits per-origin for first touch.
       Module.bibSeedState = seedState;
       if (seedState) log(`persist: profile loaded (${seedState.length} bytes)`);
+      // Install the gpu-bitmap present Worker subclass BEFORE embedder.js so
+      // Emscripten's pthread pool (incl. the proxied-main engine worker) is
+      // created through it (no-op unless presentMode==="gpu-bitmap").
+      installBibPresentWorkerHook();
       const s = document.createElement("script");
       s.src = "engine/embedder.js";
       document.body.appendChild(s);

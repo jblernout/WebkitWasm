@@ -6,6 +6,41 @@ before touching rendering/present.
 
 ---
 
+## ✅ IMPLEMENTED & VERIFIED — 2026-06-13 ~10:45 EDT
+
+The plan below was executed. Zero-copy bitmap present is live on the default
+(BIB_PTHREAD=ON) build. Changes: `src/embedder/main.cpp` (bibPaintGPUIfDirty,
+presentGPUToCanvasFBO, bibBitmapPresentReady/bibTransferCurrentFrameBitmap,
+rewritten bibPushFrameIfDirty 3-branch + bib_render_readback GPU branch, boot
+target + loss handlers pthread/mainthread split, worker→main hello),
+`web/engine-pre.js` (present bridge), `web/browser.html` (3-mode context select +
+Worker subclass + bitmap receiver + readback hello-judge), the WebKit port file
+(`explicitSwapControl`/`renderViaOffscreenBackBuffer` gated behind legacy
+`BIB_GPU_READBACK_PRESENT`), `embedder.cmake` (dropped `-sOFFSCREEN_FRAMEBUFFER=1`,
+emits `bib-build-config.js`).
+
+**Handshake tweak vs the GPT-5.5 design doc:** the WORKER creates the
+MessageChannel and transfers `port2` to the page INSIDE the hello (worker→main
+only) — so nothing custom traverses Emscripten's worker `onmessage`. There is no
+main→worker `__bibPresentPort` message; that is intentional, not missing.
+
+**Verified:** gate8 (GPU pipeline + G4 loss/restore + software-fallback) PASS;
+gate2 (raster pixel-exact tol=0) PASS; headed real-GPU (Intel UHD 630) wheel→pixel
+latency: Wikipedia **76–135ms**, Discord **94–388ms (median 123ms)** with 10–32
+distinct visible changes per scroll — vs the broken Approach R **>4000ms / 0
+distinct / frozen**. Codex-reviewed; one defensive fix applied (postMessage-throw
+path closes the ImageBitmap + leaves ready=true → no leak, no wedge).
+
+**Still open / next:** (1) BIB_PTHREAD=OFF (gpu-implicit, main-thread) path is
+implemented but NOT built/verified this session — needs a separate `BIB_PTHREAD=0`
+build dir + MotionMark to confirm the 109@144fps reference path. (2) User-run
+MotionMark on the ON build for a steady-state number. (3) Discord still throws a
+pre-existing guest `memory access out of bounds` (the #57/#70 family) — unrelated
+to present; the engine survives it and keeps presenting. Original plan retained
+below for reference.
+
+---
+
 ## TL;DR (decision is made — this is an implementation handoff)
 
 - **We regressed.** Was **MotionMark 109.87 @ 144fps** (2026-06-11, main-thread GPU,
