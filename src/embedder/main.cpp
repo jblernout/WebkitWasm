@@ -1338,6 +1338,12 @@ JSC_DEFINE_HOST_FUNCTION(bibWasm2jsHostFunction, (JSC::JSGlobalObject* globalObj
             return 0;
         const len = lengthBytesUTF8(result) + 1;
         const buf = _bib_wasm_alloc(len);
+        // A large translatable module (Discord ships several MB-scale ones)
+        // can produce a multi-MB JS string; under wasm32 heap pressure the
+        // alloc can fail. Without this guard stringToUTF8 writes through a
+        // null pointer -> "memory access out of bounds" (Codex Rank 2).
+        if (!buf)
+            return 0;
         stringToUTF8(result, buf, len);
         return buf;
     }, payloadUTF8.data(), modeUTF8.data()));

@@ -109,7 +109,47 @@
 
   var moduleState = new WeakMap();
 
+  // Cheap pre-scan: how many tables the module DEFINES (table section, id 4),
+  // by walking only section headers — NO binaryen, NO import-descriptor
+  // parsing (which is fragile across wasm-bindgen/exception-handling
+  // encodings). Binaryen's wasm2js FATALS on modules with >1 table, but only
+  // AFTER emitAsmjs grinds through the whole module: libdiscore (1.17MB,
+  // 2 defined tables, Rust/wasm-bindgen) took 58.8s to reject on the
+  // JIT-less engine thread, freezing the tab (measured 2026-06-12). Deciding
+  // it here is ~1ms. Returns -1 on any parse uncertainty -> falls through to
+  // the real translate path (never a false reject). NOTE: this catches the
+  // common case (>=2 tables in the table section, e.g. libdiscore); a
+  // 1-imported + 1-defined split would read as 1 here and fall through — no
+  // regression vs. the pre-existing slow path.
+  function definedTableCount(bytes) {
+    try {
+      if (bytes.length < 8 || bytes[0] !== 0x00 || bytes[1] !== 0x61 ||
+          bytes[2] !== 0x73 || bytes[3] !== 0x6d)
+        return -1; // not wasm — let the bridge decide
+      var p = 8;
+      function u32() { // LEB128 unsigned
+        var r = 0, sh = 0, b;
+        do { b = bytes[p++]; r |= (b & 0x7f) << sh; sh += 7; } while (b & 0x80);
+        return r >>> 0;
+      }
+      while (p < bytes.length) {
+        var id = bytes[p++];
+        var len = u32();
+        var end = p + len;
+        if (id === 4) // table section: leading count = number of defined tables
+          return u32();
+        p = end; // skip every other section by its declared length
+      }
+      return 0; // no table section
+    } catch (e) {
+      return -1;
+    }
+  }
+
   function translate(bytes) {
+    // Reject multi-table modules instantly (binaryen would burn ~60s first).
+    if (definedTableCount(bytes) > 1)
+      throw new CompileError("BrowserInBrowser: module is not wasm2js-translatable (multiple tables)");
     var src = bridge(toBase64(bytes), "translate");
     if (typeof src !== "string" || !src)
       throw new CompileError("BrowserInBrowser: module is not wasm2js-translatable");
@@ -180,6 +220,11 @@
     var copy = copyBytes(bytes); // TypeError on non-BufferSource, per spec
     if (copy.length < 8 || copy[0] !== 0 || copy[1] !== 0x61 || copy[2] !== 0x73 || copy[3] !== 0x6d)
       return false;
+    // A multi-table module is valid wasm (validate -> true), just not
+    // wasm2js-translatable — short-circuit so feature-detection doesn't pay
+    // binaryen's readBinary (~1.6s for libdiscore) or the base64 round-trip.
+    if (definedTableCount(copy) > 1)
+      return true;
     return bridge(toBase64(copy), "validate") === "1";
   }
 
