@@ -213,6 +213,33 @@ static std::atomic<bool> g_gpuLost { false };
 // branch checks per tick. All fields are engine-thread-only (no atomics
 // needed — bib_tick/bib_render run on the engine thread).
 static bool g_perfLog = false;
+// Rendering-update throttle. On JS-saturated pages WebCore's "update the
+// rendering" pass (guest rAF/React callbacks + the style/layout they dirty)
+// eats most of the engine thread (measured: 700-890ms/s on Discord) and starves
+// paint -> freeze. We cap how often that pass runs. DYNAMIC by default: the cap
+// is DERIVED from the measured per-pass cost (EMA) so the pass takes at most
+// kRcapUpdateBudget of the thread -> heavy pages throttle (Discord ~8ms/pass ->
+// ~31/s), light pages run full rate (~1ms/pass -> ~250/s = uncapped). No
+// hardcoded fps. ?rcap=0 disables; ?rcap=N forces a fixed N/s (manual override).
+// Deferred, not dropped: g_renderingUpdateRequested stays set until an eligible
+// tick runs it.
+static bool   g_rcapDynamic   = false;  // dynamic cap (default when interactive)
+static double g_rcapFixedMs   = 0.0;    // >0 = fixed min-interval (manual override)
+static double g_dynUpdEmaMs   = 0.0;    // EMA of updateRendering cost (ms)
+static double g_dynIntervalMs = 0.0;    // derived min-interval (ms); ~0 = uncapped
+static double g_lastRenderUpdateMs = 0.0;
+static constexpr double kRcapUpdateBudget   = 0.33;  // updateRendering's max thread share
+                                                     // (~1/3; leaves 2/3 for paint+timers.
+                                                     // higher = more updates/fps, less paint
+                                                     // headroom. 0.33 targets ~30/s on Discord
+                                                     // where throttled passes batch to ~10ms.)
+static constexpr double kRcapMaxIntervalMs  = 33.0;  // 30/s floor: never throttle below the
+                                                     // empirically-good rate (rcap=30 beat 20).
+                                                     // bounds the cost-inflation feedback so the
+                                                     // dynamic cap floats 30-60/s, not down to a
+                                                     // choppy crawl. (timer/microtask JS in
+                                                     // bib_pump is a separate, un-throttled load.)
+static constexpr double kRcapEmaAlpha       = 0.2;   // EMA weight for new cost samples
 namespace {
 struct PerfAccum {
     double windowStart = 0;  // MonotonicTime ms at window open (0 = not yet)
@@ -671,9 +698,39 @@ EMSCRIPTEN_KEEPALIVE void bib_tick()
     // returns true, which also suppresses RenderingUpdateScheduler's
     // fallback timer): one pass per request, max one per host frame, zero
     // on idle pages.
-    if (g_engine && std::exchange(BIB::g_renderingUpdateRequested, false)) {
-        g_engine->page->updateRendering();
-        g_engine->page->finalizeRenderingUpdate({ });
+    if (g_engine && BIB::g_renderingUpdateRequested) {
+        // Throttle the rendering-update pass (see g_rcapDynamic). Interval is
+        // fixed (manual ?rcap=N) or DERIVED from the EMA of the pass cost so it
+        // stays <= kRcapUpdateBudget of the thread. Deferred, not dropped: the
+        // flag stays set so a later eligible tick runs it. Uncapped (rcap=0 /
+        // non-interactive): throttling=false -> equivalent to the old exchange().
+        const bool throttling = g_rcapDynamic || g_rcapFixedMs > 0.0;
+        bool runNow = true;
+        double now = 0.0;
+        if (throttling) {
+            now = bibNowMs();
+            const double interval = g_rcapFixedMs > 0.0 ? g_rcapFixedMs : g_dynIntervalMs;
+            if (interval > 0.0 && now - g_lastRenderUpdateMs < interval)
+                runNow = false;
+        }
+        if (runNow) {
+            BIB::g_renderingUpdateRequested = false;
+            g_engine->page->updateRendering();
+            g_engine->page->finalizeRenderingUpdate({ });
+            if (throttling) {
+                g_lastRenderUpdateMs = now; // start-to-start spacing
+                if (g_rcapDynamic) {
+                    // Re-derive the cap from this pass's cost: keep
+                    // updateRendering <= kRcapUpdateBudget of the thread.
+                    const double cost = bibNowMs() - now;
+                    g_dynUpdEmaMs = g_dynUpdEmaMs > 0.0
+                        ? g_dynUpdEmaMs * (1.0 - kRcapEmaAlpha) + cost * kRcapEmaAlpha
+                        : cost;
+                    const double iv = g_dynUpdEmaMs / kRcapUpdateBudget;
+                    g_dynIntervalMs = iv > kRcapMaxIntervalMs ? kRcapMaxIntervalMs : iv;
+                }
+            }
+        }
     }
     const double _perfT2 = g_perfLog ? bibNowMs() : 0;
     bibPushFrameIfDirty(); // layout/paint/present accumulate inside bib_render
@@ -1776,6 +1833,25 @@ int main()
         catch (e) { return 0; }
     });
     printf("EMBEDDER: perflog=%s\n", g_perfLog ? "on" : "off");
+
+    // Rendering-update throttle config (see g_rcapDynamic). ?rcap absent =>
+    // DYNAMIC (default, interactive only — gates render once and must stay
+    // deterministic). ?rcap=0 => off (uncapped). ?rcap=N (1..240) => fixed N/s.
+    {
+        int rcap = MAIN_THREAD_EM_ASM_INT({
+            try { var s = new URLSearchParams(location.search).get("rcap");
+                  if (s === null) return -1;                 // absent => dynamic
+                  var v = parseInt(s, 10);
+                  return (v >= 0 && v <= 240) ? v : -1; }
+            catch (e) { return -1; }
+        });
+        const bool inter = MAIN_THREAD_EM_ASM_INT({ return Module.bibInteractive ? 1 : 0; });
+        if (rcap < 0)       { g_rcapDynamic = inter; g_rcapFixedMs = 0.0; }
+        else if (rcap == 0) { g_rcapDynamic = false; g_rcapFixedMs = 0.0; }
+        else                { g_rcapDynamic = false; g_rcapFixedMs = 1000.0 / rcap; }
+        printf("EMBEDDER: rcap=%s\n",
+            g_rcapFixedMs > 0.0 ? "fixed" : g_rcapDynamic ? "dynamic" : "off");
+    }
 
     // Request blocklist (?noblock=1 on the host page disables it): the loader
     // strategy refuses analytics/ads/telemetry subresources before they
