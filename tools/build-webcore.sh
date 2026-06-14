@@ -60,7 +60,7 @@ fi
 # ship SharedArrayBuffer (no COOP/COEP header control — static/edge hosts).
 # Trade-off: the W-B1 win reverses — heavy pages peg the host tab again.
 # Default ON (the daily-driver mode).
-BIB_PTHREAD="${BIB_PTHREAD:-1}"
+BIB_PTHREAD="${BIB_PTHREAD:-0}"
 WASM_FLAGS="-msimd128"
 BIB_PTHREAD_CMAKE=OFF
 if [ "$BIB_PTHREAD" = 1 ]; then
