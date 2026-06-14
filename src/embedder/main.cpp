@@ -41,6 +41,7 @@
 #include "LocalFrameInlines.h"
 #include "LocalFrameView.h"
 #include "MemoryCache.h"
+#include "CommonVM.h" // #77/OOM probe: commonVM().heap.size() for the JS-heap gauge
 #include "NetworkStorageSession.h" // persistence: cookieDatabase() dump/seed
 #include "Page.h"
 #include "PageConfiguration.h"
@@ -65,6 +66,7 @@
 #include <JavaScriptCore/JSFunction.h>
 #include <atomic>
 #include <emscripten.h>
+#include <emscripten/heap.h> // emscripten_get_heap_size(): total wasm linear memory (4GB ceiling gauge)
 #ifdef __EMSCRIPTEN_PTHREADS__
 #include <emscripten/proxying.h>
 #endif
@@ -252,6 +254,17 @@ struct PerfAccum {
     double persist = 0;      // bibMaybePersist
     int ticks = 0;           // bib_tick bodies run this window
     int painted = 0;         // frames that actually painted >=1 rect
+    // #77 burst-shape probe: bib_pump / bib_pump_network RunLoop::cycle costs.
+    // These run OUTSIDE bib_tick (no paint), so their total ~= the page-side
+    // "pumpGap". max/count tell us the SHAPE: one giant cycle (max~=total ->
+    // pacing between pumps useless, need mid-cycle break) vs many small cycles
+    // (max<<total -> interleaving a paint per N pumps works).
+    double pumpCycle = 0;    // sum of bib_pump RunLoop::cycle ms
+    double pumpMax = 0;      // largest single bib_pump cycle ms (the decider)
+    int pumps = 0;           // bib_pump cycles this window
+    double netCycle = 0;     // sum of bib_pump_network (hostPump+cycle) ms
+    double netMax = 0;       // largest single net cycle ms
+    int nets = 0;            // bib_pump_network cycles this window
 };
 PerfAccum g_perf;
 }
@@ -754,12 +767,16 @@ EMSCRIPTEN_KEEPALIVE void bib_tick()
                 pushOther = 0;
             const double busy = g_perf.runloop + g_perf.renderUpdate + g_perf.layout
                 + g_perf.paint + g_perf.present + g_perf.persist + pushOther;
-            WTFLogAlways("BIBPERF/s ticks=%d painted=%d elapsed=%.0fms busy=%.0f%% | "
+            WTFLogAlways("BIBPERF/s ticks=%d painted=%d elapsed=%.0fms busy=%.0f%% heap=%.0fMB jsc=%.0fMB | "
                 "runloop(JS)=%.0f renderUpd=%.0f layout=%.0f paint=%.0f present=%.0f pushOther=%.0f persist=%.0f ms | "
+                "pump=%.0f(max%.0f n%d) net=%.0f(max%.0f n%d) | "
                 "avgPaintedFrame=%.1fms",
                 g_perf.ticks, g_perf.painted, elapsed, 100.0 * busy / elapsed,
+                emscripten_get_heap_size() / 1048576.0, WebCore::commonVM().heap.size() / 1048576.0,
                 g_perf.runloop, g_perf.renderUpdate, g_perf.layout, g_perf.paint,
                 g_perf.present, pushOther, g_perf.persist,
+                g_perf.pumpCycle, g_perf.pumpMax, g_perf.pumps,
+                g_perf.netCycle, g_perf.netMax, g_perf.nets,
                 g_perf.painted ? (g_perf.layout + g_perf.paint + g_perf.present) / g_perf.painted : 0.0);
             g_perf = PerfAccum { };
             g_perf.windowStart = _perfT4;
@@ -788,7 +805,17 @@ EMSCRIPTEN_KEEPALIVE void bib_pump()
             g_pumpQueued.store(false, std::memory_order_release);
         return;
     }
+    if (!g_perfLog) {
+        WTF::RunLoop::cycle();
+        return;
+    }
+    const double t0 = bibNowMs();
     WTF::RunLoop::cycle();
+    const double dt = bibNowMs() - t0;
+    g_perf.pumpCycle += dt;
+    if (dt > g_perf.pumpMax)
+        g_perf.pumpMax = dt;
+    g_perf.pumps++;
 }
 static void bibRunPump(void*)
 {
@@ -813,8 +840,19 @@ EMSCRIPTEN_KEEPALIVE void bib_pump_network()
             g_netPumpQueued.store(false, std::memory_order_release);
         return;
     }
+    if (!g_perfLog) {
+        WebCore::CurlContext::singleton().scheduler().hostPump();
+        WTF::RunLoop::cycle();
+        return;
+    }
+    const double t0 = bibNowMs();
     WebCore::CurlContext::singleton().scheduler().hostPump();
     WTF::RunLoop::cycle();
+    const double dt = bibNowMs() - t0;
+    g_perf.netCycle += dt;
+    if (dt > g_perf.netMax)
+        g_perf.netMax = dt;
+    g_perf.nets++;
 }
 static void bibRunNetPump(void*)
 {

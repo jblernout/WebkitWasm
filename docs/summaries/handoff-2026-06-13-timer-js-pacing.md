@@ -1,5 +1,15 @@
 # Handoff — timer/microtask JS pacing (residual Discord freeze)
 
+> ⚠️ **SUPERSEDED 2026-06-13 ~18:25 EDT — DO NOT ACT ON THIS HANDOFF'S PLAN.**
+> This handoff's premise (pace `bib_pump` timer/microtask JS, "pumpGap saturation")
+> was FALSIFIED by direct per-cycle + heap instrumentation. `pump` (timer JS) is
+> tiny; the freeze is a single synchronous `RunLoop::cycle` up to **10.5s**
+> processing Discord's gateway READY at no-JIT speed, at **531MB/4GB (not memory)**.
+> The old `pumpGap=700–933ms/s` was a page-side formula mislabeling
+> `bib_pump_network` cycles as timer JS. See task #77 (updated) and memory
+> `discord-freeze-rootcause-nojit`. A GPT-5.5 consult is pending; this doc will be
+> rewritten with the corrected diagnosis + chosen levers afterward.
+
 **Written**: 2026-06-13 ~17:30 EDT. **Active handoff.** Supersedes
 `handoff-2026-06-13-gpu-present-stutter.md` (that work is DONE + committed).
 Read THIS first; the GPU-present-stutter handoff is now history.

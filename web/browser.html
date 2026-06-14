@@ -33,7 +33,37 @@
            spellcheck="false" autocomplete="off" disabled>
     <button id="gobtn" disabled>Go</button>
   </div>
-  <canvas id="screen" width="800" height="600" tabindex="0"></canvas>
+  <style>
+    /* #79 freeze/loading indicator — host-side corner badge (bottom-right, no
+       canvas dim). Its spinner animates on the host compositor while the engine
+       pthread is blocked in a long no-JIT RunLoop::cycle. */
+    #screenwrap { position: relative; display: inline-block; line-height: 0; }
+    #bibfreeze { display: none; position: absolute; right: 10px; bottom: 10px;
+      align-items: center; flex-flow: row wrap; gap: 6px 9px; max-width: 240px;
+      padding: 8px 11px; border-radius: 8px;
+      background: rgba(16,18,24,0.82); color: #e8eaf0; text-align: left;
+      font: 12px/1.4 system-ui, -apple-system, Segoe UI, sans-serif;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.4); pointer-events: none; }
+    #bibfreeze .spin { width: 15px; height: 15px; border: 2px solid rgba(255,255,255,0.25);
+      border-top-color: #fff; border-radius: 50%; animation: bibspin 0.9s linear infinite; flex: none; }
+    #bibfreeze[data-spin="0"] .spin { display: none; }
+    #bibfreeze-msg { font-weight: 600; font-size: 12.5px; }
+    #bibfreeze-sub { flex-basis: 100%; opacity: 0.8; font-size: 11.5px; }
+    #bibfreeze-sub:empty { display: none; }
+    #bibfreeze-reload { flex-basis: 100%; align-self: flex-start; pointer-events: auto;
+      margin-top: 2px; padding: 4px 11px; background: #5865f2; color: #fff; border: 0;
+      border-radius: 5px; cursor: pointer; font: inherit; font-size: 11.5px; }
+    @keyframes bibspin { to { transform: rotate(360deg); } }
+  </style>
+  <div id="screenwrap">
+    <canvas id="screen" width="800" height="600" tabindex="0"></canvas>
+    <div id="bibfreeze" data-spin="1">
+      <div class="spin"></div>
+      <div id="bibfreeze-msg">Loading…</div>
+      <div id="bibfreeze-sub"></div>
+      <button id="bibfreeze-reload" style="display:none" onclick="location.reload()">Reload</button>
+    </div>
+  </div>
   <pre id="log"></pre>
   <!-- wisp-js client polyfill (global `wisp_client`), vendored from
        node_modules/@mercuryworkshop/wisp-js@0.4.1/dist/wisp-client.js -->
@@ -105,11 +135,12 @@
     // gpu-bitmap present receiver: catch the engine worker's one-time hello
     // (self.postMessage from C++ → engine-pre.js), take the transferred
     // MessagePort, and paint each ImageBitmap onto #screen via bitmaprenderer.
-    // Triple-buffered: ack {t:"ready"} (a returned credit) IMMEDIATELY on
-    // receive — before compositing — so the engine runs up to maxInFlight
-    // frames ahead instead of serializing behind each present round-trip (the
-    // GPU stutter fix; see engine-pre.js bibBitmapPresentReady). Memory stays
-    // bounded by maxInFlight; the shared main-thread rAF caps production.
+    // Credit model: ack {t:"ready"} on receive — before compositing — so the
+    // engine isn't serialized behind each present round-trip. Depth = maxInFlight
+    // (DEFAULT 1; ?inflight=N to A/B). The old depth-3 default floods the page
+    // main thread under load and collapses delivery (the "random stutter"), so 1
+    // is now default; see the maxInFlight config below + engine-pre.js
+    // bibBitmapPresentReady. The shared main-thread rAF caps production.
     // The Worker subclass MUST be installed before embedder.js so Emscripten's
     // pthread pool is constructed through it.
     const bibPresent = { bound: false, port: null, frames: 0, lastFrameId: 0 };
@@ -151,15 +182,21 @@
               }
             };
             if (port.start) port.start();
-            // Optional present-depth tuning/debug knob: ?inflight=N (default 3,
-            // 1 = legacy strict one-in-flight, for A/B). Sent before the first
-            // ready so it applies from the very first frame.
+            // Present depth. DEFAULT 1 (strict one-in-flight). The old depth-3
+            // default floods the page main thread under high render rate (engine
+            // posts faster than transferFromImageBitmap drains) and collapses
+            // delivery — the "random stutter" non-determinism. inflight A/B,
+            // Discord, 2026-06-13 (research-06): depth-3 was BIMODAL (cv
+            // 0.6–4.3, one run near-frozen at 2.4fps); depth-1 was STEADY
+            // (cv ~0.77 every run). ?inflight=N overrides (1–8; 3 = old
+            // triple-buffer) for A/B. Sent before the first ready so it applies
+            // from the very first frame.
             const inflightParam = new URLSearchParams(location.search).get("inflight");
-            if (inflightParam !== null) {
-              const n = Math.max(1, Math.min(8, parseInt(inflightParam, 10) || 3));
-              port.postMessage({ t: "config", maxInFlight: n });
-              log("present: maxInFlight=" + n);
-            }
+            const n = inflightParam !== null
+              ? Math.max(1, Math.min(8, parseInt(inflightParam, 10) || 1))
+              : 1;
+            port.postMessage({ t: "config", maxInFlight: n });
+            log("present: maxInFlight=" + n);
             port.postMessage({ t: "ready", id: 0 }); // unblock the worker's first frame
             log("present: gpu-bitmap port bound");
           });
@@ -457,7 +494,16 @@
         // so a stalled load splits into "bytes never arrived" (wisp/server)
         // vs "engine never consumed" (pump/proxy). Cheap; kept.
         ws.addEventListener("message", (e) => {
-          window.__bibWispBytes = (window.__bibWispBytes || 0) + (e.data?.byteLength || e.data?.length || 0);
+          const n = e.data?.byteLength || e.data?.length || 0;
+          window.__bibWispBytes = (window.__bibWispBytes || 0) + n;
+          // #78: per-host byte accounting. These are TLS-encrypted stream bytes
+          // (TLS terminates in-engine), so the count ≈ the compressed payload
+          // size per host — enough to size Discord's gateway READY and validate
+          // the payload-reduction levers (IDB client_state, large_threshold).
+          // null-proto: a host literally named "constructor"/"__proto__" must
+          // not collide with Object.prototype keys (Codex LOW).
+          const sb = (window.__bibStreamBytes || (window.__bibStreamBytes = Object.create(null)));
+          sb[m[1]] = (sb[m[1]] || 0) + n;
         });
         // Surface non-voluntary stream closes with the wisp reason name.
         // A failed dial otherwise dies inside TLS as a phantom curl=35
@@ -478,6 +524,76 @@
       return new NativeWebSocket(url, protocols);
     };
     window.WebSocket.prototype = NativeWebSocket.prototype;
+
+    // --- #78/#79 host-side freeze UX + gateway payload accounting ---------
+    // The engine runs on a pthread; the host main thread stays responsive while
+    // the engine is blocked in a long no-JIT RunLoop::cycle (e.g. Discord's
+    // ~10s gateway READY hydration — task #77). Watch window.__bib.frames; a
+    // stall means the engine is busy, so show a host overlay whose CSS spinner
+    // animates on the host compositor, unaffected by the engine stall. An idle
+    // page ALSO stops delivering frames, so steady-state stalls surface the
+    // overlay only if the user just interacted (a freeze they caused) — never
+    // on a quiescent page. During initial load it shows unconditionally.
+    (function bibFreezeUX() {
+      const ov = document.getElementById("bibfreeze");
+      const msgEl = document.getElementById("bibfreeze-msg");
+      const subEl = document.getElementById("bibfreeze-sub");
+      const reloadEl = document.getElementById("bibfreeze-reload");
+      const STALL_MS = 450;        // no new frame this long while busy => mid-cycle
+      const INPUT_WINDOW_MS = 3000;
+      const LOAD_DONE_FRAMES = 60; // ~2s of real painting => the app is up
+      let lastFrames = -1, lastFrameT = performance.now(), loadDone = false, inFreeze = false, lastInputT = 0, shown = "";
+      // Track input across the whole page (canvas AND host chrome — the URL
+      // bar / Go button), so a guest navigation typed into #urlbar still counts
+      // as a user-caused stall and surfaces the overlay (Codex MEDIUM). Capture
+      // phase so it fires even if a handler stops propagation.
+      ["pointerdown", "keydown", "wheel"].forEach((ev) =>
+        document.addEventListener(ev, () => { lastInputT = performance.now(); }, { passive: true, capture: true }));
+      function set(title, sub, reload) {
+        const key = title + "|" + sub + "|" + reload;
+        if (shown === key) return; // don't thrash the DOM every tick
+        shown = key;
+        msgEl.textContent = title;
+        subEl.textContent = sub || "";
+        ov.dataset.spin = reload ? "0" : "1";
+        reloadEl.style.display = reload ? "" : "none";
+        ov.style.display = "flex";
+      }
+      function hide() { if (shown !== "") { shown = ""; ov.style.display = "none"; } }
+      setInterval(() => {
+        const b = window.__bib;
+        if (!b) return;
+        const now = performance.now();
+        if (b.dead) { set("Engine stopped", "Reload to restart.", true); return; }
+        if (!b.ready) return; // boot is covered by the status line
+        if (b.frames !== lastFrames) {
+          lastFrames = b.frames; lastFrameT = now; inFreeze = false;
+          if (b.frames >= LOAD_DONE_FRAMES) loadDone = true;
+          hide();
+          return;
+        }
+        const stalled = now - lastFrameT;
+        if (!loadDone) {
+          if (stalled >= 800)
+            set("Loading…", "", false);
+          return;
+        }
+        // steady state: surface only a freeze the user caused; never on idle.
+        if (!inFreeze && stalled >= STALL_MS && now - lastInputT <= INPUT_WINDOW_MS)
+          inFreeze = true;
+        if (inFreeze)
+          set("Working…", "", false);
+      }, 150);
+      // #78: periodic per-host wisp byte dump (perflog only) to size the payload.
+      if (params.get("perflog") === "1") {
+        setInterval(() => {
+          const sb = window.__bibStreamBytes; if (!sb) return;
+          const top = Object.keys(sb).sort((a, c) => sb[c] - sb[a]).slice(0, 5)
+            .map((h) => h + "=" + (sb[h] / 1048576).toFixed(2) + "MB").join("  ");
+          if (top) log("wisp bytes/host: " + top);
+        }, 2000);
+      }
+    })();
 
     // MUST stay byte-identical to kTestHTML in src/embedder/main.cpp so the
     // browser pixel counts match the offscreen gate exactly.

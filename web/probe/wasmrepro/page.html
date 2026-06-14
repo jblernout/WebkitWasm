@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>wasm OOB repro</title></head>
+<body style="background:#fff;margin:0;font:14px monospace">
+<h1 style="color:#c00">wasm repro</h1>
+<pre id="out">starting...</pre>
+<script>
+// Reproduces the Discord libdiscore path: a multi-table wasm module the
+// wasm2js shim REJECTS. The user's crash storm started right after this
+// rejection on the authenticated app. We hammer the shim the way Discord
+// does: repeated WebAssembly.compile / instantiate / validate on the big
+// multi-table module, plus a feature-detect probe, to surface any OOB in
+// the bridge's reject path (CCLOOP exec of the polyfill over a 1.17MB
+// payload, base64 round-trip across the heap, etc).
+const out = document.getElementById("out");
+const log = (s) => { out.textContent += "\n" + s; console.log("WASMREPRO " + s); };
+
+(async () => {
+  try {
+    log("fetch libdiscore.wasm");
+    const buf = await (await fetch("./libdiscore.wasm")).arrayBuffer();
+    log("got " + buf.byteLength + " bytes");
+
+    // 1) validate (cheap path)
+    const t0 = performance.now();
+    log("validate=" + WebAssembly.validate(buf) + " (" + (performance.now()-t0).toFixed(0) + "ms)");
+
+    // 2) ONE compile, timed — isolate the shim's reject path cost/fault.
+    log("compile START");
+    const t1 = performance.now();
+    try { await WebAssembly.compile(buf); log("compile UNEXPECTED ok (" + (performance.now()-t1).toFixed(0) + "ms)"); }
+    catch (e) { log("compile rejected: " + e.name + " (" + (performance.now()-t1).toFixed(0) + "ms)"); }
+
+    log("DONE-OK");
+  } catch (e) {
+    log("THREW: " + e + " :: " + (e && e.stack));
+  }
+})();
+</script>
+</body></html>
