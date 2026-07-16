@@ -1,4 +1,11 @@
-# BrowserInBrowser
+# WebkitWasm
+
+--- Fun facts about this port
+- It was done by mostly fable 5, opus 4.8 and GLM 5.2, the inital "working" version took 6 hours.
+- Took approximately $5000 in API costs (But easily doable on the single $200/month anthropic sub)
+- The port also contains docs, md files, recaps, from my session and workflow with claude making it easier for anyone to see progress and work with agents to build it out
+- Sister project and more polished port of gecko by a friend here: https://github.com/HeyPuter/firefox-wasm
+- If I have time i may continue some work on it, it currently has some known issues (for example, video support) but the engine port itself is actually moderately fast, possibly more so then the gecko port due to webkit being lighter and more portable to begin with.
 
 A full modern browser engine running **inside a browser tab**. WebKit
 (WebCore + JavaScriptCore) is compiled to WebAssembly with Emscripten — no VM,
