@@ -66,6 +66,10 @@ option(BIB_PROFILING_FUNCS "Emit the wasm name section (symbolised abort traces)
 # Go/wazero host) pay nothing for growth. Static data (embedded ICU + fonts +
 # CA bundle, ~42 MB) plus the 8 MB stack must fit.
 set(BIB_INITIAL_MEMORY "64MB" CACHE STRING "-sINITIAL_MEMORY for the embedder link")
+set(BIB_MALLOC "dlmalloc" CACHE STRING "-sMALLOC for the embedder link (dlmalloc | mimalloc: freed pages handed back to the host through bib_host_discard)")
+if (BIB_MALLOC STREQUAL "mimalloc")
+    target_compile_definitions(BibEmbedder PRIVATE BIB_MIMALLOC=1)
+endif ()
 if (BIB_PTHREAD AND NOT BIB_PROXY_MAIN)
     target_link_options(BibEmbedder PRIVATE
         "SHELL:-pthread"
@@ -119,6 +123,7 @@ target_link_options(BibEmbedder PRIVATE
     "SHELL:--js-library ${BIB_EMBEDDER_DIR}/bib_host_lib.js"
     "SHELL:-sSTACK_SIZE=8MB"
     "SHELL:-sINITIAL_MEMORY=${BIB_INITIAL_MEMORY}"
+    "SHELL:-sMALLOC=${BIB_MALLOC}"
     "SHELL:-sALLOW_MEMORY_GROWTH=1"
     "SHELL:-sMAXIMUM_MEMORY=4GB"
     # W-B1: EXIT_RUNTIME=0 — under PROXY_TO_PTHREAD a keepalive underflow

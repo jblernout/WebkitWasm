@@ -106,6 +106,11 @@ void bib_host_net_inflight(int delta);
 int bib_host_fetch(int id, const char* method, const char* url, const char* headers, int headersLen, const uint8_t* body, int bodyLen);
 void bib_host_fetch_cancel(int id);
 
+// Memory: mimalloc (BIB_MALLOC=mimalloc) hands the host the ranges of linear
+// memory it decommits; the host drops their physical pages (they read as
+// zero afterwards). Browsers have no such control: no-op.
+void bib_host_discard(void* addr, size_t size);
+
 // Media bridge (BibMediaPlayer): host-side <audio>/<video> elements.
 int bib_host_media_can_play(const char* contentType);
 void bib_host_media_create(int id);

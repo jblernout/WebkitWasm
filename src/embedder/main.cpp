@@ -916,8 +916,15 @@ EMSCRIPTEN_KEEPALIVE char* bib_mem_stats()
         auto& heap = WebCore::commonVM().heap;
         b.append("\"jsc\":{\"size\":"_s, heap.size(), ",\"capacity\":"_s, heap.capacity(), ",\"extra\":"_s, heap.extraMemorySize(), "},"_s);
     }
+#if BIB_MIMALLOC
+    // emmalloc is mimalloc's "OS": arena = what mimalloc took from it, free =
+    // what mimalloc gave back; pages mimalloc holds but purged are not counted.
+    size_t arena = emmalloc_dynamic_heap_size(), freeb = emmalloc_free_dynamic_memory();
+    b.append("\"malloc\":{\"arena\":"_s, arena, ",\"inuse\":"_s, arena - freeb, ",\"free\":"_s, freeb, ",\"top\":"_s, emmalloc_unclaimed_heap_memory(), ",\"mmapped\":0,\"mimalloc\":true}"_s);
+#else
     struct mallinfo mi = mallinfo();
     b.append("\"malloc\":{\"arena\":"_s, static_cast<unsigned>(mi.arena), ",\"inuse\":"_s, static_cast<unsigned>(mi.uordblks), ",\"free\":"_s, static_cast<unsigned>(mi.fordblks), ",\"top\":"_s, static_cast<unsigned>(mi.keepcost), ",\"mmapped\":"_s, static_cast<unsigned>(mi.hblkhd), "}"_s);
+#endif
     b.append("}"_s);
     return strdup(b.toString().utf8().data());
 }
@@ -1691,7 +1698,12 @@ static void bibRunPersistNow(void*);
 static void bibRunReset(void*);
 void bib_load_url(const char* url); // defined below
 unsigned bib_heap_end();
+#if BIB_MIMALLOC
+#include <mimalloc.h>
+#include <emscripten/emmalloc.h>
+#else
 int malloc_trim(size_t); // dlmalloc
+#endif
 static RefPtr<BIB::BibDatabaseProvider> g_databaseProvider;
 EMSCRIPTEN_KEEPALIVE void bib_reset()
 {
@@ -1713,7 +1725,12 @@ EMSCRIPTEN_KEEPALIVE void bib_reset()
     WTF::releaseFastMallocFreeMemory();
     // Give the freed top of the heap back (sbrk shrinks): the host then
     // discards the pages above bib_heap_end() so they stop being resident.
+#if BIB_MIMALLOC
+    mi_collect(true); // purge freed pages now (bib_host_discard), do not wait for purge_delay
+    emmalloc_trim(0);
+#else
     malloc_trim(0);
+#endif
     printf("EMBEDDER: reset (heap end %u)\n", bib_heap_end());
 }
 static void bibRunReset(void*) { bib_reset(); }

@@ -155,6 +155,10 @@ addToLibrary({
   bib_host_fetch_cancel__sig: 'vi',
   bib_host_fetch_cancel: (id) => {},
 
+  // --- memory: browsers cannot drop pages of the wasm memory ------------------
+  bib_host_discard__sig: 'vpp',
+  bib_host_discard: (addr, size) => {},
+
   // --- network idle: browsers use Page.lifecycleEvent / IdlenessDetector -------
   bib_host_net_inflight__sig: 'vi',
   bib_host_net_inflight: (delta) => {},
