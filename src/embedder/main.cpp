@@ -1622,6 +1622,7 @@ static void bibRunPersistNow(void*);
 // The host-side resource cache (bib_host_cache_*) is deliberately kept.
 static void bibRunReset(void*);
 void bib_load_url(const char* url); // defined below
+static RefPtr<BIB::BibDatabaseProvider> g_databaseProvider;
 EMSCRIPTEN_KEEPALIVE void bib_reset()
 {
     if (!bibOnEngineThread()) {
@@ -1635,6 +1636,8 @@ EMSCRIPTEN_KEEPALIVE void bib_reset()
     for (auto* area : BIB::bibAllAreas())
         area->resetContents();
     BIB::bibPendingStorageImport().clear();
+    if (g_databaseProvider)
+        g_databaseProvider->resetAll();
     WebCore::MemoryCache::singleton().evictResources();
     WebCore::commonVM().heap.collectNow(JSC::Sync, JSC::CollectionScope::Full);
     WTF::releaseFastMallocFreeMemory();
@@ -2099,7 +2102,8 @@ int main()
     // any guest JS touching window.indexedDB killed that page's script
     // (discord.com/login went blank exactly there). WebKitLegacy's
     // InProcessIDBServer recipe, in-memory backing store.
-    pageConfiguration.databaseProvider = BIB::BibDatabaseProvider::create();
+    g_databaseProvider = BIB::BibDatabaseProvider::create();
+    pageConfiguration.databaseProvider = g_databaseProvider;
     // Fail-fast WebSocket provider (WS-0): the empty-clients SocketProvider
     // returns a null channel and WebSocket::create RELEASE_ASSERTs on it —
     // any guest `new WebSocket()` aborted the engine (discord.com/login dies

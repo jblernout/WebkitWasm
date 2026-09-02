@@ -214,32 +214,73 @@ public:
         m_curlRequest->resume();
     }
 
-    bool serveFromHostCache(const ResourceRequest& request)
+    // Parses a "Name: value\r\n" block into CurlResponse header lines, with a
+    // synthetic status line first.
+    static CurlResponse cachedResponseFor(const URL& url, int status, const String& block, long long length)
     {
-        CString url = request.url().string().utf8();
-        int status = 0, headersLen = 0, bodyLen = 0;
-        char* headers = nullptr;
-        uint8_t* body = nullptr;
-        if (!bib_host_cache_get(url.data(), &status, &headers, &headersLen, &body, &bodyLen))
-            return false;
         CurlResponse response;
-        response.url = request.url();
+        response.url = url;
         response.statusCode = status;
-        response.expectedContentLength = bodyLen;
+        response.expectedContentLength = length;
         response.httpVersion = CURL_HTTP_VERSION_1_1;
         response.headers.append(makeString("HTTP/1.1 "_s, status, " OK"_s));
-        String block = String::fromUTF8(std::span(headers, static_cast<size_t>(headersLen)));
-        free(headers);
         for (auto line : StringView(block).split('\n')) {
             auto trimmed = line.trim(isASCIIWhitespace<char16_t>);
             if (!trimmed.isEmpty())
                 response.headers.append(trimmed.toString());
         }
+        return response;
+    }
+
+    static String headerValueFromBlock(const String& block, ASCIILiteral name)
+    {
+        for (auto line : StringView(block).split('\n')) {
+            auto colon = line.find(':');
+            if (colon == notFound)
+                continue;
+            if (equalIgnoringASCIICase(line.left(colon).trim(isASCIIWhitespace<char16_t>), name))
+                return line.substring(colon + 1).trim(isASCIIWhitespace<char16_t>).toString();
+        }
+        return String();
+    }
+
+    // A fresh hit is delivered from the cache. A stale hit turns the request
+    // into a conditional one (If-None-Match / If-Modified-Since) and keeps
+    // the entry for a 304 (curlDidReceiveResponse).
+    bool serveFromHostCache(ResourceRequest& request)
+    {
+        CString url = request.url().string().utf8();
+        int status = 0, headersLen = 0, bodyLen = 0, fresh = 0;
+        char* headers = nullptr;
+        uint8_t* body = nullptr;
+        if (!bib_host_cache_get(url.data(), &status, &headers, &headersLen, &body, &bodyLen, &fresh))
+            return false;
+        String block = String::fromUTF8(std::span(headers, static_cast<size_t>(headersLen)));
+        free(headers);
         Ref<SharedBuffer> cachedBody = SharedBuffer::create(std::span<const uint8_t>(body, static_cast<size_t>(bodyLen)));
         free(body);
+        if (!fresh) {
+            String etag = headerValueFromBlock(block, "ETag"_s);
+            String lastModified = headerValueFromBlock(block, "Last-Modified"_s);
+            if (etag.isEmpty() && lastModified.isEmpty())
+                return false; // nothing to validate with: plain reload
+            if (!etag.isEmpty())
+                request.setHTTPHeaderField(HTTPHeaderName::IfNoneMatch, etag);
+            if (!lastModified.isEmpty())
+                request.setHTTPHeaderField(HTTPHeaderName::IfModifiedSince, lastModified);
+            m_staleURL = request.url();
+            m_staleBody = WTF::move(cachedBody);
+            return false;
+        }
         m_fromHostCache = true;
-        // Deliver like ResourceLoader::loadDataURL does: outside the caller's
-        // stack, response then data then completion in one task.
+        deliverCached(cachedResponseFor(request.url(), status, block, bodyLen), WTF::move(cachedBody));
+        return true;
+    }
+
+    // Deliver like ResourceLoader::loadDataURL does: outside the caller's
+    // stack, response then data then completion in one task.
+    void deliverCached(CurlResponse&& response, Ref<SharedBuffer>&& cachedBody)
+    {
         callOnMainThread([this, protectedThis = Ref { *this }, cachedResponse = WTF::move(response), cachedBody = WTF::move(cachedBody)]() mutable {
             if (!m_loader)
                 return;
@@ -256,6 +297,35 @@ public:
                 loader->didFinishLoading(NetworkLoadMetrics { });
             });
         });
+    }
+
+    // 304 for a conditional request on a stale host-cache entry: the host
+    // merges the 304's headers into the entry and returns the block to deliver
+    // with the cached body; the curl transfer (no body) is dropped.
+    bool serveRevalidated(CurlRequest& request, const CurlResponse& curlResponse)
+    {
+        if (!m_staleBody || curlResponse.statusCode != 304 || curlResponse.url != m_staleURL)
+            return false;
+        StringBuilder hdr;
+        for (const auto& header : curlResponse.headers) {
+            hdr.append(header);
+            hdr.append("\r\n"_s);
+        }
+        CString block304 = hdr.toString().utf8();
+        CString url = m_staleURL.string().utf8();
+        char* merged = nullptr;
+        int mergedLen = 0;
+        if (!bib_host_cache_touch(url.data(), block304.data(), static_cast<int>(block304.length()), &merged, &mergedLen))
+            return false;
+        String block = String::fromUTF8(std::span(merged, static_cast<size_t>(mergedLen)));
+        free(merged);
+        Ref<SharedBuffer> body = m_staleBody.releaseNonNull();
+        if (auto curlRequest = std::exchange(m_curlRequest, nullptr)) {
+            curlRequest->cancel();
+            curlRequest->invalidateClient();
+        }
+        m_fromHostCache = true;
+        deliverCached(cachedResponseFor(m_staleURL, 200, block, body->size()), WTF::move(body));
         return true;
     }
 
@@ -484,6 +554,10 @@ private:
 
         storeResponseCookies(request.resourceRequest(), curlResponse);
 
+        if (serveRevalidated(request, curlResponse))
+            return;
+        m_staleBody = nullptr;
+
         if (shouldRedirect()) {
             performRedirect();
             return;
@@ -535,6 +609,8 @@ private:
     bool m_cacheable { false };
     bool m_counted { false };
     bool m_fromHostCache { false };
+    URL m_staleURL;
+    RefPtr<SharedBuffer> m_staleBody; // stale host-cache entry awaiting a 304
     bool m_collect { false };
     CString m_collectURL;
     CString m_collectHeaders;

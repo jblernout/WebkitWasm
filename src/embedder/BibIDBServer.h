@@ -36,6 +36,7 @@
 #include "IDBServer.h"
 #include <pal/SessionID.h>
 #include <wtf/HashMap.h>
+#include <wtf/WallTime.h>
 #include <wtf/RefCounted.h>
 #include <wtf/RefPtr.h>
 #include <wtf/ThreadSafeRefCounted.h>
@@ -137,6 +138,15 @@ private:
 class BibDatabaseProvider final : public WebCore::DatabaseProvider {
 public:
     static Ref<BibDatabaseProvider> create() { return adoptRef(*new BibDatabaseProvider); }
+
+    // bib_reset: delete every in-memory database and drop the servers; the
+    // next document gets fresh ones.
+    void resetAll()
+    {
+        for (auto& server : m_idbServerMap.values())
+            server->server().closeAndDeleteDatabasesModifiedSince(-WallTime::infinity());
+        m_idbServerMap.clear();
+    }
 
     WebCore::IDBClient::IDBConnectionToServer& idbConnectionToServerForSession(PAL::SessionID sessionID) final
     {

@@ -69,14 +69,22 @@ void bib_host_present_hello(int w, int h);
 char* bib_host_wasm2js(const char* payload, const char* mode);
 
 // Resource cache, host-owned and shared across page loads and engines.
-// bib_host_cache_get: for a GET, a fresh hit fills *status, *headers (a
-// bib_wasm_alloc'd "Name: value\r\n" block of *headersLen bytes) and *body
-// (bib_wasm_alloc'd, *bodyLen bytes) and returns 1; a miss returns 0 with
-// nothing allocated. The caller frees both buffers.
-int bib_host_cache_get(const char* url, int* status, char** headers, int* headersLen, uint8_t** body, int* bodyLen);
+// bib_host_cache_get: for a GET, a hit fills *status, *headers (a
+// bib_wasm_alloc'd "Name: value\r\n" block of *headersLen bytes), *body
+// (bib_wasm_alloc'd, *bodyLen bytes) and *fresh, and returns 1; a miss
+// returns 0 with nothing allocated. A stale hit (*fresh == 0) must be
+// revalidated: send the request with If-None-Match / If-Modified-Since taken
+// from the cached headers and, on 304, call bib_host_cache_touch. The caller
+// frees both buffers.
+int bib_host_cache_get(const char* url, int* status, char** headers, int* headersLen, uint8_t** body, int* bodyLen, int* fresh);
 // bib_host_cache_put offers a complete response (raw header lines, decoded
 // body); the host decides cacheability from the headers and copies out.
 void bib_host_cache_put(const char* url, int status, const char* headers, int headersLen, const uint8_t* body, int bodyLen);
+// bib_host_cache_touch reports a 304 for a stale entry: the host merges the
+// 304's headers into the entry, extends its lifetime and hands back the
+// merged header block (bib_wasm_alloc'd) to deliver with the cached body;
+// returns 0 when the entry is gone (load the resource normally).
+int bib_host_cache_touch(const char* url, const char* headers304, int headers304Len, char** headers, int* headersLen);
 
 // Network idle detection: +1 when a resource load starts, -1 when it ends
 // (success, failure or cancel) — main document, subresources, beacons and

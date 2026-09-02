@@ -154,10 +154,12 @@ addToLibrary({
   bib_host_net_inflight: (delta) => {},
 
   // --- resource cache: the browser's own HTTP cache does this job -----------------
-  bib_host_cache_get__sig: 'ipppppp',
-  bib_host_cache_get: (url, status, headers, headersLen, body, bodyLen) => 0,
+  bib_host_cache_get__sig: 'ippppppp',
+  bib_host_cache_get: (url, status, headers, headersLen, body, bodyLen, fresh) => 0,
   bib_host_cache_put__sig: 'vpipipi',
   bib_host_cache_put: (url, status, headers, headersLen, body, bodyLen) => {},
+  bib_host_cache_touch__sig: 'ippipp',
+  bib_host_cache_touch: (url, headers304, headers304Len, headers, headersLen) => 0,
 
   // --- media bridge -------------------------------------------------------------
   bib_host_media_can_play__deps: ['$UTF8ToString'],
