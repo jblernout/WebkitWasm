@@ -60,6 +60,7 @@ target_compile_definitions(BibEmbedder PRIVATE BIB_PROXY_MAIN=$<BOOL:${BIB_PROXY
 # exports by name and verify them at prepare time instead of recovering the
 # minified map from embedder.js; costs binary size only.
 option(BIB_MINIFY_NAMES "Minify wasm import/export names in the release link" ON)
+option(BIB_PROFILING_FUNCS "Emit the wasm name section (symbolised abort traces)" ON)
 # Initial linear memory. Growth is on, so a small initial size only decides how
 # many grow steps boot takes; hosts that reserve the address range up front (the
 # Go/wazero host) pay nothing for growth. Static data (embedded ICU + fonts +
@@ -141,10 +142,11 @@ target_link_options(BibEmbedder PRIVATE
     # Surface the COMPLETE undefined-symbol list per link attempt instead of
     # wasm-ld's default 20-error cutoff — each stub iteration costs minutes.
     "SHELL:-Wl,--error-limit=0"
-    # Keep the wasm name section: abort/crash stacks in the browser show
-    # real function names instead of wasm-function[N]. Costs binary size
-    # only (no codegen change) — load-bearing for site-abort diagnosis.
-    "SHELL:--profiling-funcs"
+    # BIB_PROFILING_FUNCS (default ON): keep the wasm name section so abort
+    # stacks show real function names instead of wasm-function[N]. Costs
+    # binary size (13 MB) and, in the Go host, ~35 MB of decoded names per
+    # engine (no codegen change) — load-bearing for site-abort diagnosis.
+    $<$<BOOL:>:SHELL:--profiling-funcs>
     # Skia GPU (decision-005 G2): Ganesh drives a WebGL2 context created at
     # boot when Module.bibGPU is set. FULL_ES3 ships the JS shadow-buffer
     # emulation of glMapBufferRange & co — the SK_ASSUME_GL_ES=1 archive's
