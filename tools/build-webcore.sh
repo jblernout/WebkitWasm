@@ -99,6 +99,29 @@ fi
 BIB_PROXY_MAIN="${BIB_PROXY_MAIN:-1}"
 BIB_PROXY_MAIN_CMAKE=ON
 [ "$BIB_PROXY_MAIN" = 1 ] || BIB_PROXY_MAIN_CMAKE=OFF
+# BIB_MINIFY_NAMES=0: keep C-level import/export names in the wasm (non-JS
+# hosts resolve and verify exports by name). BIB_INITIAL_MEMORY: initial
+# linear memory (growth is on); see embedder.cmake.
+BIB_MINIFY_NAMES="${BIB_MINIFY_NAMES:-1}"
+BIB_MINIFY_NAMES_CMAKE=ON
+[ "$BIB_MINIFY_NAMES" = 1 ] || BIB_MINIFY_NAMES_CMAKE=OFF
+BIB_INITIAL_MEMORY="${BIB_INITIAL_MEMORY:-64MB}"
+# BIB_CCACHE=1 (default when ccache is on PATH): compile through ccache so a
+# reconfigure, a patch regeneration or a second build tree does not recompile
+# ~7500 -O3 TUs from scratch. The cache lives in build/ccache (gitignored);
+# em++ is a clang driver for ccache's purposes. Switching the launcher on or
+# off changes every compile command, i.e. one full rebuild.
+BIB_CCACHE="${BIB_CCACHE:-1}"
+CCACHE_FLAGS=()
+if [ "$BIB_CCACHE" = 1 ] && command -v ccache >/dev/null 2>&1; then
+  export CCACHE_DIR="${CCACHE_DIR:-$ROOT/build/ccache}"
+  export CCACHE_COMPILERTYPE=clang
+  export CCACHE_SLOPPINESS="${CCACHE_SLOPPINESS:-time_macros}"
+  export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-30G}"
+  mkdir -p "$CCACHE_DIR"
+  CCACHE_FLAGS=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+  echo "CCACHE: $CCACHE_DIR ($(ccache -s 2>/dev/null | rg -m1 -o 'Hits: +[0-9]+ / +[0-9]+' || echo 'empty'))"
+fi
 
 EMBEDDER_FLAGS=(
   -DEMSCRIPTEN_EMBEDDER_CMAKE="$ROOT/src/embedder/embedder.cmake"
@@ -116,6 +139,9 @@ EMBEDDER_FLAGS=(
   "-DCMAKE_CXX_FLAGS=$WASM_FLAGS"
   "-DBIB_PTHREAD=$BIB_PTHREAD_CMAKE"
   "-DBIB_PROXY_MAIN=$BIB_PROXY_MAIN_CMAKE"
+  "-DBIB_MINIFY_NAMES=$BIB_MINIFY_NAMES_CMAKE"
+  "-DBIB_INITIAL_MEMORY=$BIB_INITIAL_MEMORY"
+  "${CCACHE_FLAGS[@]}"
 )
 
 if [ ! -f "$BUILD/build.ninja" ]; then
@@ -138,6 +164,7 @@ else
   # cache just because the variable exists (Codex review).
   NEED_RECONFIG=0
   for flag in "${EMBEDDER_FLAGS[@]}"; do
+    [ -n "$flag" ] || continue
     entry="${flag#-D}" # NAME=VALUE
     name="${entry%%=*}"
     want="${entry#*=}"
@@ -168,6 +195,31 @@ ninja -C "$BUILD" -k 50 ${BIB_JOBS:+-j "$BIB_JOBS"} WebCore BibEmbedder > "$LOGB
   exit 1
 }
 echo "NINJA: OK"
+[ -z "${CCACHE_FLAGS[*]}" ] || ccache -s | rg -m2 "Hits|Cache size" || true
+# Link-time manifest for non-JS hosts: toolchain version, the struct pthread
+# offsets the host needs to run pthreads (from emscripten's own struct_info,
+# so no probing), the link knobs and the host-hook names of bib_host.h.
+python3 - "$BUILD/bin/embedder.manifest.json" <<EOF
+import json, os, re, subprocess, sys
+si = json.load(open(os.path.join(os.environ["EMSDK"], "upstream/emscripten/src/struct_info_generated.json")))
+p = si["structs"]["pthread"]
+ver = subprocess.run(["emcc", "--version"], capture_output=True, text=True).stdout.splitlines()[0]
+hooks = re.findall(r"\b(bib_host_\w+)\(", open("$ROOT/src/embedder/bib_host.h").read())
+m = {
+    "emscripten": ver,
+    "pthread_stack_off": p["stack"],
+    "pthread_stack_size_off": p["stack_size"],
+    "main_stack_size": 8 << 20,
+    "minified_names": "$BIB_MINIFY_NAMES" == "1",
+    "initial_memory": "$BIB_INITIAL_MEMORY",
+    "pthreads": "$BIB_PTHREAD" == "1",
+    "real_threads": "$BIB_REAL_THREADS" == "1",
+    "proxy_main": "$BIB_PROXY_MAIN" == "1",
+    "host_hooks": sorted(set(hooks)),
+}
+json.dump(m, open(sys.argv[1], "w"), indent=1)
+print("MANIFEST:", sys.argv[1])
+EOF
 # The project package.json is "type":"module"; node must treat the
 # non-modularized Emscripten output as CommonJS (tools/run-embedder.cjs).
 printf '{"type":"commonjs"}\n' > "$BUILD/bin/package.json"

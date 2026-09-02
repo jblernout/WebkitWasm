@@ -55,6 +55,16 @@ option(BIB_PTHREAD "Run the engine on a dedicated pthread (needs COOP/COEP + Sha
 # either — those hosts read frames from the shared heap.
 option(BIB_PROXY_MAIN "Under BIB_PTHREAD, run main() on a dedicated pthread (-sPROXY_TO_PTHREAD)" ON)
 target_compile_definitions(BibEmbedder PRIVATE BIB_PROXY_MAIN=$<BOOL:${BIB_PROXY_MAIN}>)
+# BIB_MINIFY_NAMES=OFF keeps the C-level import/export names (and the "env" /
+# "wasi_snapshot_preview1" module names) in the wasm. Non-JS hosts resolve
+# exports by name and verify them at prepare time instead of recovering the
+# minified map from embedder.js; costs binary size only.
+option(BIB_MINIFY_NAMES "Minify wasm import/export names in the release link" ON)
+# Initial linear memory. Growth is on, so a small initial size only decides how
+# many grow steps boot takes; hosts that reserve the address range up front (the
+# Go/wazero host) pay nothing for growth. Static data (embedded ICU + fonts +
+# CA bundle, ~42 MB) plus the 8 MB stack must fit.
+set(BIB_INITIAL_MEMORY "64MB" CACHE STRING "-sINITIAL_MEMORY for the embedder link")
 if (BIB_PTHREAD AND NOT BIB_PROXY_MAIN)
     target_link_options(BibEmbedder PRIVATE
         "SHELL:-pthread"
@@ -102,8 +112,12 @@ target_link_options(BibEmbedder PRIVATE
     # nothing from the page (W-B0). NOTE: cmake does not track pre-js edits —
     # touch main.cpp to force a relink after changing it.
     "SHELL:--pre-js ${BIB_EMBEDDER_DIR}/../../web/engine-pre.js"
+    # Host hooks (src/embedder/bib_host.h): the JS implementations of the C
+    # imports the engine calls instead of EM_ASM blocks. Same tracking caveat
+    # as the pre-js: touch main.cpp after editing it.
+    "SHELL:--js-library ${BIB_EMBEDDER_DIR}/bib_host_lib.js"
     "SHELL:-sSTACK_SIZE=8MB"
-    "SHELL:-sINITIAL_MEMORY=256MB"
+    "SHELL:-sINITIAL_MEMORY=${BIB_INITIAL_MEMORY}"
     "SHELL:-sALLOW_MEMORY_GROWTH=1"
     "SHELL:-sMAXIMUM_MEMORY=4GB"
     # W-B1: EXIT_RUNTIME=0 — under PROXY_TO_PTHREAD a keepalive underflow
@@ -139,6 +153,13 @@ target_link_options(BibEmbedder PRIVATE
     "SHELL:-sMAX_WEBGL_VERSION=2"
     "SHELL:-sFULL_ES3=1"
 )
+if (NOT BIB_MINIFY_NAMES)
+    # MINIFY_WASM_EXPORT_NAMES is internal; linking libexports.js (the
+    # emscripten_get_exported_function helper, otherwise inert) is the public
+    # way to keep export names (tools/link.py), and the import names and
+    # module names follow.
+    target_link_options(BibEmbedder PRIVATE "SHELL:-lexports.js")
+endif ()
 
 # ICU data archive at the same absolute path ICU compiled in as its default
 # data dir (jsc-shell trick — works in node and browser with no env setup).

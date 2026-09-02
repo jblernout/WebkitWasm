@@ -19,6 +19,7 @@
 #include "config.h"
 
 #include "BibMediaPlayer.h"
+#include "bib_host.h"
 
 #include "ContentType.h"
 #include "DestinationColorSpace.h"
@@ -99,10 +100,7 @@ static int hostCanPlayType(const String& contentType)
     static NeverDestroyed<HashMap<String, int>> cache;
     return cache.get().ensure(contentType, [&] {
         CString utf8 = contentType.utf8();
-        return MAIN_THREAD_EM_ASM_INT({
-            return (typeof Module !== "undefined" && Module && Module.bibMediaCanPlay)
-                ? Module.bibMediaCanPlay(UTF8ToString($0)) : 0;
-        }, utf8.data());
+        return bib_host_media_can_play(utf8.data());
     }).iterator->value;
 }
 
@@ -121,9 +119,7 @@ public:
         , m_id(++s_nextID)
     {
         playerRegistry().set(m_id, this);
-        MAIN_THREAD_ASYNC_EM_ASM({
-            if (Module.bibMediaCreate) Module.bibMediaCreate($0);
-        }, m_id);
+        bib_host_media_create(m_id);
     }
 
     // EXTERNAL_HOLEPUNCH is off in this build, so nothing downcasts on this
@@ -206,15 +202,7 @@ public:
         // Cross-heap push (bibPushFrameIfDirty protocol): main thread
         // copies the bytes OUT of the shared heap (Blob over a SAB view is
         // rejected, same as ImageData) and frees both allocations.
-        MAIN_THREAD_ASYNC_EM_ASM({
-            if (typeof growMemViews === "function") growMemViews();
-            var bytes = HEAPU8.slice($1, $1 + $2);
-            var mime = UTF8ToString($3);
-            _bib_wasm_free($1);
-            _bib_wasm_free($3);
-            if (typeof Module !== "undefined" && Module && Module.bibMediaLoadBytes)
-                Module.bibMediaLoadBytes($0, bytes, mime);
-        }, m_id, copy, (int)size, mimeCopy);
+        bib_host_media_load_bytes(m_id, reinterpret_cast<uint8_t*>(copy), (int)size, mimeCopy);
     }
 #if ENABLE(MEDIA_SOURCE)
     void load(const URL&, const LoadOptions&, MediaSourcePrivateClient&) final { } // M-C
@@ -232,9 +220,7 @@ public:
     {
         shutdownResource();
         playerRegistry().remove(m_id);
-        MAIN_THREAD_ASYNC_EM_ASM({
-            if (Module.bibMediaDestroy) Module.bibMediaDestroy($0);
-        }, m_id);
+        bib_host_media_destroy(m_id);
     }
 
     void play() final
@@ -404,9 +390,7 @@ private:
     // 3 seek(a), 4 volume(a), 5 muted(a), 6 rate(a), 7 unload.
     void ctl(int op, double a = 0)
     {
-        MAIN_THREAD_ASYNC_EM_ASM({
-            if (Module.bibMediaCtl) Module.bibMediaCtl($0, $1, $2);
-        }, m_id, op, a);
+        bib_host_media_ctl(m_id, op, a);
     }
 
     static MediaTime toMediaTime(double seconds)

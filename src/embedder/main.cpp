@@ -21,6 +21,12 @@
 #include "BibPageClients.h"
 #include "BibSocketProvider.h"
 #include "BibStorage.h"
+#include "bib_host.h"
+
+namespace WTF {
+// Defined in wtf/generic/RunLoopGeneric.cpp (kept out of RunLoop.h).
+WTF_EXPORT_PRIVATE void setRunLoopArmTimerCallback(Function<void(double)>&&);
+}
 #include "CommonAtomStrings.h"
 #include "CookieJar.h"
 #include "CurlContext.h"
@@ -659,18 +665,8 @@ static void bibMaybePersist(bool force)
         return;
     memcpy(copy, utf8.data(), utf8.length() + 1);
     // Same protocol as bibPushFrameIfDirty: malloc'd payload crosses to the
-    // main thread, which reads it out of the (possibly grown) shared heap
-    // and frees it via the exported _bib_wasm_free.
-    // Module guard: pagehide nulls window.Module while a queued push may
-    // still be in flight — free-then-drop is the correct outcome there.
-    MAIN_THREAD_ASYNC_EM_ASM({
-        if (typeof growMemViews === "function")
-            growMemViews();
-        var json = UTF8ToString($0);
-        _bib_wasm_free($0);
-        if (typeof Module !== "undefined" && Module && Module.bibPersist)
-            Module.bibPersist(json);
-    }, copy);
+    // host, which copies it out and frees it via bib_wasm_free.
+    bib_host_persist(copy);
 }
 
 extern "C" {
@@ -1088,18 +1084,14 @@ static bool presentGPUToCanvasFBO()
 // not-ready frame leaves damage armed and coalesces into the next deliverable.
 static bool bibBitmapPresentReady()
 {
-    return EM_ASM_INT({
-        return (Module.bibBitmapPresentReady && Module.bibBitmapPresentReady()) ? 1 : 0;
-    });
+    return bib_host_present_ready() != 0;
 }
 // transferToImageBitmap the bibgpu OffscreenCanvas (FBO 0 contents) and post it
 // to the page over the dedicated MessagePort. Must run AFTER presentGPUToCanvasFBO.
 // Returns true only on a successful post (1); 0/-1/-2 mean not-ready/no-canvas/throw.
 static bool bibTransferCurrentFrameBitmap()
 {
-    return EM_ASM_INT({
-        return (Module.bibTransferCurrentFrame && Module.bibTransferCurrentFrame() === 1) ? 1 : 0;
-    });
+    return bib_host_present_transfer() == 1;
 }
 #endif
 
@@ -1171,14 +1163,7 @@ static void bibPushFrameIfDirty()
             pixels + (static_cast<size_t>(y + row) * kWidth + x) * 4,
             static_cast<size_t>(w) * 4);
     }
-    MAIN_THREAD_ASYNC_EM_ASM({
-        if (typeof growMemViews === "function")
-            growMemViews();
-        var bytes = HEAPU8.slice($0, $0 + $3 * $4 * 4);
-        _bib_wasm_free($0);
-        if (Module.bibBlit)
-            Module.bibBlit(bytes, $1, $2, $3, $4);
-    }, copy, x, y, w, h);
+    bib_host_blit(copy, x, y, w, h);
 }
 
 // Probe/gate path ONLY (G3, decision-005): force a repaint and return CPU
@@ -1227,17 +1212,7 @@ static void bibRunReadback(void*)
         if (copy)
             memcpy(copy, pixels, bytes);
     }
-    MAIN_THREAD_ASYNC_EM_ASM({
-        var data = null;
-        if ($0) {
-            if (typeof growMemViews === "function")
-                growMemViews();
-            data = HEAPU8.slice($0, $0 + $1);
-            _bib_wasm_free($0);
-        }
-        if (Module.bibReadbackReady)
-            Module.bibReadbackReady(data, $2, $3);
-    }, copy, bytes, kWidth, kHeight);
+    bib_host_readback_ready(copy, static_cast<int>(bytes), kWidth, kHeight);
 }
 // Collapsed like bib_tick: harness predicates poll probe() every ~100ms —
 // while the engine is pegged (Discord boot) the requests must not pile up
@@ -1321,7 +1296,7 @@ static void bibGpuRebuildAfterRestore()
         // Same split-brain hazard as a failed GPU boot: the host has no
         // blit path, so CPU raster would never reach the screen. Reload.
         printf("EMBEDDER: gpu restore REBUILD FAILED — host reload\n");
-        MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuLostReload) Module.bibGpuLostReload(); });
+        bib_host_gpu_event(2);
         return;
     }
     g_gpuLost.store(false, std::memory_order_release);
@@ -1363,7 +1338,7 @@ EMSCRIPTEN_KEEPALIVE void bib_gpu_restore_timed_out()
     if (!g_gpuLost.load(std::memory_order_acquire))
         return;
     printf("EMBEDDER: gpu restore TIMED OUT — host reload\n");
-    MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuLostReload) Module.bibGpuLostReload(); });
+    bib_host_gpu_event(2);
 }
 }
 
@@ -1689,27 +1664,7 @@ JSC_DEFINE_HOST_FUNCTION(bibWasm2jsHostFunction, (JSC::JSGlobalObject* globalObj
     RETURN_IF_EXCEPTION(scope, { });
     CString payloadUTF8 = payload.utf8();
     CString modeUTF8 = mode.utf8();
-    char* out = static_cast<char*>(EM_ASM_PTR({
-        let result = null;
-        try {
-            if (Module.bibWasm2js)
-                result = Module.bibWasm2js(UTF8ToString($0), UTF8ToString($1));
-        } catch (e) {
-            (Module.printErr || console.error)("bibWasm2js host error: " + e);
-        }
-        if (typeof result !== "string")
-            return 0;
-        const len = lengthBytesUTF8(result) + 1;
-        const buf = _bib_wasm_alloc(len);
-        // A large translatable module (Discord ships several MB-scale ones)
-        // can produce a multi-MB JS string; under wasm32 heap pressure the
-        // alloc can fail. Without this guard stringToUTF8 writes through a
-        // null pointer -> "memory access out of bounds" (Codex Rank 2).
-        if (!buf)
-            return 0;
-        stringToUTF8(result, buf, len);
-        return buf;
-    }, payloadUTF8.data(), modeUTF8.data()));
+    char* out = bib_host_wasm2js(payloadUTF8.data(), modeUTF8.data());
     if (!out)
         return JSC::JSValue::encode(JSC::jsNull());
     JSC::JSString* result = JSC::jsString(vm, String::fromUTF8(out));
@@ -1720,15 +1675,7 @@ JSC_DEFINE_HOST_FUNCTION(bibWasm2jsHostFunction, (JSC::JSGlobalObject* globalObj
 static const String& wasmPolyfillSource()
 {
     static NeverDestroyed<String> source = [] {
-        char* text = static_cast<char*>(EM_ASM_PTR({
-            const text = Module.bibWasmPolyfill;
-            if (typeof text !== "string" || !text.length)
-                return 0;
-            const len = lengthBytesUTF8(text) + 1;
-            const buf = _bib_wasm_alloc(len);
-            stringToUTF8(text, buf, len);
-            return buf;
-        }));
+        char* text = bib_host_string("wasmpolyfill");
         if (!text)
             return String();
         String result = String::fromUTF8(text);
@@ -1921,10 +1868,7 @@ int main()
     // pthread's worker scope with Module fully constructed. The pre-js's
     // own eager attempts can fire before the pthread bootstrap builds
     // Module (gate9: empty bibWasmPolyfill got cached for the session).
-    EM_ASM({
-        if (typeof self !== "undefined" && self.__bibInstallWorkerHooks)
-            self.__bibInstallWorkerHooks();
-    });
+    bib_host_install_worker_hooks();
     printf("EMBEDDER: engine thread=%p browser-main=%d\n",
         reinterpret_cast<void*>(g_engineThread), emscripten_is_main_browser_thread());
     // Verbose libcurl tracing (?curldebug=1 on the host page). Set from C
@@ -1936,7 +1880,7 @@ int main()
     // worker Module does not inherit them (W-B0 finding). MAIN_THREAD_EM_ASM
     // blocks this thread briefly while the main thread answers; safe at
     // boot, before the page starts driving us.
-    if (MAIN_THREAD_EM_ASM_INT({ return Module.bibCurlDebug ? 1 : 0; }))
+    if (bib_host_flag("curldebug"))
         setenv("DEBUG_CURL", "1", 1);
     printf("EMBEDDER: curldebug=%s\n", getenv("DEBUG_CURL") ? "on" : "off");
 
@@ -1944,16 +1888,13 @@ int main()
     // breakdown (BIBPERF/s). Read straight from the host URL so no
     // browser.html wiring is needed — purely a diagnostic knob, off by
     // default. See PerfAccum / bib_tick.
-    g_perfLog = MAIN_THREAD_EM_ASM_INT({
-        try { return new URLSearchParams(location.search).get("perflog") === "1" ? 1 : 0; }
-        catch (e) { return 0; }
-    });
+    g_perfLog = bib_host_flag("perflog");
     printf("EMBEDDER: perflog=%s\n", g_perfLog ? "on" : "off");
 
     // Go host: runtime viewport (Module.bibWidth/bibHeight), default 800x600.
     {
-        int w = MAIN_THREAD_EM_ASM_INT({ return (Module.bibWidth | 0) || 0; });
-        int h = MAIN_THREAD_EM_ASM_INT({ return (Module.bibHeight | 0) || 0; });
+        int w = bib_host_flag("width");
+        int h = bib_host_flag("height");
         if (w >= 64 && w <= 8192 && h >= 64 && h <= 8192) {
             kWidth = w;
             kHeight = h;
@@ -1968,14 +1909,8 @@ int main()
     // DYNAMIC (default, interactive only — gates render once and must stay
     // deterministic). ?rcap=0 => off (uncapped). ?rcap=N (1..240) => fixed N/s.
     {
-        int rcap = MAIN_THREAD_EM_ASM_INT({
-            try { var s = new URLSearchParams(location.search).get("rcap");
-                  if (s === null) return -1;                 // absent => dynamic
-                  var v = parseInt(s, 10);
-                  return (v >= 0 && v <= 240) ? v : -1; }
-            catch (e) { return -1; }
-        });
-        const bool inter = MAIN_THREAD_EM_ASM_INT({ return Module.bibInteractive ? 1 : 0; });
+        int rcap = bib_host_flag("rcap"); // -1 absent => dynamic
+        const bool inter = bib_host_flag("interactive");
         if (rcap < 0)       { g_rcapDynamic = inter; g_rcapFixedMs = 0.0; }
         else if (rcap == 0) { g_rcapDynamic = false; g_rcapFixedMs = 0.0; }
         else                { g_rcapDynamic = false; g_rcapFixedMs = 1000.0 / rcap; }
@@ -1987,7 +1922,7 @@ int main()
     // strategy refuses analytics/ads/telemetry subresources before they
     // download — CLoop parses every script byte on the main thread, so those
     // bundles are pure boot cost.
-    bool noBlock = MAIN_THREAD_EM_ASM_INT({ return Module.bibNoBlock ? 1 : 0; });
+    bool noBlock = bib_host_flag("noblock");
     BIB::setRequestBlocklistEnabled(!noBlock);
     printf("EMBEDDER: request blocklist=%s\n", noBlock ? "off" : "on");
     if (getenv("DEBUG_CURL")) {
@@ -2002,10 +1937,7 @@ int main()
     // CLoop JS. MUST be set BEFORE JSC::initialize() — Options::initialize()
     // reads JSC_-prefixed env once there. setenv from C (Module.ENV getenv is
     // unreliable here, same reason as DEBUG_CURL). Diagnostic, off by default.
-    if (MAIN_THREAD_EM_ASM_INT({
-        try { return new URLSearchParams(location.search).get("gclog") === "1" ? 1 : 0; }
-        catch (e) { return 0; }
-    })) {
+    if (bib_host_flag("gclog")) {
         setenv("JSC_logGC", "1", 1);
         printf("EMBEDDER: gclog=on (JSC_logGC=1)\n");
     }
@@ -2028,15 +1960,20 @@ int main()
     // Module.bibWakeUp there is installed by web/engine-pre.js (worker-local
     // MessageChannel calling _bib_pump on this same thread), NOT the page's.
     WTF::RunLoop::setWakeUpCallback([] {
-        EM_ASM({ if (Module.bibWakeUp) Module.bibWakeUp(); });
+        bib_host_wakeup();
+    });
+    // Earliest-timer arming at the end of each Iterate cycle (see
+    // RunLoopGeneric.cpp): the host schedules a wake-up for that deadline.
+    WTF::setRunLoopArmTimerCallback([](double delayMs) {
+        bib_host_arm_timer(delayMs);
     });
 
-    const bool interactive = MAIN_THREAD_EM_ASM_INT({ return Module.bibInteractive ? 1 : 0; });
+    const bool interactive = bib_host_flag("interactive");
 
     // M-A media bridge gate (?media=1): must be set before the first
     // MediaPlayer construction — buildMediaEnginesVector runs once and
     // caches for the session.
-    BIB::g_mediaEnabled = interactive && MAIN_THREAD_EM_ASM_INT({ return Module.bibMedia ? 1 : 0; });
+    BIB::g_mediaEnabled = interactive && bib_host_flag("media");
     if (BIB::g_mediaEnabled)
         printf("EMBEDDER: media bridge ENABLED (audio-only, wisp-routed fetch)\n");
 
@@ -2048,7 +1985,7 @@ int main()
     // resolves it through GL.offscreenCanvases; the single-threaded build
     // creates the context on the page canvas directly (pre-W-B1 path).
     // With the flag unset nothing here runs — the CPU path is unchanged.
-    if (interactive && MAIN_THREAD_EM_ASM_INT({ return Module.bibGPU ? 1 : 0; })) {
+    if (interactive && bib_host_flag("gpu")) {
         // W-B2 v2: back the GL context with a worker-PRIVATE OffscreenCanvas
         // (we no longer transfer #screen). Register it in emscripten's
         // GL.offscreenCanvases under "bibgpu" so create_context("#bibgpu")
@@ -2100,7 +2037,7 @@ int main()
             // pushes) before the engine could fail — an engine-only
             // fallback would leave the canvas permanently blank (Codex
             // HIGH, G3). Tell the host so it can reload with ?gpu=0.
-            MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
+            bib_host_gpu_event(1);
         }
     }
 
@@ -2188,14 +2125,9 @@ int main()
     // first network request so the initial navigation already attaches the
     // restored cookies. Same SAB string-copy recipe as bibHTML below.
     {
-        int seedBytes = MAIN_THREAD_EM_ASM_INT({ return Module.bibSeedState ? lengthBytesUTF8(Module.bibSeedState) + 1 : 0; });
-        if (seedBytes > 0) {
-            char* seedJSON = static_cast<char*>(malloc(seedBytes));
-            if (seedJSON) {
-                MAIN_THREAD_EM_ASM({ stringToUTF8(Module.bibSeedState, $0, $1); }, seedJSON, seedBytes);
-                bibSeedPersistedState(String::fromUTF8(seedJSON));
-                free(seedJSON);
-            }
+        if (char* seedJSON = bib_host_string("seedstate")) {
+            bibSeedPersistedState(String::fromUTF8(seedJSON));
+            free(seedJSON);
         }
     }
 
@@ -2225,21 +2157,9 @@ int main()
         exit(1); // EXIT_RUNTIME=0: explicit teardown (node gate path)
     }
 
-    // The host page may supply the document via Module.bibHTML (a JS
-    // string); without it the built-in gate page loads. Copied out of the
-    // JS heap via stringToUTF8 (forced into the runtime by
-    // EXPORTED_RUNTIME_METHODS) into a malloc'd UTF-8 buffer.
-    char* hostHTML = nullptr;
-    int hostHTMLBytes = MAIN_THREAD_EM_ASM_INT({ return Module.bibHTML ? lengthBytesUTF8(Module.bibHTML) + 1 : 0; });
-    if (hostHTMLBytes > 0) {
-        hostHTML = static_cast<char*>(malloc(hostHTMLBytes));
-        if (hostHTML)
-            // Sync proxy: stringToUTF8 runs on the main thread, writing
-            // through its view into the SHARED heap — visible here on return.
-            MAIN_THREAD_EM_ASM({ stringToUTF8(Module.bibHTML, $0, $1); }, hostHTML, hostHTMLBytes);
-        else
-            printf("EMBEDDER: bibHTML allocation failed (%d bytes) — using built-in page\n", hostHTMLBytes);
-    }
+    // The host may supply the document (Module.bibHTML in JS); without it
+    // the built-in gate page loads.
+    char* hostHTML = bib_host_string("html");
     const char* html = hostHTML ? hostHTML : kTestHTML;
 
     documentLoader->writer().setMIMEType("text/html"_s);
@@ -2288,7 +2208,7 @@ int main()
             // Same split-brain hazard as the boot-init fallback above: the
             // host is in GPU mode with no blit path — engine CPU raster
             // would never reach the screen (Codex HIGH, G3).
-            MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
+            bib_host_gpu_event(1);
         }
         if (g_gpu) {
             // W-B2 software-renderer guard: shielded/forked browsers can
@@ -2343,13 +2263,13 @@ int main()
             // ?gpubench=0 (gate8): measure but don't enforce — playwright
             // headless IS SwiftShader, where the pipeline is correct but
             // raster is the faster engine.
-            bool enforceBench = MAIN_THREAD_EM_ASM_INT({ return Module.bibGpuBench === false ? 0 : 1; });
+            bool enforceBench = bib_host_flag("gpubench") != 0;
             if (enforceBench && msPerFrame > 12.0) {
                 printf("EMBEDDER: gpu looks SOFTWARE-RENDERED — cpu fallback\n");
                 g_fbo0Surface = nullptr;
                 surface = nullptr;
                 g_gpu = false;
-                MAIN_THREAD_ASYNC_EM_ASM({ if (Module.bibGpuFallback) Module.bibGpuFallback(); });
+                bib_host_gpu_event(1);
             }
         }
     }
@@ -2377,10 +2297,7 @@ int main()
     // "gpu-bitmap". Sent now that the bibgpu OffscreenCanvas + both surfaces
     // exist; the first present waits for the page's first {t:"ready"} ack.
     if (g_gpu) {
-        EM_ASM({
-            if (Module.bibPresentWorkerHello)
-                Module.bibPresentWorkerHello($0, $1);
-        }, kWidth, kHeight);
+        bib_host_present_hello(kWidth, kHeight);
     }
 #endif
 
@@ -2392,7 +2309,7 @@ int main()
     // re-upload per draw even under GPU. Gated on the SURVIVING g_gpu
     // (after the surface fallback above): texture canvases drawn into a
     // raster window surface would read back on every draw.
-    if (g_gpu && MAIN_THREAD_EM_ASM_INT({ return Module.bibCanvasGPU ? 1 : 0; }))
+    if (g_gpu && bib_host_flag("canvasgpu"))
         g_engine->page->settings().setCanvasUsesAcceleratedDrawing(true);
 
     if (!paintFrame()) {
@@ -2405,7 +2322,7 @@ int main()
         // Browser mode: hand control to the host page's rAF loop. The unwind
         // skips the rest of main and keeps the runtime (and g_engine) alive.
         printf("EMBEDDER: interactive — runtime stays alive\n");
-        MAIN_THREAD_ASYNC_EM_ASM({ if (Module.onEngineReady) Module.onEngineReady(); });
+        bib_host_ready();
         emscripten_exit_with_live_runtime();
     }
 

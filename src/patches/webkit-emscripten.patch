@@ -311,21 +311,25 @@ index 887b24ccca9..1fd8e1a1260 100644
      public:
          ThreadPool()
 diff --git a/Source/WTF/wtf/generic/RunLoopGeneric.cpp b/Source/WTF/wtf/generic/RunLoopGeneric.cpp
-index 203d38335a5..a98b0bad494 100644
+index 203d38335a5..8411988cbc6 100644
 --- a/Source/WTF/wtf/generic/RunLoopGeneric.cpp
 +++ b/Source/WTF/wtf/generic/RunLoopGeneric.cpp
-@@ -32,6 +32,10 @@
+@@ -32,6 +32,14 @@
  #include <wtf/ProcessID.h>
  #include <wtf/TZoneMallocInlines.h>
  
 +#if defined(__EMSCRIPTEN__)
 +#include <emscripten.h>
++
++namespace WTF {
++static Function<void(double)>& runLoopArmTimerCallback();
++}
 +#endif
 +
  namespace WTF {
  
  static constexpr bool report = false;
-@@ -213,8 +217,25 @@ void RunLoop::runImpl(RunMode runMode)
+@@ -213,8 +221,25 @@ void RunLoop::runImpl(RunMode runMode)
  
      Deque<Ref<TimerBase::ScheduledTask>> firedTimers;
      while (true) {
@@ -339,11 +343,11 @@ index 203d38335a5..a98b0bad494 100644
 +            // repeating tasks rescheduled mid-cycle (which skip wakeUp()).
 +            // Without this, every WebCore timer is quantized to the next
 +            // external cycle (~one display frame).
-+            if (runMode == RunMode::Iterate) {
++            if (runMode == RunMode::Iterate && runLoopArmTimerCallback()) {
 +                Locker locker { m_loopLock };
 +                if (!m_schedules.isEmpty()) {
 +                    double delayMs = (m_schedules.first()->scheduledTimePoint() - MonotonicTime::now()).milliseconds();
-+                    EM_ASM({ if (Module.bibArmTimer) Module.bibArmTimer($0); }, delayMs < 0 ? 0 : delayMs);
++                    runLoopArmTimerCallback()(delayMs < 0 ? 0 : delayMs);
 +                }
 +            }
 +#endif
@@ -352,6 +356,28 @@ index 203d38335a5..a98b0bad494 100644
  
          // Dispatch scheduled timers.
          while (!firedTimers.isEmpty()) {
+@@ -244,6 +269,21 @@ void RunLoop::setWakeUpCallback(WTF::Function<void()>&& function)
+     RunLoop::currentSingleton().m_wakeUpCallback = WTF::move(function);
+ }
+ 
++// BIB: arm-timer hook for externally driven loops — called at the end of each
++// Iterate cycle with the delay (ms) until the earliest pending timer so the
++// host can schedule a wake-up. Declared by the embedder (src/embedder/main.cpp)
++// rather than in RunLoop.h so the hook does not rebuild every WTF client.
++static Function<void(double)>& runLoopArmTimerCallback()
++{
++    static NeverDestroyed<Function<void(double)>> callback;
++    return callback.get();
++}
++
++WTF_EXPORT_PRIVATE void setRunLoopArmTimerCallback(Function<void(double)>&& function)
++{
++    runLoopArmTimerCallback() = WTF::move(function);
++}
++
+ // RunLoop operations are thread-safe. These operations can be called from outside of the RunLoop's thread.
+ // For example, WorkQueue::{dispatch, dispatchAfter} call the operations of the WorkQueue thread's RunLoop
+ // from the caller's thread.
 diff --git a/Source/WTF/wtf/generic/WorkQueueGeneric.cpp b/Source/WTF/wtf/generic/WorkQueueGeneric.cpp
 index 97c8e9dd2e9..b8075ca0048 100644
 --- a/Source/WTF/wtf/generic/WorkQueueGeneric.cpp
@@ -2227,6 +2253,69 @@ index 00000000000..4a0bd1177bf
 +}
 +
 +} // namespace WebCore
+diff --git a/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp b/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp
+index ad309029df6..8608b743e82 100644
+--- a/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp
++++ b/Source/WebCore/platform/graphics/skia/FontCacheSkia.cpp
+@@ -30,7 +30,9 @@
+ #include "FontDescription.h"
+ #include "StyleFontSizeFunctions.h"
+ #include <wtf/Assertions.h>
++#include <wtf/NeverDestroyed.h>
+ #include <wtf/text/CString.h>
++#include <wtf/text/MakeString.h>
+ #include <wtf/text/CharacterProperties.h>
+ #include <wtf/unicode/CharacterNames.h>
+ 
+@@ -390,11 +392,34 @@ Vector<hb_feature_t> FontCache::computeFeatures(const FontDescription& fontDescr
+     return features;
+ }
+ 
++// The fontconfig-backed SkFontMgr keys its typeface cache on the whole matched
++// FcPattern, which carries the *requested* family name: every family of a CSS
++// font stack that resolves to the same face gets its own SkTypeface, and each
++// creation scans and maps the TTF again (measured on the Emscripten port:
++// ~800 mmaps of DejaVuSans.ttf per wikipedia.org load, ~1 GB of copying).
++// WebCore's FontPlatformData cache keys on the full description including the
++// size, so the same (family, style) was matched once per size. Memoize the
++// match per (family, weight/width/slant); dropped with the inactive font data.
++// FontCache is per thread, so is the memo (dropped with the inactive font data).
++static HashMap<String, sk_sp<SkTypeface>>& typefaceMemo()
++{
++    static thread_local NeverDestroyed<HashMap<String, sk_sp<SkTypeface>>> memo;
++    return memo.get();
++}
++
++static sk_sp<SkTypeface> matchTypeface(SkFontMgr& manager, const String& familyName, const SkFontStyle& style)
++{
++    auto key = makeString(familyName, '\x1f', style.weight(), '\x1f', style.width(), '\x1f', static_cast<int>(style.slant()));
++    return typefaceMemo().ensure(key, [&] {
++        return manager.matchFamilyStyle(familyName.utf8().data(), style);
++    }).iterator->value;
++}
++
+ std::unique_ptr<FontPlatformData> FontCache::createFontPlatformData(const FontDescription& fontDescription, const AtomString& family, const FontCreationContext& fontCreationContext, OptionSet<FontLookupOptions> options)
+ {
+     auto familyName = getFamilyNameStringFromFamily(family);
+     auto skFontStyle = skiaFontStyle(fontDescription);
+-    auto typeface = fontManager().matchFamilyStyle(familyName.utf8().data(), skFontStyle);
++    auto typeface = matchTypeface(fontManager(), familyName, skFontStyle);
+     if (!typeface)
+         return nullptr;
+ 
+@@ -416,10 +441,12 @@ ASCIILiteral FontCache::platformAlternateFamilyName(const String&)
+ 
+ void FontCache::platformInvalidate()
+ {
++    typefaceMemo().clear();
+ }
+ 
+ void FontCache::platformPurgeInactiveFontData()
+ {
++    typefaceMemo().clear();
+     m_harfBuzzFontCache.clear();
+ #if !OS(ANDROID) && !PLATFORM(WIN)
+     m_skiaSystemFallbackFontCache.clear();
 diff --git a/Source/WebCore/platform/graphics/skia/ImageBufferSkiaAcceleratedBackend.cpp b/Source/WebCore/platform/graphics/skia/ImageBufferSkiaAcceleratedBackend.cpp
 index 5731b7e2be0..74bdd63a1ca 100644
 --- a/Source/WebCore/platform/graphics/skia/ImageBufferSkiaAcceleratedBackend.cpp
