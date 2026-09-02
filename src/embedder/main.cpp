@@ -1622,6 +1622,8 @@ static void bibRunPersistNow(void*);
 // The host-side resource cache (bib_host_cache_*) is deliberately kept.
 static void bibRunReset(void*);
 void bib_load_url(const char* url); // defined below
+unsigned bib_heap_end();
+int malloc_trim(size_t); // dlmalloc
 static RefPtr<BIB::BibDatabaseProvider> g_databaseProvider;
 EMSCRIPTEN_KEEPALIVE void bib_reset()
 {
@@ -1641,9 +1643,20 @@ EMSCRIPTEN_KEEPALIVE void bib_reset()
     WebCore::MemoryCache::singleton().evictResources();
     WebCore::commonVM().heap.collectNow(JSC::Sync, JSC::CollectionScope::Full);
     WTF::releaseFastMallocFreeMemory();
-    printf("EMBEDDER: reset\n");
+    // Give the freed top of the heap back (sbrk shrinks): the host then
+    // discards the pages above bib_heap_end() so they stop being resident.
+    malloc_trim(0);
+    printf("EMBEDDER: reset (heap end %u)\n", bib_heap_end());
 }
 static void bibRunReset(void*) { bib_reset(); }
+
+// Current program break: everything at or above it is free for the host to
+// discard from resident memory (it is re-faulted as zero pages on the next
+// sbrk growth, which dlmalloc expects).
+EMSCRIPTEN_KEEPALIVE unsigned bib_heap_end()
+{
+    return static_cast<unsigned>(reinterpret_cast<uintptr_t>(sbrk(0)));
+}
 
 EMSCRIPTEN_KEEPALIVE void bib_persist_now()
 {

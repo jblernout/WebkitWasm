@@ -53,6 +53,9 @@
 #include "SubresourceLoader.h"
 #include "UserAgent.h"
 #include "bib_host.h"
+#include "bib_ua.h"
+#include "FormData.h"
+#include <emscripten.h>
 #include <pal/SessionID.h>
 #include <wtf/HashMap.h>
 #include <wtf/NeverDestroyed.h>
@@ -122,7 +125,7 @@ public:
         bib_host_net_inflight(1);
         ping->m_counted = true;
         if (request.httpUserAgent().isEmpty())
-            request.setHTTPUserAgent(standardUserAgent());
+            request.setHTTPUserAgent(bibUserAgent());
         appendEmbedderCookieHeader(request);
         ping->m_curlRequest = CurlRequest::create(request, ping.get());
         ping->m_curlRequest->resume();
@@ -179,6 +182,19 @@ private:
     bool m_counted { false };
 };
 
+class BibResourceLoad;
+// Loads waiting for a host transport answer, by request id (bib_fetch_done).
+static HashMap<int, RefPtr<BibResourceLoad>>& hostFetchRegistry()
+{
+    static NeverDestroyed<HashMap<int, RefPtr<BibResourceLoad>>> map;
+    return map.get();
+}
+// Asked per request: the host can switch transports between renders.
+static bool hostFetchEnabled()
+{
+    return bib_host_flag("hostfetch") != 0;
+}
+
 // Drives ONE ResourceLoader through one (or, across redirects, several)
 // CurlRequest. A stripped-down NetworkDataTaskCurl: no credential storage,
 // no downloads, no auth restarts. Cookies use the NetworkDataTaskCurl
@@ -210,8 +226,75 @@ public:
     {
         if (m_cacheable && request.httpMethod() == "GET"_s && request.url().protocolIsInHTTPFamily() && serveFromHostCache(request))
             return;
+        if (hostFetchEnabled() && request.url().protocolIsInHTTPFamily() && startHostFetch(request))
+            return;
         m_curlRequest = createCurlRequest(WTF::move(request));
         m_curlRequest->resume();
+    }
+
+    // Host transport: the same request curl would have sent (UA, cookies),
+    // flattened body; the answer comes back through bib_fetch_done.
+    bool startHostFetch(ResourceRequest& request)
+    {
+        if (request.httpUserAgent().isEmpty())
+            request.setHTTPUserAgent(bibUserAgent());
+        appendCookieHeader(request);
+        Vector<uint8_t> body;
+        if (auto formData = request.httpBody()) {
+            if (formData->containsBlobElement())
+                return false; // let curl stream it
+            body = formData->flatten();
+        }
+        StringBuilder headers;
+        for (const auto& field : request.httpHeaderFields()) {
+            headers.append(field.key);
+            headers.append(": "_s);
+            headers.append(field.value);
+            headers.append("\r\n"_s);
+        }
+        static int nextID = 0;
+        m_hostFetchID = ++nextID;
+        m_hostFetchRequest = request;
+        CString url = request.url().string().utf8();
+        CString method = request.httpMethod().utf8();
+        CString hdr = headers.toString().utf8();
+        hostFetchRegistry().set(m_hostFetchID, this);
+        if (!bib_host_fetch(m_hostFetchID, method.data(), url.data(), hdr.data(), static_cast<int>(hdr.length()), body.span().data(), static_cast<int>(body.size()))) {
+            hostFetchRegistry().remove(m_hostFetchID);
+            m_hostFetchID = 0;
+            return false;
+        }
+        return true;
+    }
+
+    // bib_fetch_done for this load: cookies, redirects and delivery follow the
+    // curl path (curlDidReceiveResponse) with a synthetic CurlResponse.
+    void hostFetchDone(int status, String&& headerBlock, Ref<SharedBuffer>&& body, int errnum)
+    {
+        m_hostFetchID = 0;
+        if (!m_loader)
+            return;
+        if (errnum) {
+            WTFLogAlways("BIB: host fetch failed errno=%d %s", errnum, m_hostFetchRequest.url().string().utf8().data());
+            didFailInternal(ResourceError(errnum, m_hostFetchRequest.url()));
+            return;
+        }
+        CurlResponse response = cachedResponseFor(m_hostFetchRequest.url(), status, headerBlock, body->size());
+        m_response = ResourceResponse(response);
+        storeResponseCookies(m_hostFetchRequest, response);
+        if (serveRevalidated(response))
+            return;
+        m_staleBody = nullptr;
+        if (shouldRedirect()) {
+            performRedirect();
+            return;
+        }
+        if (m_cacheable && status == 200 && m_hostFetchRequest.httpMethod() == "GET"_s && body->size() <= maxCollectBytes) {
+            CString url = m_hostFetchRequest.url().string().utf8();
+            CString hdr = headerBlock.utf8();
+            bib_host_cache_put(url.data(), status, hdr.data(), static_cast<int>(hdr.length()), body->span().data(), static_cast<int>(body->size()));
+        }
+        deliverResponse(WTF::move(response), WTF::move(body));
     }
 
     // Parses a "Name: value\r\n" block into CurlResponse header lines, with a
@@ -277,15 +360,20 @@ public:
         return true;
     }
 
-    // Deliver like ResourceLoader::loadDataURL does: outside the caller's
-    // stack, response then data then completion in one task.
     void deliverCached(CurlResponse&& response, Ref<SharedBuffer>&& cachedBody)
     {
-        callOnMainThread([this, protectedThis = Ref { *this }, cachedResponse = WTF::move(response), cachedBody = WTF::move(cachedBody)]() mutable {
+        deliverResponse(WTF::move(response), WTF::move(cachedBody), ResourceResponse::Source::DiskCache);
+    }
+
+    // Deliver like ResourceLoader::loadDataURL does: outside the caller's
+    // stack, response then data then completion in one task.
+    void deliverResponse(CurlResponse&& response, Ref<SharedBuffer>&& cachedBody, ResourceResponse::Source source = ResourceResponse::Source::Network)
+    {
+        callOnMainThread([this, protectedThis = Ref { *this }, cachedResponse = WTF::move(response), cachedBody = WTF::move(cachedBody), source]() mutable {
             if (!m_loader)
                 return;
             m_response = ResourceResponse(cachedResponse);
-            m_response.setSource(ResourceResponse::Source::DiskCache);
+            m_response.setSource(source);
             Ref<SharedBuffer> data = WTF::move(cachedBody);
             m_loader->didReceiveResponse(ResourceResponse { m_response }, [this, protectedThis = Ref { *this }, data]() mutable {
                 if (!m_loader)
@@ -302,7 +390,9 @@ public:
     // 304 for a conditional request on a stale host-cache entry: the host
     // merges the 304's headers into the entry and returns the block to deliver
     // with the cached body; the curl transfer (no body) is dropped.
-    bool serveRevalidated(CurlRequest& request, const CurlResponse& curlResponse)
+    bool serveRevalidated(CurlRequest&, const CurlResponse& curlResponse) { return serveRevalidated(curlResponse); }
+
+    bool serveRevalidated(const CurlResponse& curlResponse)
     {
         if (!m_staleBody || curlResponse.statusCode != 304 || curlResponse.url != m_staleURL)
             return false;
@@ -337,6 +427,10 @@ public:
         if (auto curlRequest = std::exchange(m_curlRequest, nullptr)) {
             curlRequest->cancel();
             curlRequest->invalidateClient();
+        }
+        if (int id = std::exchange(m_hostFetchID, 0)) {
+            hostFetchRegistry().remove(id);
+            bib_host_fetch_cancel(id);
         }
         if (std::exchange(m_counted, false))
             bib_host_net_inflight(-1);
@@ -396,7 +490,7 @@ private:
         // No FrameLoaderClient supplies a UA on this embedder; sites
         // misbehave badly with an empty one.
         if (request.httpUserAgent().isEmpty())
-            request.setHTTPUserAgent(standardUserAgent());
+            request.setHTTPUserAgent(bibUserAgent());
         appendCookieHeader(request);
         return CurlRequest::create(request, *this);
     }
@@ -611,11 +705,25 @@ private:
     bool m_fromHostCache { false };
     URL m_staleURL;
     RefPtr<SharedBuffer> m_staleBody; // stale host-cache entry awaiting a 304
+    int m_hostFetchID { 0 };
+    ResourceRequest m_hostFetchRequest;
     bool m_collect { false };
     CString m_collectURL;
     CString m_collectHeaders;
     Vector<uint8_t> m_collected;
 };
+
+// Host transport completion (bib_host.h). Runs on the engine thread; the
+// buffers are bib_wasm_alloc'd by the host and freed here.
+extern "C" EMSCRIPTEN_KEEPALIVE void bib_fetch_done(int id, int status, char* headers, int headersLen, uint8_t* body, int bodyLen, int errnum)
+{
+    String headerBlock = headers ? String::fromUTF8(std::span(headers, static_cast<size_t>(headersLen))) : String();
+    Ref<SharedBuffer> data = body ? SharedBuffer::create(std::span<const uint8_t>(body, static_cast<size_t>(bodyLen))) : SharedBuffer::create();
+    free(headers);
+    free(body);
+    if (auto load = hostFetchRegistry().take(id))
+        load->hostFetchDone(status, WTF::move(headerBlock), WTF::move(data), errnum);
+}
 
 // --- Request blocklist ------------------------------------------------------
 // CLoop parses every byte of script on the main thread, so analytics/ads/

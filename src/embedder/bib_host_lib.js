@@ -149,6 +149,12 @@ addToLibrary({
     return buf;
   },
 
+  // --- host transport: browsers keep curl/their own stack (flag stays 0) -------
+  bib_host_fetch__sig: 'iipppipi',
+  bib_host_fetch: (id, method, url, headers, headersLen, body, bodyLen) => 0,
+  bib_host_fetch_cancel__sig: 'vi',
+  bib_host_fetch_cancel: (id) => {},
+
   // --- network idle: browsers use Page.lifecycleEvent / IdlenessDetector -------
   bib_host_net_inflight__sig: 'vi',
   bib_host_net_inflight: (delta) => {},

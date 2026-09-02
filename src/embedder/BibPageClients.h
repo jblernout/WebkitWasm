@@ -19,6 +19,7 @@
 #pragma once
 
 #include "Document.h"
+#include "bib_ua.h"
 #include "DocumentLoader.h"
 #include "DocumentPage.h" // inline Frame::page() lives here, not in Frame.h
 #include "Editor.h"
@@ -422,7 +423,7 @@ private:
 
     String userAgent(const URL&) const final
     {
-        return WebCore::standardUserAgent();
+        return bibUserAgent();
     }
 
     // Subframe creation (root cause #12, empty-clients family): the empty

@@ -92,6 +92,17 @@ int bib_host_cache_touch(const char* url, const char* headers304, int headers304
 // flight for N ms" rule.
 void bib_host_net_inflight(int delta);
 
+// Host HTTP transport. When bib_host_flag("hostfetch") is set, resource loads
+// are performed by the host (which can present a browser TLS / HTTP2
+// fingerprint) instead of the engine's curl: bib_host_fetch starts request
+// `id` (header block "Name: value\r\n", body bytes) and returns 1 when the
+// host took it, 0 to fall back to curl. The host answers exactly once through
+// the bib_fetch_done export (on the engine thread): status, header block and
+// body bib_wasm_alloc'd for the engine to free, or errno != 0 for a transport
+// failure. Redirects are not followed by the host (3xx come back as is).
+int bib_host_fetch(int id, const char* method, const char* url, const char* headers, int headersLen, const uint8_t* body, int bodyLen);
+void bib_host_fetch_cancel(int id);
+
 // Media bridge (BibMediaPlayer): host-side <audio>/<video> elements.
 int bib_host_media_can_play(const char* contentType);
 void bib_host_media_create(int id);
