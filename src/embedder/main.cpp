@@ -2253,6 +2253,52 @@ int main()
     // Lazy-hydration/scheduler libraries feature-detect it; a missing
     // global silently strands their deferred work.
     page->settings().setRequestIdleCallbackEnabled(true);
+    // Beacon API: WebCore default false; every browser ships it. Analytics
+    // SDKs call navigator.sendBeacon unconditionally (botify.com: unhandled
+    // TypeError). The requests go through startPingLoad (host policy hook).
+    page->settings().setBeaconAPIEnabled(true);
+    // Web-platform features the WebKit layer enables by default (Safari,
+    // WebKitGTK) and every browser ships, but raw WebCore leaves off: pages
+    // feature-detect them and take degraded paths, and some change layout
+    // (form controls, lazy loading, EXIF orientation, accent-color, CSS zoom).
+    // Chrome parity is the reference for the renderer. Wave 1 excludes
+    // anything needing a backend this port lacks (GPU/WebGL, workers,
+    // storage/file system, audio, media capture).
+    auto& s = page->settings();
+    s.setDataListElementEnabled(true);
+    s.setInputTypeColorEnabled(true);
+    s.setInputTypeDateEnabled(true);
+    s.setInputTypeDateTimeLocalEnabled(true);
+    s.setInputTypeTimeEnabled(true);
+    s.setInputTypeMonthEnabled(true);
+    s.setInputTypeWeekEnabled(true);
+    s.setLazyIframeLoadingEnabled(true);
+    s.setLazyImageLoadingEnabled(true);
+    s.setVisualViewportAPIEnabled(true);
+    s.setAsyncClipboardAPIEnabled(true);
+    s.setCompressionStreamEnabled(true);
+    s.setNavigationAPIEnabled(true);
+    s.setPermissionsAPIEnabled(true);
+    s.setScreenWakeLockAPIEnabled(true);
+    s.setUserActivationAPIEnabled(true);
+    s.setAccentColorEnabled(true);
+    s.setEnableElementCurrentCSSZoom(true);
+    s.setEvaluationTimeZoomEnabled(true);
+    s.setOverscrollBehaviorEnabled(true);
+    s.setVerticalFormControlsEnabled(true);
+    s.setCanvasColorSpaceEnabled(true);
+    s.setClearSiteDataHTTPHeaderEnabled(true);
+    s.setLinkPreconnectEarlyHintsEnabled(true);
+    s.setCrossOriginEmbedderPolicyEnabled(true);
+    s.setCrossOriginOpenerPolicyEnabled(true);
+    s.setDataTransferItemsEnabled(true);
+    s.setDownloadAttributeEnabled(true);
+    s.setShouldRespectImageOrientation(true);
+    s.setTextAreasAreResizable(true);
+    s.setWebSocketEnabled(true);
+#if ENABLE(FULLSCREEN_API)
+    s.setFullScreenEnabled(true);
+#endif
     // Raw-WebCore MemoryCache default is 8MB total — one modern page evicts
     // everything, so every in-engine navigation refetched all subresources
     // over wisp. Still in-memory; sized like a small browser profile.

@@ -66,7 +66,7 @@ option(BIB_PROFILING_FUNCS "Emit the wasm name section (symbolised abort traces)
 # Go/wazero host) pay nothing for growth. Static data (embedded ICU + fonts +
 # CA bundle, ~42 MB) plus the 8 MB stack must fit.
 set(BIB_INITIAL_MEMORY "64MB" CACHE STRING "-sINITIAL_MEMORY for the embedder link")
-set(BIB_MALLOC "dlmalloc" CACHE STRING "-sMALLOC for the embedder link (dlmalloc | mimalloc: freed pages handed back to the host through bib_host_discard)")
+set(BIB_MALLOC "mimalloc" CACHE STRING "-sMALLOC for the embedder link (mimalloc: freed pages handed back to the host through bib_host_discard | dlmalloc)")
 if (BIB_MALLOC STREQUAL "mimalloc")
     target_compile_definitions(BibEmbedder PRIVATE BIB_MIMALLOC=1)
 endif ()

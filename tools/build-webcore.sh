@@ -109,9 +109,11 @@ BIB_INITIAL_MEMORY="${BIB_INITIAL_MEMORY:-64MB}"
 # BIB_PROFILING_FUNCS=0 drops the wasm name section (-13 MB wasm, -35 MB of
 # decoded names per Go engine; abort traces lose their symbols).
 BIB_PROFILING_FUNCS="${BIB_PROFILING_FUNCS:-1}"
-# BIB_MALLOC=mimalloc: page-granular allocator whose freed pages the host can
-# drop (bib_host_discard); dlmalloc (default) never returns interior memory.
-BIB_MALLOC="${BIB_MALLOC:-dlmalloc}"
+# BIB_MALLOC=mimalloc (default): page-granular allocator whose freed pages the
+# host drops (bib_host_discard: Linux -55..-90 MB RSS per engine, footprint flat
+# across pages); dlmalloc never returns interior memory. Needs the emsdk
+# mimalloc prim patched (tools/fork-patches/patch_mimalloc.py in the Go host repo).
+BIB_MALLOC="${BIB_MALLOC:-mimalloc}"
 BIB_PROFILING_FUNCS_CMAKE=ON
 [ "$BIB_PROFILING_FUNCS" = 1 ] || BIB_PROFILING_FUNCS_CMAKE=OFF
 # BIB_CCACHE=1 (default when ccache is on PATH): compile through ccache so a
@@ -221,7 +223,7 @@ m = {
     "pthread_stack_size_off": p["stack_size"],
     "main_stack_size": 8 << 20,
     "minified_names": "$BIB_MINIFY_NAMES" == "1",
-    "malloc": os.environ.get("BIB_MALLOC", "dlmalloc"), "initial_memory": "$BIB_INITIAL_MEMORY",
+    "malloc": os.environ.get("BIB_MALLOC", "mimalloc"), "initial_memory": "$BIB_INITIAL_MEMORY",
     "pthreads": "$BIB_PTHREAD" == "1",
     "real_threads": "$BIB_REAL_THREADS" == "1",
     "proxy_main": "$BIB_PROXY_MAIN" == "1",
