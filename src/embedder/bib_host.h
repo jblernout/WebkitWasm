@@ -78,6 +78,12 @@ int bib_host_cache_get(const char* url, int* status, char** headers, int* header
 // body); the host decides cacheability from the headers and copies out.
 void bib_host_cache_put(const char* url, int status, const char* headers, int headersLen, const uint8_t* body, int bodyLen);
 
+// Network idle detection: +1 when a resource load starts, -1 when it ends
+// (success, failure or cancel) — main document, subresources, beacons and
+// host-cache hits alike, so the host can apply Chrome's "no request in
+// flight for N ms" rule.
+void bib_host_net_inflight(int delta);
+
 // Media bridge (BibMediaPlayer): host-side <audio>/<video> elements.
 int bib_host_media_can_play(const char* contentType);
 void bib_host_media_create(int id);

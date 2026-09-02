@@ -119,6 +119,8 @@ public:
     {
         Ref ping = adoptRef(*new BibPingLoad(WTF::move(completionHandler)));
         ping->m_selfRef = ping.copyRef(); // released in finish()
+        bib_host_net_inflight(1);
+        ping->m_counted = true;
         if (request.httpUserAgent().isEmpty())
             request.setHTTPUserAgent(standardUserAgent());
         appendEmbedderCookieHeader(request);
@@ -139,6 +141,8 @@ private:
     // curl callback arrives after the first finish.
     void finish(const ResourceError& error)
     {
+        if (std::exchange(m_counted, false))
+            bib_host_net_inflight(-1);
         if (auto handler = std::exchange(m_completionHandler, nullptr))
             handler(error, m_response);
         if (auto curlRequest = std::exchange(m_curlRequest, nullptr)) {
@@ -172,6 +176,7 @@ private:
     RefPtr<CurlRequest> m_curlRequest;
     RefPtr<BibPingLoad> m_selfRef;
     ResourceResponse m_response;
+    bool m_counted { false };
 };
 
 // Drives ONE ResourceLoader through one (or, across redirects, several)
@@ -194,6 +199,8 @@ public:
 
     void start()
     {
+        bib_host_net_inflight(1);
+        m_counted = true;
         startRequest(ResourceRequest { m_loader->request() });
     }
 
@@ -261,6 +268,8 @@ public:
             curlRequest->cancel();
             curlRequest->invalidateClient();
         }
+        if (std::exchange(m_counted, false))
+            bib_host_net_inflight(-1);
     }
 
 private:
@@ -349,6 +358,8 @@ private:
 
     void notifyDone()
     {
+        if (std::exchange(m_counted, false))
+            bib_host_net_inflight(-1);
         if (auto doneCallback = std::exchange(m_doneCallback, nullptr))
             doneCallback(*this);
     }
@@ -522,6 +533,7 @@ private:
     ResourceResponse m_response;
     int m_redirectCount { 0 };
     bool m_cacheable { false };
+    bool m_counted { false };
     bool m_fromHostCache { false };
     bool m_collect { false };
     CString m_collectURL;

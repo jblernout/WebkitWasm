@@ -149,6 +149,10 @@ addToLibrary({
     return buf;
   },
 
+  // --- network idle: browsers use Page.lifecycleEvent / IdlenessDetector -------
+  bib_host_net_inflight__sig: 'vi',
+  bib_host_net_inflight: (delta) => {},
+
   // --- resource cache: the browser's own HTTP cache does this job -----------------
   bib_host_cache_get__sig: 'ipppppp',
   bib_host_cache_get: (url, status, headers, headersLen, body, bodyLen) => 0,
