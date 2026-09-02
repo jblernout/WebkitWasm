@@ -146,7 +146,6 @@ target_link_options(BibEmbedder PRIVATE
     # stacks show real function names instead of wasm-function[N]. Costs
     # binary size (13 MB) and, in the Go host, ~35 MB of decoded names per
     # engine (no codegen change) — load-bearing for site-abort diagnosis.
-    $<$<BOOL:>:--profiling-funcs>
     # Skia GPU (decision-005 G2): Ganesh drives a WebGL2 context created at
     # boot when Module.bibGPU is set. FULL_ES3 ships the JS shadow-buffer
     # emulation of glMapBufferRange & co — the SK_ASSUME_GL_ES=1 archive's
@@ -155,6 +154,9 @@ target_link_options(BibEmbedder PRIVATE
     "SHELL:-sMAX_WEBGL_VERSION=2"
     "SHELL:-sFULL_ES3=1"
 )
+if (BIB_PROFILING_FUNCS)
+    target_link_options(BibEmbedder PRIVATE "SHELL:--profiling-funcs")
+endif ()
 if (NOT BIB_MINIFY_NAMES)
     # MINIFY_WASM_EXPORT_NAMES is internal; linking libexports.js (the
     # emscripten_get_exported_function helper, otherwise inert) is the public
