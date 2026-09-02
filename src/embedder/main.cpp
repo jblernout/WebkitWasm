@@ -47,6 +47,10 @@ WTF_EXPORT_PRIVATE void setRunLoopArmTimerCallback(Function<void(double)>&&);
 #include "LocalFrameInlines.h"
 #include "LocalFrameView.h"
 #include "MemoryCache.h"
+#include "Performance.h"
+#include "PerformanceEntry.h"
+#include "LocalDOMWindow.h"
+#include <malloc.h>
 #include "CommonVM.h" // #77/OOM probe: commonVM().heap.size() for the JS-heap gauge
 #include "NetworkStorageSession.h" // persistence: cookieDatabase() dump/seed
 #include "Page.h"
@@ -212,6 +216,10 @@ static uint8_t* g_blitPixels; // allocated in main() once the viewport is known
 // host page never sees pixels: bib_render returns null and the canvas is
 // live. When the flag is unset every byte of the CPU path is unchanged.
 static bool g_gpu = false;
+// bib_host_flag("lazypaint"): no paint/present until bib_render(1) (Paint on
+// the host); crawlers only need the final frame, and layout, rAF and
+// observers are driven by the rendering update, not by painting.
+static bool g_lazyPaint = false;
 static sk_sp<SkSurface> g_fbo0Surface; // present target, GPU mode only
 // G4 (W-B2): set by the webglcontextlost handler, cleared after the Ganesh
 // world is rebuilt on restore. Atomic: read by bib_render on the engine
@@ -881,6 +889,39 @@ EMSCRIPTEN_KEEPALIVE const int* bib_dirty_box() { return g_dirtyBox; }
 //          is exactly what those pixels look like on the surface too.
 // force=1: always repaints and returns the FULL frame (pixel probes that
 //          sample anywhere in the buffer, first use).
+// Diagnostic: where the wasm memory goes. JSON, malloc'd, freed by the host.
+//   memcache: WebKit MemoryCache (encoded + decoded bytes per type)
+//   jsc: JavaScriptCore heap size / capacity
+//   malloc: dlmalloc arena (mallinfo): in use, free, top-most releasable
+EMSCRIPTEN_KEEPALIVE char* bib_mem_stats()
+{
+    if (!bibOnEngineThread())
+        return nullptr;
+    StringBuilder b;
+    b.append("{"_s);
+    auto& mc = WebCore::MemoryCache::singleton();
+    auto st = mc.getStatistics();
+    auto type = [&](ASCIILiteral name, const WebCore::MemoryCache::TypeStatistic& t) {
+        b.append("\""_s, name, "\":{\"count\":"_s, t.count, ",\"size\":"_s, t.size, ",\"live\":"_s, t.liveSize, ",\"decoded\":"_s, t.decodedSize, "},"_s);
+    };
+    b.append("\"memcache\":{"_s);
+    type("images"_s, st.images);
+    type("css"_s, st.cssStyleSheets);
+    type("scripts"_s, st.scripts);
+    type("xsl"_s, st.xslStyleSheets);
+    type("fonts"_s, st.fonts);
+    b.append("\"size\":"_s, mc.size(), "},"_s);
+    {
+        JSC::JSLockHolder lock(WebCore::commonVM());
+        auto& heap = WebCore::commonVM().heap;
+        b.append("\"jsc\":{\"size\":"_s, heap.size(), ",\"capacity\":"_s, heap.capacity(), ",\"extra\":"_s, heap.extraMemorySize(), "},"_s);
+    }
+    struct mallinfo mi = mallinfo();
+    b.append("\"malloc\":{\"arena\":"_s, static_cast<unsigned>(mi.arena), ",\"inuse\":"_s, static_cast<unsigned>(mi.uordblks), ",\"free\":"_s, static_cast<unsigned>(mi.fordblks), ",\"top\":"_s, static_cast<unsigned>(mi.keepcost), ",\"mmapped\":"_s, static_cast<unsigned>(mi.hblkhd), "}"_s);
+    b.append("}"_s);
+    return strdup(b.toString().utf8().data());
+}
+
 EMSCRIPTEN_KEEPALIVE const uint8_t* bib_render(int force)
 {
     // W-B1: engine-thread-only (driven by bib_tick's push; the host no
@@ -1109,6 +1150,27 @@ static bool bibTransferCurrentFrameBitmap()
 // (ImageData rejects SAB-backed views), frees the transfer buffer (dlmalloc is
 // thread-safe under -pthread), and calls Module.bibBlit. growMemViews() first —
 // views go stale after a cross-thread memory grow (W-B0 finding).
+// True once the current main document enqueued its first-contentful-paint
+// entry (Document::enqueuePaintTimingEntryIfNeeded, driven by painting).
+static bool bibFirstContentfulPaintReported()
+{
+    static WeakPtr<WebCore::Document, WebCore::WeakPtrImplWithEventTargetData> reportedFor;
+    if (!g_engine || !g_engine->mainFrame)
+        return false;
+    RefPtr doc = g_engine->mainFrame->document();
+    if (!doc)
+        return false;
+    if (reportedFor.get() == doc.get())
+        return true;
+    RefPtr window = doc->window();
+    if (!window)
+        return false;
+    if (window->performance().getEntriesByType("paint"_s).isEmpty())
+        return false;
+    reportedFor = *doc;
+    return true;
+}
+
 static void bibPushFrameIfDirty()
 {
     static bool firstFramePushed = false;
@@ -1154,6 +1216,12 @@ static void bibPushFrameIfDirty()
     }
 
     // Raster path — unchanged from the W-B1 readback-delivery model.
+    // Lazy mode still paints until the document reported its first
+    // contentful paint (Paint Timing is the one page-visible effect of
+    // painting: PerformanceObserver "paint" entries); after that nothing is
+    // painted until the host asks for the frame.
+    if (g_lazyPaint && bibFirstContentfulPaintReported())
+        return;
     const uint8_t* pixels = bib_render(firstFramePushed ? 0 : 1);
     if (!pixels)
         return;
@@ -1936,6 +2004,7 @@ int main()
     // browser.html wiring is needed — purely a diagnostic knob, off by
     // default. See PerfAccum / bib_tick.
     g_perfLog = bib_host_flag("perflog");
+    g_lazyPaint = bib_host_flag("lazypaint") != 0;
     printf("EMBEDDER: perflog=%s\n", g_perfLog ? "on" : "off");
 
     // Go host: runtime viewport (Module.bibWidth/bibHeight), default 800x600.
