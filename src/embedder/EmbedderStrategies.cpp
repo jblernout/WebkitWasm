@@ -35,6 +35,7 @@
 #include "CurlRequestClient.h"
 #include "CurlResponse.h"
 #include "HTTPHeaderNames.h"
+#include "LocalFrame.h"
 #include "LoaderStrategy.h"
 #include "MediaStrategy.h"
 #include "NetworkLoadMetrics.h"
@@ -821,6 +822,41 @@ void setRequestBlocklistEnabled(bool enabled)
     g_requestBlocklistEnabled = enabled;
 }
 
+static ASCIILiteral resourceTypeName(CachedResource::Type type)
+{
+    switch (type) {
+    case CachedResource::Type::MainResource: return "main"_s;
+    case CachedResource::Type::ImageResource: return "image"_s;
+    case CachedResource::Type::JSON: return "json"_s;
+    case CachedResource::Type::CSSStyleSheet: return "css"_s;
+    case CachedResource::Type::Script: return "script"_s;
+    case CachedResource::Type::FontResource:
+    case CachedResource::Type::SVGFontResource: return "font"_s;
+    case CachedResource::Type::MediaResource: return "media"_s;
+    case CachedResource::Type::RawResource: return "raw"_s;
+    case CachedResource::Type::Icon: return "icon"_s;
+    case CachedResource::Type::Beacon: return "beacon"_s;
+    case CachedResource::Type::Ping: return "ping"_s;
+    case CachedResource::Type::LinkPrefetch: return "prefetch"_s;
+    default: return "other"_s;
+    }
+}
+
+// Host policy first (-1 = none), then the built-in blocklist. The host sees
+// frame documents too ("main", mainFrame=0) so it can refuse iframes; the
+// top-level navigation is the host's own request and is never refused here.
+static bool hostRefusesRequest(const URL& url, ASCIILiteral type, bool mainFrame, bool& decided)
+{
+    decided = false;
+    if (type == "main"_s && mainFrame)
+        return false;
+    int verdict = bib_host_allow_request(url.string().utf8().data(), type.characters(), mainFrame ? 1 : 0);
+    if (verdict < 0)
+        return false;
+    decided = true;
+    return verdict == 0;
+}
+
 static bool isBlocklistedHost(StringView host)
 {
     static constexpr ASCIILiteral blockedSuffixes[] = {
@@ -911,7 +947,12 @@ private:
     {
         // Null loader -> CachedResource::failBeforeStarting(): the documented
         // creation-failure path, so blocked scripts get ordinary error events.
-        if (g_requestBlocklistEnabled && resource.type() != CachedResource::Type::MainResource && isBlocklistedHost(request.url().host())) {
+        bool hostDecided = false;
+        if (hostRefusesRequest(request.url(), resourceTypeName(resource.type()), frame.isMainFrame(), hostDecided)) {
+            completionHandler(nullptr);
+            return;
+        }
+        if (!hostDecided && g_requestBlocklistEnabled && resource.type() != CachedResource::Type::MainResource && isBlocklistedHost(request.url().host())) {
             WTFLogAlways("BIB: blocked %s (request blocklist; ?noblock=1 to disable)", request.url().string().utf8().data());
             completionHandler(nullptr);
             return;
@@ -951,16 +992,19 @@ private:
     void suspendPendingRequests() final { }
     void resumePendingRequests() final { }
 
-    void startPingLoad(LocalFrame&, ResourceRequest& request, const HTTPHeaderMap&, const FetchOptions&, ContentSecurityPolicyImposition, PingLoadCompletionHandler&& completionHandler) final
+    void startPingLoad(LocalFrame& frame, ResourceRequest& request, const HTTPHeaderMap&, const FetchOptions&, ContentSecurityPolicyImposition, PingLoadCompletionHandler&& completionHandler) final
     {
         // sendBeacon / <a ping> / CSP reports. Fire-and-forget through a
         // self-owning curl client — erroring these out made beacon-gated
         // code paths fail and spammed the console on every analytics-bearing
         // site. originalRequestHeaders/CORS are not applied (documented gap).
-        if (g_requestBlocklistEnabled && isBlocklistedHost(request.url().host())) {
+        bool hostDecided = false;
+        bool hostRefused = hostRefusesRequest(request.url(), "ping"_s, frame.isMainFrame(), hostDecided);
+        if (hostRefused || (!hostDecided && g_requestBlocklistEnabled && isBlocklistedHost(request.url().host()))) {
             // Complete as success: beacon callers cannot observe delivery,
             // and an error here would only trip SDK retry loops.
-            WTFLogAlways("BIB: blocked beacon %s (request blocklist)", request.url().string().utf8().data());
+            if (!hostRefused)
+                WTFLogAlways("BIB: blocked beacon %s (request blocklist)", request.url().string().utf8().data());
             if (completionHandler)
                 completionHandler({ }, { });
             return;

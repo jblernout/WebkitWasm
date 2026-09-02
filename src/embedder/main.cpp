@@ -16,6 +16,13 @@
 
 #include "config.h"
 
+#if BIB_MIMALLOC
+// File scope: mimalloc.h carries C++ templates (no extern "C"), and
+// bib_mem_stats above the reset code uses the emmalloc figures.
+#include <mimalloc.h>
+#include <emscripten/emmalloc.h>
+#endif
+
 #include "BibIDBServer.h"
 #include "BibMediaPlayer.h" // g_mediaEnabled boot flag
 #include "BibPageClients.h"
@@ -1698,10 +1705,7 @@ static void bibRunPersistNow(void*);
 static void bibRunReset(void*);
 void bib_load_url(const char* url); // defined below
 unsigned bib_heap_end();
-#if BIB_MIMALLOC
-#include <mimalloc.h>
-#include <emscripten/emmalloc.h>
-#else
+#if !BIB_MIMALLOC
 int malloc_trim(size_t); // dlmalloc
 #endif
 static RefPtr<BIB::BibDatabaseProvider> g_databaseProvider;

@@ -106,6 +106,15 @@ void bib_host_net_inflight(int delta);
 int bib_host_fetch(int id, const char* method, const char* url, const char* headers, int headersLen, const uint8_t* body, int bodyLen);
 void bib_host_fetch_cancel(int id);
 
+// Request policy. Called before every subresource / ping load with the URL,
+// the resource kind ("main" for frame documents, "image", "json", "css",
+// "script", "font", "media", "raw" = XHR/fetch/EventSource, "icon", "beacon",
+// "ping", "prefetch", "other") and whether the requesting frame is the top
+// frame. 1 = load (the built-in blocklist is skipped), 0 = refuse (the load
+// fails before starting, like a blocklisted host), -1 = no opinion: the
+// built-in blocklist decides. Browsers have no host policy: -1.
+int bib_host_allow_request(const char* url, const char* type, int mainFrame);
+
 // Memory: mimalloc (BIB_MALLOC=mimalloc) hands the host the ranges of linear
 // memory it decommits; the host drops their physical pages (they read as
 // zero afterwards). Browsers have no such control: no-op.

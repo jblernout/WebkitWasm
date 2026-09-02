@@ -155,6 +155,10 @@ addToLibrary({
   bib_host_fetch_cancel__sig: 'vi',
   bib_host_fetch_cancel: (id) => {},
 
+  // --- request policy: browsers have none, the built-in blocklist decides ------
+  bib_host_allow_request__sig: 'ippi',
+  bib_host_allow_request: (urlPtr, typePtr, mainFrame) => -1,
+
   // --- memory: browsers cannot drop pages of the wasm memory ------------------
   bib_host_discard__sig: 'vpp',
   bib_host_discard: (addr, size) => {},
