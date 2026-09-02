@@ -37,7 +37,7 @@ if [ ! -f "$FSROOT/fonts/DejaVuSans.ttf" ] \
   for face in DejaVuSans DejaVuSans-Bold DejaVuSans-Oblique DejaVuSans-BoldOblique \
               DejaVuSerif DejaVuSerif-Bold DejaVuSerif-Italic \
               DejaVuSansMono DejaVuSansMono-Bold; do
-    cp -f "/usr/share/fonts/truetype/dejavu/$face.ttf" "$FSROOT/fonts/"
+    cp -f "${BIB_DEJAVU_DIR:-/usr/share/fonts/truetype/dejavu}/$face.ttf" "$FSROOT/fonts/"
   done
   CONFD_COUNT=$(ls "$FSROOT/etc-fonts/conf.d" | wc -l)
   if [ "$CONFD_COUNT" -lt 1 ]; then

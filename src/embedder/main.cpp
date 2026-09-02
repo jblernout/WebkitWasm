@@ -158,8 +158,9 @@ extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* at
 }
 #endif
 
-static constexpr int kWidth = 800;
-static constexpr int kHeight = 600;
+// Go host: viewport is read from Module.bibWidth/bibHeight at boot (see main()).
+static int kWidth = 800;
+static int kHeight = 600;
 
 static const char* kTestHTML =
     "<!DOCTYPE html>"
@@ -190,7 +191,7 @@ static WebCore::LocalFrameView* mainFrameView()
 
 // bib_render() hands this buffer to JS. Unpremultiplied RGBA as ImageData
 // expects; for this engine's output (opaque pixels) conversion is identity.
-static uint8_t g_blitPixels[kWidth * kHeight * 4];
+static uint8_t* g_blitPixels; // allocated in main() once the viewport is known
 
 // Skia GPU (decision-005 G2, opt-in via Module.bibGPU): the backing
 // SkSurface in g_engine becomes a Ganesh TEXTURE target, paints stay
@@ -1772,6 +1773,9 @@ EMSCRIPTEN_KEEPALIVE void bib_load_url(const char* url)
         return;
     WebCore::ResourceRequest request { URL { String::fromUTF8(url) } };
     WebCore::FrameLoadRequest frameLoadRequest { *g_engine->mainFrame, WTF::move(request) };
+    // Go host: a host-initiated load is a client action; without this WebKit's
+    // PolicyChecker refuses top-frame data: navigations.
+    frameLoadRequest.setIsRequestFromClientOrUserInput();
     printf("EMBEDDER: loading %s\n", url);
     g_engine->mainFrame->loader().load(WTF::move(frameLoadRequest));
 }
@@ -1790,6 +1794,76 @@ static void bibRunLoadUrl(void* p)
 // handling is the safe direction.
 struct BibKeyTask { int type; char* key; char* code; char* text; int vk; int repeat; int mods; };
 static void bibRunKey(void*);
+// ---- Go host additions ---------------------------------------------------------
+// Evaluate `source` in the main frame's page world and return its completion
+// value as a malloc'ed UTF-8 string ("EvalThrew: ..." on exception, nullptr if
+// the engine is down). The caller frees it with bib_wasm_free.
+EMSCRIPTEN_KEEPALIVE char* bib_eval_string(const char* source)
+{
+    if (!bibOnEngineThread() || !g_engine || !source)
+        return nullptr;
+    auto& frame = *g_engine->mainFrame;
+    auto* globalObject = frame.script().globalObject(WebCore::mainThreadNormalWorldSingleton());
+    if (!globalObject)
+        return nullptr;
+    JSC::VM& vm = globalObject->vm();
+    JSC::JSLockHolder lock(vm);
+    auto scope = DECLARE_CATCH_SCOPE(vm);
+    JSC::JSValue result = frame.script().executeScriptIgnoringException(String::fromUTF8(source), JSC::SourceTaintedOrigin::Untainted);
+    String text;
+    if (scope.exception()) {
+        JSC::JSValue exn = scope.exception()->value();
+        scope.clearException();
+        text = makeString("EvalThrew: "_s, exn.toWTFString(globalObject));
+        scope.clearException();
+    } else if (result.isEmpty() || result.isUndefined()) {
+        text = String();
+    } else {
+        text = result.toWTFString(globalObject);
+        if (scope.exception()) {
+            scope.clearException();
+            text = "EvalThrew: <unstringifiable>"_s;
+        }
+    }
+    CString utf8 = text.utf8();
+    char* out = static_cast<char*>(malloc(utf8.length() + 1));
+    if (!out)
+        return nullptr;
+    memcpy(out, utf8.data(), utf8.length() + 1);
+    return out;
+}
+
+// Main-frame load state for the host's wait logic:
+//   loading \x1f provisional \x1f httpStatus \x1f readyState \x1f errorCode \x1f url
+// (0/1 flags, readyState 0 loading / 1 interactive / 2 complete). malloc'ed.
+EMSCRIPTEN_KEEPALIVE char* bib_load_status()
+{
+    if (!bibOnEngineThread() || !g_engine)
+        return nullptr;
+    auto& frame = *g_engine->mainFrame;
+    auto& loader = frame.loader();
+    RefPtr documentLoader = loader.documentLoader();
+    int status = documentLoader ? documentLoader->response().httpStatusCode() : 0;
+    int errorCode = documentLoader && !documentLoader->mainDocumentError().isNull() ? documentLoader->mainDocumentError().errorCode() : 0;
+    int readyState = 0;
+    if (RefPtr document = frame.document()) {
+        switch (document->readyState()) {
+        case WebCore::Document::ReadyState::Loading: readyState = 0; break;
+        case WebCore::Document::ReadyState::Interactive: readyState = 1; break;
+        case WebCore::Document::ReadyState::Complete: readyState = 2; break;
+        }
+    }
+    String url = documentLoader ? documentLoader->url().string() : String();
+    String text = makeString(loader.isLoading() ? 1 : 0, '\x1f', loader.provisionalDocumentLoader() ? 1 : 0, '\x1f',
+        status, '\x1f', readyState, '\x1f', errorCode, '\x1f', url);
+    CString utf8 = text.utf8();
+    char* out = static_cast<char*>(malloc(utf8.length() + 1));
+    if (!out)
+        return nullptr;
+    memcpy(out, utf8.data(), utf8.length() + 1);
+    return out;
+}
+
 EMSCRIPTEN_KEEPALIVE int bib_key(int type, const char* key, const char* code, const char* text, int windowsVirtualKeyCode, int isAutoRepeat, int modifierBits)
 {
     if (!bibOnEngineThread()) {
@@ -1871,6 +1945,20 @@ int main()
         catch (e) { return 0; }
     });
     printf("EMBEDDER: perflog=%s\n", g_perfLog ? "on" : "off");
+
+    // Go host: runtime viewport (Module.bibWidth/bibHeight), default 800x600.
+    {
+        int w = MAIN_THREAD_EM_ASM_INT({ return (Module.bibWidth | 0) || 0; });
+        int h = MAIN_THREAD_EM_ASM_INT({ return (Module.bibHeight | 0) || 0; });
+        if (w >= 64 && w <= 8192 && h >= 64 && h <= 8192) {
+            kWidth = w;
+            kHeight = h;
+        }
+        g_blitPixels = static_cast<uint8_t*>(calloc(static_cast<size_t>(kWidth) * kHeight * 4, 1));
+        g_dirtyBox[2] = kWidth;
+        g_dirtyBox[3] = kHeight;
+        printf("EMBEDDER: viewport %dx%d\n", kWidth, kHeight);
+    }
 
     // Rendering-update throttle config (see g_rcapDynamic). ?rcap absent =>
     // DYNAMIC (default, interactive only — gates render once and must stay
@@ -2078,6 +2166,8 @@ int main()
     // are FALSE at this layer (the WebKit wrappers flip them on; we must
     // too). The window properties are IDL-gated behind these settings.
     page->settings().setLocalStorageEnabled(true);
+    // Go host: top-frame data: navigations are legitimate for a renderer.
+    page->settings().setAllowTopNavigationToDataURLs(true);
     page->settings().setSessionStorageEnabled(true);
     // requestIdleCallback defaults FALSE at every preferences layer (same
     // family as root cause #11) although WebCore fully implements it.
