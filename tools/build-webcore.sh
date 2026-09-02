@@ -23,14 +23,21 @@ FSROOT="$ROOT/build/embedder-fs"
 if [ ! -f "$FSROOT/fonts/DejaVuSans.ttf" ] \
    || [ ! -f "$FSROOT/fonts/DejaVuSansMono.ttf" ] \
    || [ ! -f "$FSROOT/etc-fonts/fonts.conf" ] \
-   || [ -z "$(ls "$FSROOT/etc-fonts/conf.d" 2>/dev/null)" ]; then
+   || [ ! -f "$FSROOT/etc-fonts/conf.d/60-dejavu.conf" ]    || [ -z "$(ls "$FSROOT/etc-fonts/conf.d" 2>/dev/null)" ]; then
   rm -rf "$FSROOT"
   mkdir -p "$FSROOT/etc-fonts/conf.d" "$FSROOT/fonts"
   cp -f "$SYSROOT/etc/fonts/fonts.conf" "$FSROOT/etc-fonts/"
-  for link in "$SYSROOT/etc/fonts/conf.d/"*.conf; do
-    cp -f "$SYSROOT/share/fontconfig/conf.avail/$(basename "$link")" \
-      "$FSROOT/etc-fonts/conf.d/" 2>/dev/null || true
+  # Only the rendering-settings files from fontconfig's stock conf.d. The alias
+  # files (30-metric-aliases, 45-latin, 60-latin, 65-nonlatin, ...) append ~100
+  # family names to every pattern; Skia's remove_weak() then runs one
+  # FcFontSetMatch per name, so each unknown family cost ~3 ms and a page with
+  # many font stacks spent seconds in fontconfig (wikipedia.org: 3400 lookups,
+  # 11 s). 60-dejavu.conf maps the generics and common web families straight
+  # to the nine bundled DejaVu faces instead.
+  for conf in 10-hinting-slight 10-scale-bitmap-fonts 10-sub-pixel-none 10-yes-antialias               11-lcdfilter-default 20-unhint-small-vera 45-generic 48-spacing 49-sansserif               80-delicious 90-synthetic; do
+    cp -f "$SYSROOT/share/fontconfig/conf.avail/$conf.conf"       "$FSROOT/etc-fonts/conf.d/" 2>/dev/null || true
   done
+  cp -f "$ROOT/src/embedder/fonts/60-dejavu.conf" "$FSROOT/etc-fonts/conf.d/"
   # Full text-fidelity set (2026-06-10): sans alone meant fake bold/italic,
   # serif mapped to sans, and code blocks rendered proportional. ~3.7MB of
   # MEMFS for real bold/italic faces + serif + monospace.
