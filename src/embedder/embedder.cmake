@@ -49,7 +49,18 @@ target_link_libraries(BibEmbedder PRIVATE WebCore Skia::Skia)
 # engine-pre.js's worker hooks self-disable outside workers (browser.html
 # keeps page-side pump fallbacks).
 option(BIB_PTHREAD "Run the engine on a dedicated pthread (needs COOP/COEP + SharedArrayBuffer)" ON)
-if (BIB_PTHREAD)
+# BIB_PROXY_MAIN=OFF keeps main() on the instantiating thread: for hosts that
+# are not browsers (the Go/wazero host runs the engine on a goroutine that may
+# block and spawns a wasm instance per pthread on demand). No canvas transfer
+# either — those hosts read frames from the shared heap.
+option(BIB_PROXY_MAIN "Under BIB_PTHREAD, run main() on a dedicated pthread (-sPROXY_TO_PTHREAD)" ON)
+target_compile_definitions(BibEmbedder PRIVATE BIB_PROXY_MAIN=$<BOOL:${BIB_PROXY_MAIN}>)
+if (BIB_PTHREAD AND NOT BIB_PROXY_MAIN)
+    target_link_options(BibEmbedder PRIVATE
+        "SHELL:-pthread"
+        "SHELL:-sPTHREAD_POOL_SIZE=4"
+    )
+elseif (BIB_PTHREAD)
     target_link_options(BibEmbedder PRIVATE
         "SHELL:-pthread"
         "SHELL:-sPROXY_TO_PTHREAD"

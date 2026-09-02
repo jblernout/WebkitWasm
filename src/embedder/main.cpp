@@ -115,7 +115,7 @@ HashMap<String, HashMap<String, String>>& bibPendingStorageImport()
 }
 }
 
-#ifdef __EMSCRIPTEN_PTHREADS__
+#if defined(__EMSCRIPTEN_PTHREADS__) && BIB_PROXY_MAIN // the wrap only serves -sPROXY_TO_PTHREAD
 // W-B2: runtime-decided OffscreenCanvas transfer for the proxied-main
 // (engine) thread. crt1_proxy_main marks its pthread_create with a
 // (char*)-1 sentinel meaning "use the -sOFFSCREENCANVASES_TO_PTHREAD link
@@ -842,12 +842,16 @@ EMSCRIPTEN_KEEPALIVE void bib_pump_network()
         return;
     }
     if (!g_perfLog) {
+#if !BIB_REAL_THREADS // real curl threads poll their own sockets
         WebCore::CurlContext::singleton().scheduler().hostPump();
+#endif
         WTF::RunLoop::cycle();
         return;
     }
     const double t0 = bibNowMs();
+#if !BIB_REAL_THREADS // real curl threads poll their own sockets
     WebCore::CurlContext::singleton().scheduler().hostPump();
+#endif
     WTF::RunLoop::cycle();
     const double dt = bibNowMs() - t0;
     g_perf.netCycle += dt;

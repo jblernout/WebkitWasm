@@ -7,7 +7,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TP="$ROOT/third_party"
 SYSROOT="$TP/wasm-sysroot"
-BUILD="$ROOT/build/webcore"
+# BIB_BUILD_DIR: alternate build tree (one per threading mode — a -pthread
+# flag change otherwise rebuilds the whole tree in place).
+BUILD="${BIB_BUILD_DIR:-$ROOT/build/webcore}"
+LOGBASE="$ROOT/build/$(basename "$BUILD")"
 
 source "$TP/emsdk/emsdk_env.sh" > /dev/null 2>&1
 cd "$ROOT"
@@ -75,6 +78,28 @@ if [ "$BIB_PTHREAD" = 1 ]; then
   BIB_PTHREAD_CMAKE=ON
 fi
 
+# BIB_REAL_THREADS=1 (needs BIB_PTHREAD=1): compile WebKit with real WTF
+# threads — curl scheduler threads, WorkQueues, image decoding, dedicated
+# workers on their own pthreads — instead of the main-RunLoop pumps the port
+# patch installs for single-threaded/browser hosts. Meant for hosts where a
+# blocked thread is cheap (the Go/wazero host, geckowasm-style: one wasm
+# instance per pthread, shared memory). See the BIB_REAL_THREADS guards in
+# src/patches/webkit-emscripten.patch.
+BIB_REAL_THREADS="${BIB_REAL_THREADS:-0}"
+if [ "$BIB_REAL_THREADS" = 1 ]; then
+  if [ "$BIB_PTHREAD" != 1 ]; then
+    echo "BIB_REAL_THREADS=1 requires BIB_PTHREAD=1"
+    exit 1
+  fi
+  WASM_FLAGS="$WASM_FLAGS -DBIB_REAL_THREADS=1"
+fi
+# BIB_PROXY_MAIN=0: keep main() on the thread that instantiates the module
+# (no -sPROXY_TO_PTHREAD, no canvas transfer). For non-browser hosts whose
+# calling thread may block; browsers want the default (1).
+BIB_PROXY_MAIN="${BIB_PROXY_MAIN:-1}"
+BIB_PROXY_MAIN_CMAKE=ON
+[ "$BIB_PROXY_MAIN" = 1 ] || BIB_PROXY_MAIN_CMAKE=OFF
+
 EMBEDDER_FLAGS=(
   -DEMSCRIPTEN_EMBEDDER_CMAKE="$ROOT/src/embedder/embedder.cmake"
   -DBIB_FONTCONFIG_ETC_DIR="$FSROOT/etc-fonts"
@@ -90,6 +115,7 @@ EMBEDDER_FLAGS=(
   "-DCMAKE_C_FLAGS=$WASM_FLAGS"
   "-DCMAKE_CXX_FLAGS=$WASM_FLAGS"
   "-DBIB_PTHREAD=$BIB_PTHREAD_CMAKE"
+  "-DBIB_PROXY_MAIN=$BIB_PROXY_MAIN_CMAKE"
 )
 
 if [ ! -f "$BUILD/build.ninja" ]; then
@@ -104,7 +130,7 @@ if [ ! -f "$BUILD/build.ninja" ]; then
     -DCMAKE_FIND_ROOT_PATH="$SYSROOT" \
     -DJSC_EMBED_ICU_DATA_FILE="$SYSROOT/share/icu/77.1/icudt77l.dat" \
     "${EMBEDDER_FLAGS[@]}" \
-    > "$ROOT/build/webcore-configure.log" 2>&1
+    > "$LOGBASE-configure.log" 2>&1
   echo "CONFIGURE: OK"
 else
   # Re-sync the embedder cache vars whenever any cached VALUE differs from
@@ -125,7 +151,7 @@ else
   done
   if [ "$NEED_RECONFIG" = 1 ]; then
     cmake -S "$TP/WebKit" -B "$BUILD" "${EMBEDDER_FLAGS[@]}" \
-      > "$ROOT/build/webcore-reconfigure.log" 2>&1
+      > "$LOGBASE-reconfigure.log" 2>&1
     echo "RECONFIGURE (embedder vars): OK"
   fi
 fi
@@ -136,9 +162,9 @@ fi
 # need ~1.2GB+ of clang RSS EACH — full nproc parallelism (~16) livelocks
 # the 12G/no-swap scope in reclaim (observed 2026-06-11: 28min wall, 3min
 # CPU per job, counter frozen). BIB_JOBS=6 fits comfortably.
-ninja -C "$BUILD" -k 50 ${BIB_JOBS:+-j "$BIB_JOBS"} WebCore BibEmbedder > "$ROOT/build/webcore-ninja.log" 2>&1 || {
+ninja -C "$BUILD" -k 50 ${BIB_JOBS:+-j "$BIB_JOBS"} WebCore BibEmbedder > "$LOGBASE-ninja.log" 2>&1 || {
   echo "NINJA FAILED — unique errors:"
-  rg -n 'error:' "$ROOT/build/webcore-ninja.log" | sort -t: -k4 -u | head -25
+  rg -n 'error:' "$LOGBASE-ninja.log" | sort -t: -k4 -u | head -25
   exit 1
 }
 echo "NINJA: OK"

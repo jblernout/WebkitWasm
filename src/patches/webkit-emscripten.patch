@@ -1,5 +1,5 @@
 diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
-index ea9ea17802..0d82fa3865 100644
+index ea9ea17802f..0d82fa38651 100644
 --- a/Source/JavaScriptCore/CMakeLists.txt
 +++ b/Source/JavaScriptCore/CMakeLists.txt
 @@ -312,11 +312,19 @@ add_custom_command(
@@ -69,7 +69,7 @@ index ea9ea17802..0d82fa3865 100644
      VERBATIM)
 diff --git a/Source/JavaScriptCore/PlatformEmscripten.cmake b/Source/JavaScriptCore/PlatformEmscripten.cmake
 new file mode 100644
-index 0000000000..0e550c8e67
+index 00000000000..0e550c8e67f
 --- /dev/null
 +++ b/Source/JavaScriptCore/PlatformEmscripten.cmake
 @@ -0,0 +1,6 @@
@@ -80,7 +80,7 @@ index 0000000000..0e550c8e67
 +    include(inspector/remote/Socket.cmake)
 +endif ()
 diff --git a/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp b/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
-index 26e825ace4..fbb5c47baf 100644
+index 26e825ace46..fbb5c47baf4 100644
 --- a/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
 +++ b/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
 @@ -68,7 +68,7 @@ uint32_t computeJSCBytecodeCacheVersion()
@@ -93,7 +93,7 @@ index 26e825ace4..fbb5c47baf 100644
              Dl_info info { };
              if (!dladdr(jsFunctionAddr, &info))
 diff --git a/Source/JavaScriptCore/runtime/JSCell.cpp b/Source/JavaScriptCore/runtime/JSCell.cpp
-index 1e8be796f4..7ee4da5303 100644
+index 1e8be796f4b..7ee4da53034 100644
 --- a/Source/JavaScriptCore/runtime/JSCell.cpp
 +++ b/Source/JavaScriptCore/runtime/JSCell.cpp
 @@ -177,6 +177,35 @@ JSObject* JSCell::toObjectSlow(JSGlobalObject* globalObject) const
@@ -133,7 +133,7 @@ index 1e8be796f4..7ee4da5303 100644
  }
  
 diff --git a/Source/JavaScriptCore/runtime/MathCommon.cpp b/Source/JavaScriptCore/runtime/MathCommon.cpp
-index 71b9262c4f..c5f8543491 100644
+index 71b9262c4f4..c5f8543491e 100644
 --- a/Source/JavaScriptCore/runtime/MathCommon.cpp
 +++ b/Source/JavaScriptCore/runtime/MathCommon.cpp
 @@ -604,7 +604,7 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(f64_nearest, double, (double operand))
@@ -146,7 +146,7 @@ index 71b9262c4f..c5f8543491 100644
  {
      float rounded = roundf(operand);
 diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
-index 964e9a4d81..3f77fd785d 100644
+index 964e9a4d81c..3f77fd785d5 100644
 --- a/Source/JavaScriptCore/runtime/Options.cpp
 +++ b/Source/JavaScriptCore/runtime/Options.cpp
 @@ -233,7 +233,9 @@ std::optional<OptionsStorage::Unsigned> parse(const char* string)
@@ -170,7 +170,7 @@ index 964e9a4d81..3f77fd785d 100644
  template<>
  std::optional<OptionsStorage::Double> parse(const char* string)
 diff --git a/Source/JavaScriptCore/shell/CMakeLists.txt b/Source/JavaScriptCore/shell/CMakeLists.txt
-index 3b1c4e8f3c..d19b4de4f8 100644
+index 3b1c4e8f3c4..d19b4de4f88 100644
 --- a/Source/JavaScriptCore/shell/CMakeLists.txt
 +++ b/Source/JavaScriptCore/shell/CMakeLists.txt
 @@ -123,6 +123,26 @@ WEBKIT_INCLUDE_CONFIG_FILES_IF_EXISTS()
@@ -201,7 +201,7 @@ index 3b1c4e8f3c..d19b4de4f8 100644
      install(TARGETS jsc DESTINATION "${LIBEXEC_INSTALL_DIR}")
  endif ()
 diff --git a/Source/WTF/wtf/FileHandle.h b/Source/WTF/wtf/FileHandle.h
-index fd0e22ccea..b3675206db 100644
+index fd0e22ccea1..b3675206dbc 100644
 --- a/Source/WTF/wtf/FileHandle.h
 +++ b/Source/WTF/wtf/FileHandle.h
 @@ -33,7 +33,7 @@
@@ -215,7 +215,7 @@ index fd0e22ccea..b3675206db 100644
  
 diff --git a/Source/WTF/wtf/PlatformEmscripten.cmake b/Source/WTF/wtf/PlatformEmscripten.cmake
 new file mode 100644
-index 0000000000..3362ec0b21
+index 00000000000..3362ec0b21a
 --- /dev/null
 +++ b/Source/WTF/wtf/PlatformEmscripten.cmake
 @@ -0,0 +1,33 @@
@@ -253,7 +253,7 @@ index 0000000000..3362ec0b21
 +    Threads::Threads
 +)
 diff --git a/Source/WTF/wtf/RawHex.h b/Source/WTF/wtf/RawHex.h
-index 2e375967e2..0c67eb0154 100644
+index 2e375967e2d..0c67eb01545 100644
 --- a/Source/WTF/wtf/RawHex.h
 +++ b/Source/WTF/wtf/RawHex.h
 @@ -52,9 +52,11 @@ public:
@@ -270,14 +270,14 @@ index 2e375967e2..0c67eb0154 100644
          : RawHex(static_cast<uint32_t>(value))
      { }
 diff --git a/Source/WTF/wtf/WorkQueue.cpp b/Source/WTF/wtf/WorkQueue.cpp
-index 887b24ccca..8ec375212c 100644
+index 887b24ccca9..1fd8e1a1260 100644
 --- a/Source/WTF/wtf/WorkQueue.cpp
 +++ b/Source/WTF/wtf/WorkQueue.cpp
 @@ -63,12 +63,21 @@ void ConcurrentWorkQueue::dispatch(Function<void()>&& function)
  #if !PLATFORM(COCOA)
  void WorkQueueBase::dispatchSync(Function<void()>&& function)
  {
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // Single-threaded port: every queue is backed by the main RunLoop
 +    // (WorkQueueGeneric.cpp), so semaphore-waiting here would queue the
 +    // task behind the current one and deadlock the only thread. Run the
@@ -299,7 +299,7 @@ index 887b24ccca..8ec375212c 100644
          return;
      }
  
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // Single-threaded port: the ThreadPool below would Thread::create and
 +    // abort. Run every iteration serially on the caller instead.
 +    for (size_t i = 0; i < iterations; ++i)
@@ -311,7 +311,7 @@ index 887b24ccca..8ec375212c 100644
      public:
          ThreadPool()
 diff --git a/Source/WTF/wtf/generic/RunLoopGeneric.cpp b/Source/WTF/wtf/generic/RunLoopGeneric.cpp
-index 203d38335a..a98b0bad49 100644
+index 203d38335a5..a98b0bad494 100644
 --- a/Source/WTF/wtf/generic/RunLoopGeneric.cpp
 +++ b/Source/WTF/wtf/generic/RunLoopGeneric.cpp
 @@ -32,6 +32,10 @@
@@ -353,14 +353,14 @@ index 203d38335a..a98b0bad49 100644
          // Dispatch scheduled timers.
          while (!firedTimers.isEmpty()) {
 diff --git a/Source/WTF/wtf/generic/WorkQueueGeneric.cpp b/Source/WTF/wtf/generic/WorkQueueGeneric.cpp
-index 97c8e9dd2e..fe6f954fa4 100644
+index 97c8e9dd2e9..b8075ca0048 100644
 --- a/Source/WTF/wtf/generic/WorkQueueGeneric.cpp
 +++ b/Source/WTF/wtf/generic/WorkQueueGeneric.cpp
 @@ -42,6 +42,20 @@ WorkQueueBase::WorkQueueBase(RunLoop& runLoop)
  
  void WorkQueueBase::platformInitialize(ASCIILiteral name, Type, QOS qos)
  {
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // PORT=Emscripten is single-threaded: pthread_create returns ENOTSUP,
 +    // so RunLoop::create -> Thread::create would RELEASE_ASSERT (this was
 +    // an instant abort() the first time a page contained an <img> —
@@ -386,7 +386,7 @@ index 97c8e9dd2e..fe6f954fa4 100644
  
  void WorkQueueBase::platformInvalidate()
  {
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // The queue only borrows the main RunLoop — never stop it.
 +    m_runLoop = nullptr;
 +#else
@@ -402,7 +402,7 @@ index 97c8e9dd2e..fe6f954fa4 100644
  
  void WorkQueueBase::dispatch(Function<void()>&& function)
 diff --git a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
-index a3e0d45073..492395e879 100644
+index a3e0d45073e..492395e879e 100644
 --- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
 +++ b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
 @@ -163,10 +163,17 @@ void Thread::signalHandlerSuspendResume(int, siginfo_t*, void* ucontext)
@@ -439,7 +439,7 @@ index a3e0d45073..492395e879 100644
      kern_return_t result = thread_suspend(m_platformThread);
      if (result != KERN_SUCCESS)
 diff --git a/Source/WebCore/Modules/indexeddb/server/IDBBackingStore.h b/Source/WebCore/Modules/indexeddb/server/IDBBackingStore.h
-index f90708bddc..6f88c5a831 100644
+index f90708bddce..6f88c5a831b 100644
 --- a/Source/WebCore/Modules/indexeddb/server/IDBBackingStore.h
 +++ b/Source/WebCore/Modules/indexeddb/server/IDBBackingStore.h
 @@ -63,7 +63,14 @@ class IDBBackingStore : public CanMakeThreadSafeCheckedPtr<IDBBackingStore> {
@@ -470,14 +470,14 @@ index f90708bddc..6f88c5a831 100644
  
  } // namespace IDBServer
 diff --git a/Source/WebCore/Modules/websockets/WebSocket.cpp b/Source/WebCore/Modules/websockets/WebSocket.cpp
-index d6483e73d3..940aed9375 100644
+index d6483e73d39..e3249da76bd 100644
 --- a/Source/WebCore/Modules/websockets/WebSocket.cpp
 +++ b/Source/WebCore/Modules/websockets/WebSocket.cpp
 @@ -177,6 +177,20 @@ ExceptionOr<Ref<WebSocket>> WebSocket::create(ScriptExecutionContext& context, c
      if (url.isNull())
          return Exception { ExceptionCode::SyntaxError };
  
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // PORT=Emscripten Phase W-A (decision-004): workers share the main
 +    // thread, and WorkerThreadableWebSocketChannel::Bridge::initialize
 +    // posts to the loader then BinarySemaphore-waits — a same-thread
@@ -496,7 +496,7 @@ index d6483e73d3..940aed9375 100644
  
 diff --git a/Source/WebCore/PAL/pal/PlatformEmscripten.cmake b/Source/WebCore/PAL/pal/PlatformEmscripten.cmake
 new file mode 100644
-index 0000000000..0fc6a680f4
+index 00000000000..0fc6a680f4b
 --- /dev/null
 +++ b/Source/WebCore/PAL/pal/PlatformEmscripten.cmake
 @@ -0,0 +1,12 @@
@@ -514,7 +514,7 @@ index 0000000000..0fc6a680f4
 +list(APPEND PAL_LIBRARIES OpenSSL::Crypto)
 diff --git a/Source/WebCore/PlatformEmscripten.cmake b/Source/WebCore/PlatformEmscripten.cmake
 new file mode 100644
-index 0000000000..5b736678f5
+index 00000000000..5b736678f50
 --- /dev/null
 +++ b/Source/WebCore/PlatformEmscripten.cmake
 @@ -0,0 +1,99 @@
@@ -618,7 +618,7 @@ index 0000000000..5b736678f5
 +    cmake_language(DEFER CALL include "${EMSCRIPTEN_EMBEDDER_CMAKE}")
 +endif ()
 diff --git a/Source/WebCore/accessibility/AXCoreObject.h b/Source/WebCore/accessibility/AXCoreObject.h
-index fc373ce9df..ced9647dab 100644
+index fc373ce9df5..ced9647dab2 100644
 --- a/Source/WebCore/accessibility/AXCoreObject.h
 +++ b/Source/WebCore/accessibility/AXCoreObject.h
 @@ -78,7 +78,7 @@ class AccessibilityObjectAtspi;
@@ -641,7 +641,7 @@ index fc373ce9df..ced9647dab 100644
      RefPtr<AccessibilityObjectAtspi> m_wrapper;
 diff --git a/Source/WebCore/accessibility/emscripten/AXObjectCacheEmscripten.cpp b/Source/WebCore/accessibility/emscripten/AXObjectCacheEmscripten.cpp
 new file mode 100644
-index 0000000000..ef4993d56b
+index 00000000000..ef4993d56b6
 --- /dev/null
 +++ b/Source/WebCore/accessibility/emscripten/AXObjectCacheEmscripten.cpp
 @@ -0,0 +1,52 @@
@@ -699,7 +699,7 @@ index 0000000000..ef4993d56b
 +} // namespace WebCore
 diff --git a/Source/WebCore/accessibility/emscripten/AccessibilityObjectEmscripten.cpp b/Source/WebCore/accessibility/emscripten/AccessibilityObjectEmscripten.cpp
 new file mode 100644
-index 0000000000..928271f2db
+index 00000000000..928271f2db9
 --- /dev/null
 +++ b/Source/WebCore/accessibility/emscripten/AccessibilityObjectEmscripten.cpp
 @@ -0,0 +1,25 @@
@@ -729,14 +729,14 @@ index 0000000000..928271f2db
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/bindings/js/IDBBindingUtilities.cpp b/Source/WebCore/bindings/js/IDBBindingUtilities.cpp
-index c6998bf5ce..b93e7857f6 100644
+index c6998bf5ceb..138d203a1c2 100644
 --- a/Source/WebCore/bindings/js/IDBBindingUtilities.cpp
 +++ b/Source/WebCore/bindings/js/IDBBindingUtilities.cpp
 @@ -585,6 +585,19 @@ private:
  
  void callOnIDBSerializationThreadAndWait(Function<void(JSC::JSGlobalObject&)>&& function)
  {
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // PORT=Emscripten is single-threaded: Thread::create RELEASE_ASSERTs
 +    // (pthread_create returns ENOTSUP), and even if the thread existed the
 +    // BinarySemaphore handshake below could never be signalled from the
@@ -762,7 +762,7 @@ index c6998bf5ce..b93e7857f6 100644
  } // namespace WebCore
 diff --git a/Source/WebCore/crypto/emscripten/CryptoStubsEmscripten.cpp b/Source/WebCore/crypto/emscripten/CryptoStubsEmscripten.cpp
 new file mode 100644
-index 0000000000..a448e8a75e
+index 00000000000..a448e8a75e8
 --- /dev/null
 +++ b/Source/WebCore/crypto/emscripten/CryptoStubsEmscripten.cpp
 @@ -0,0 +1,42 @@
@@ -810,7 +810,7 @@ index 0000000000..a448e8a75e
 +} // namespace WebCore
 diff --git a/Source/WebCore/editing/emscripten/EditorEmscripten.cpp b/Source/WebCore/editing/emscripten/EditorEmscripten.cpp
 new file mode 100644
-index 0000000000..731d4ca29b
+index 00000000000..731d4ca29be
 --- /dev/null
 +++ b/Source/WebCore/editing/emscripten/EditorEmscripten.cpp
 @@ -0,0 +1,83 @@
@@ -898,7 +898,7 @@ index 0000000000..731d4ca29b
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/fileapi/AsyncFileStream.cpp b/Source/WebCore/fileapi/AsyncFileStream.cpp
-index b9df166312..cd09004fb6 100644
+index b9df166312a..606dc775a37 100644
 --- a/Source/WebCore/fileapi/AsyncFileStream.cpp
 +++ b/Source/WebCore/fileapi/AsyncFileStream.cpp
 @@ -40,6 +40,7 @@
@@ -913,7 +913,7 @@ index b9df166312..cd09004fb6 100644
      ASSERT(isMainThread());
      ASSERT(function);
  
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // PORT=Emscripten is single-threaded: pthread_create returns ENOTSUP,
 +    // so Thread::create RELEASE_ASSERTs — the first blob load that touched
 +    // a file stream aborted the engine right here (BlobResourceHandle dtor
@@ -938,7 +938,7 @@ index b9df166312..cd09004fb6 100644
  
  AsyncFileStream::AsyncFileStream(FileStreamClient& client)
 diff --git a/Source/WebCore/loader/DocumentLoader.cpp b/Source/WebCore/loader/DocumentLoader.cpp
-index 2c9b359bdf..9e44b75c10 100644
+index 2c9b359bdf6..9e44b75c10a 100644
 --- a/Source/WebCore/loader/DocumentLoader.cpp
 +++ b/Source/WebCore/loader/DocumentLoader.cpp
 @@ -53,6 +53,7 @@
@@ -950,7 +950,7 @@ index 2c9b359bdf..9e44b75c10 100644
  #include "ExtensionStyleSheets.h"
  #include "FormSubmission.h"
 diff --git a/Source/WebCore/loader/EmptyClients.h b/Source/WebCore/loader/EmptyClients.h
-index 09a23e649b..b196b347dd 100644
+index 09a23e649b2..b196b347dd7 100644
 --- a/Source/WebCore/loader/EmptyClients.h
 +++ b/Source/WebCore/loader/EmptyClients.h
 @@ -88,7 +88,7 @@ class EmptyChromeClient : public ChromeClient {
@@ -979,7 +979,7 @@ index 09a23e649b..b196b347dd 100644
      IntPoint screenToRootView(const IntPoint& p) const final { return p; }
      IntPoint rootViewToScreen(const IntPoint& p) const final { return p; }
 diff --git a/Source/WebCore/loader/EmptyFrameLoaderClient.h b/Source/WebCore/loader/EmptyFrameLoaderClient.h
-index 5ebee25c41..70e12f58dc 100644
+index 5ebee25c414..70e12f58dc7 100644
 --- a/Source/WebCore/loader/EmptyFrameLoaderClient.h
 +++ b/Source/WebCore/loader/EmptyFrameLoaderClient.h
 @@ -99,9 +99,14 @@ private:
@@ -1046,14 +1046,14 @@ index 5ebee25c41..70e12f58dc 100644
  #if PLATFORM(COCOA)
      RemoteAXObjectRef accessibilityRemoteObject() final;
 diff --git a/Source/WebCore/loader/WorkerThreadableLoader.cpp b/Source/WebCore/loader/WorkerThreadableLoader.cpp
-index 34cce58217..716a0c3472 100644
+index 34cce582179..49e52fbff95 100644
 --- a/Source/WebCore/loader/WorkerThreadableLoader.cpp
 +++ b/Source/WebCore/loader/WorkerThreadableLoader.cpp
 @@ -72,6 +72,19 @@ WorkerThreadableLoader::~WorkerThreadableLoader()
  
  void WorkerThreadableLoader::loadResourceSynchronously(WorkerOrWorkletGlobalScope& workerOrWorkletGlobalScope, ResourceRequest&& request, ThreadableLoaderClient& client, const ThreadableLoaderOptions& options)
  {
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // PORT=Emscripten Phase W-A (decision-004): workers share the main
 +    // thread (WorkerThreadMode::UseMainThread), where the wait loop below
 +    // becomes WorkerMainRunLoop::runInMode -> RunLoop::cycle() spinning —
@@ -1078,7 +1078,7 @@ index 34cce58217..716a0c3472 100644
  
  void WorkerThreadableLoader::cancel()
 diff --git a/Source/WebCore/platform/Pasteboard.h b/Source/WebCore/platform/Pasteboard.h
-index 11cef75ac7..07c2bf511f 100644
+index 11cef75ac77..07c2bf511fa 100644
 --- a/Source/WebCore/platform/Pasteboard.h
 +++ b/Source/WebCore/platform/Pasteboard.h
 @@ -107,7 +107,7 @@ struct PasteboardWebContent {
@@ -1091,7 +1091,7 @@ index 11cef75ac7..07c2bf511f 100644
      String markup;
  #endif
 diff --git a/Source/WebCore/platform/ScrollAnimator.cpp b/Source/WebCore/platform/ScrollAnimator.cpp
-index 618fea8022..2a1399a5cc 100644
+index 618fea80228..2a1399a5cc6 100644
 --- a/Source/WebCore/platform/ScrollAnimator.cpp
 +++ b/Source/WebCore/platform/ScrollAnimator.cpp
 @@ -419,7 +419,7 @@ void ScrollAnimator::removeWheelEventTestCompletionDeferralForReason(ScrollingNo
@@ -1104,7 +1104,7 @@ index 618fea8022..2a1399a5cc 100644
  {
      return checkedScrollableArea()->scrollAnimatorEnabled();
 diff --git a/Source/WebCore/platform/ScrollAnimator.h b/Source/WebCore/platform/ScrollAnimator.h
-index 9ec21f04c1..88e3db3f76 100644
+index 9ec21f04c12..88e3db3f761 100644
 --- a/Source/WebCore/platform/ScrollAnimator.h
 +++ b/Source/WebCore/platform/ScrollAnimator.h
 @@ -166,7 +166,11 @@ private:
@@ -1121,7 +1121,7 @@ index 9ec21f04c1..88e3db3f76 100644
  #endif
  
 diff --git a/Source/WebCore/platform/WebCorePersistentCoders.cpp b/Source/WebCore/platform/WebCorePersistentCoders.cpp
-index bc608e04f7..4abc58def6 100644
+index bc608e04f78..4abc58def6d 100644
 --- a/Source/WebCore/platform/WebCorePersistentCoders.cpp
 +++ b/Source/WebCore/platform/WebCorePersistentCoders.cpp
 @@ -405,7 +405,9 @@ void Coder<WebCore::CertificateInfo>::encodeForPersistence(Encoder& encoder, con
@@ -1149,7 +1149,7 @@ index bc608e04f7..4abc58def6 100644
      WebCore::CertificateInfo::CertificateChain certificateChain;
 diff --git a/Source/WebCore/platform/emscripten/MIMETypeRegistryEmscripten.cpp b/Source/WebCore/platform/emscripten/MIMETypeRegistryEmscripten.cpp
 new file mode 100644
-index 0000000000..632053bdff
+index 00000000000..632053bdffa
 --- /dev/null
 +++ b/Source/WebCore/platform/emscripten/MIMETypeRegistryEmscripten.cpp
 @@ -0,0 +1,71 @@
@@ -1226,7 +1226,7 @@ index 0000000000..632053bdff
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/emscripten/PasteboardEmscripten.cpp b/Source/WebCore/platform/emscripten/PasteboardEmscripten.cpp
 new file mode 100644
-index 0000000000..e2f6c761dc
+index 00000000000..e2f6c761dc8
 --- /dev/null
 +++ b/Source/WebCore/platform/emscripten/PasteboardEmscripten.cpp
 @@ -0,0 +1,131 @@
@@ -1363,7 +1363,7 @@ index 0000000000..e2f6c761dc
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/emscripten/PlatformKeyboardEventEmscripten.cpp b/Source/WebCore/platform/emscripten/PlatformKeyboardEventEmscripten.cpp
 new file mode 100644
-index 0000000000..edef4ba355
+index 00000000000..edef4ba355a
 --- /dev/null
 +++ b/Source/WebCore/platform/emscripten/PlatformKeyboardEventEmscripten.cpp
 @@ -0,0 +1,35 @@
@@ -1404,7 +1404,7 @@ index 0000000000..edef4ba355
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/emscripten/PlatformScreenEmscripten.cpp b/Source/WebCore/platform/emscripten/PlatformScreenEmscripten.cpp
 new file mode 100644
-index 0000000000..6324d2fe7e
+index 00000000000..6324d2fe7e1
 --- /dev/null
 +++ b/Source/WebCore/platform/emscripten/PlatformScreenEmscripten.cpp
 @@ -0,0 +1,59 @@
@@ -1469,7 +1469,7 @@ index 0000000000..6324d2fe7e
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/emscripten/ScrollbarThemeEmscripten.cpp b/Source/WebCore/platform/emscripten/ScrollbarThemeEmscripten.cpp
 new file mode 100644
-index 0000000000..90181709db
+index 00000000000..90181709db1
 --- /dev/null
 +++ b/Source/WebCore/platform/emscripten/ScrollbarThemeEmscripten.cpp
 @@ -0,0 +1,54 @@
@@ -1529,7 +1529,7 @@ index 0000000000..90181709db
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/emscripten/ThemeEmscripten.cpp b/Source/WebCore/platform/emscripten/ThemeEmscripten.cpp
 new file mode 100644
-index 0000000000..4cb702e122
+index 00000000000..4cb702e1228
 --- /dev/null
 +++ b/Source/WebCore/platform/emscripten/ThemeEmscripten.cpp
 @@ -0,0 +1,25 @@
@@ -1560,7 +1560,7 @@ index 0000000000..4cb702e122
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/emscripten/UserAgentEmscripten.cpp b/Source/WebCore/platform/emscripten/UserAgentEmscripten.cpp
 new file mode 100644
-index 0000000000..863d2603a0
+index 00000000000..863d2603a09
 --- /dev/null
 +++ b/Source/WebCore/platform/emscripten/UserAgentEmscripten.cpp
 @@ -0,0 +1,43 @@
@@ -1608,7 +1608,7 @@ index 0000000000..863d2603a0
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/generic/KeyedDecoderGeneric.cpp b/Source/WebCore/platform/generic/KeyedDecoderGeneric.cpp
-index e4484b487f..a45573e1e5 100644
+index e4484b487fc..a45573e1e57 100644
 --- a/Source/WebCore/platform/generic/KeyedDecoderGeneric.cpp
 +++ b/Source/WebCore/platform/generic/KeyedDecoderGeneric.cpp
 @@ -51,16 +51,20 @@ private:
@@ -1657,7 +1657,7 @@ index e4484b487f..a45573e1e5 100644
              if (!ok)
                  break;
 diff --git a/Source/WebCore/platform/generic/KeyedEncoderGeneric.cpp b/Source/WebCore/platform/generic/KeyedEncoderGeneric.cpp
-index 9e58feb225..2b882079a9 100644
+index 9e58feb2252..2b882079a95 100644
 --- a/Source/WebCore/platform/generic/KeyedEncoderGeneric.cpp
 +++ b/Source/WebCore/platform/generic/KeyedEncoderGeneric.cpp
 @@ -40,7 +40,10 @@ std::unique_ptr<KeyedEncoder> KeyedEncoder::encoder()
@@ -1682,14 +1682,14 @@ index 9e58feb225..2b882079a9 100644
  }
  
 diff --git a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
-index 1c8e16fe23..479997e2ff 100644
+index 1c8e16fe230..4eec77d7fd9 100644
 --- a/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
 +++ b/Source/WebCore/platform/graphics/ImageFrameWorkQueue.cpp
 @@ -114,10 +114,43 @@ void ImageFrameWorkQueue::dispatch(const Request& request)
  {
      ASSERT(isMainThread());
  
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // PORT=Emscripten is single-threaded: SynchronizedFixedQueue's blocking
 +    // enqueue (BufferSize=8 — a page with >8 pending image decodes hits it;
 +    // Wikipedia spun the only thread at 100% CPU forever) and the worker's
@@ -1730,7 +1730,7 @@ index 1c8e16fe23..479997e2ff 100644
  
  void ImageFrameWorkQueue::stop()
 diff --git a/Source/WebCore/platform/graphics/MediaPlayer.cpp b/Source/WebCore/platform/graphics/MediaPlayer.cpp
-index b5733a1218..bbe18359ba 100644
+index b5733a12183..bbe18359ba7 100644
 --- a/Source/WebCore/platform/graphics/MediaPlayer.cpp
 +++ b/Source/WebCore/platform/graphics/MediaPlayer.cpp
 @@ -106,6 +106,14 @@
@@ -1765,7 +1765,7 @@ index b5733a1218..bbe18359ba 100644
          if (registerRemoteEngine && !mockMediaDeviceRouteControllerEnabled())
 diff --git a/Source/WebCore/platform/graphics/emscripten/GLStubsEmscripten.cpp b/Source/WebCore/platform/graphics/emscripten/GLStubsEmscripten.cpp
 new file mode 100644
-index 0000000000..539cdf6a24
+index 00000000000..539cdf6a24d
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/emscripten/GLStubsEmscripten.cpp
 @@ -0,0 +1,33 @@
@@ -1804,7 +1804,7 @@ index 0000000000..539cdf6a24
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.cpp b/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.cpp
 new file mode 100644
-index 0000000000..c7b1bdfa23
+index 00000000000..c7b1bdfa23c
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.cpp
 @@ -0,0 +1,323 @@
@@ -2133,7 +2133,7 @@ index 0000000000..c7b1bdfa23
 +#endif // USE(SKIA)
 diff --git a/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.h b/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.h
 new file mode 100644
-index 0000000000..654dad6569
+index 00000000000..654dad6569a
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/emscripten/PlatformDisplayEmscripten.h
 @@ -0,0 +1,52 @@
@@ -2191,7 +2191,7 @@ index 0000000000..654dad6569
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/emscripten/SystemFontDatabaseEmscripten.cpp b/Source/WebCore/platform/graphics/emscripten/SystemFontDatabaseEmscripten.cpp
 new file mode 100644
-index 0000000000..4a0bd1177b
+index 00000000000..4a0bd1177bf
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/emscripten/SystemFontDatabaseEmscripten.cpp
 @@ -0,0 +1,32 @@
@@ -2228,7 +2228,7 @@ index 0000000000..4a0bd1177b
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/graphics/skia/ImageBufferSkiaAcceleratedBackend.cpp b/Source/WebCore/platform/graphics/skia/ImageBufferSkiaAcceleratedBackend.cpp
-index 5731b7e2be..74bdd63a1c 100644
+index 5731b7e2be0..74bdd63a1ca 100644
 --- a/Source/WebCore/platform/graphics/skia/ImageBufferSkiaAcceleratedBackend.cpp
 +++ b/Source/WebCore/platform/graphics/skia/ImageBufferSkiaAcceleratedBackend.cpp
 @@ -107,6 +107,15 @@ std::unique_ptr<ImageBufferSkiaAcceleratedBackend> ImageBufferSkiaAcceleratedBac
@@ -2248,7 +2248,7 @@ index 5731b7e2be..74bdd63a1c 100644
      if (!glContext || !glContext->makeContextCurrent())
          return nullptr;
 diff --git a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
-index 134a1cf11d..5fdbf8fa07 100644
+index 134a1cf11d3..5fdbf8fa072 100644
 --- a/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 +++ b/Source/WebCore/platform/graphics/skia/PlatformDisplaySkia.cpp
 @@ -30,6 +30,10 @@
@@ -2285,7 +2285,7 @@ index 134a1cf11d..5fdbf8fa07 100644
          s_skiaGLContext = SkiaGLContext::create(*this);
          m_skiaGLContexts.add(*s_skiaGLContext);
 diff --git a/Source/WebCore/platform/network/curl/CurlContext.cpp b/Source/WebCore/platform/network/curl/CurlContext.cpp
-index 145c3e2b04..2183518685 100644
+index 145c3e2b04c..21835186851 100644
 --- a/Source/WebCore/platform/network/curl/CurlContext.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlContext.cpp
 @@ -134,7 +134,7 @@ CurlContext::CurlContext()
@@ -2339,7 +2339,7 @@ index 145c3e2b04..2183518685 100644
  void CurlHandle::enableVerboseIfUsed()
  {
 diff --git a/Source/WebCore/platform/network/curl/CurlContext.h b/Source/WebCore/platform/network/curl/CurlContext.h
-index e673140e1d..26a38daa3e 100644
+index e673140e1d5..26a38daa3ed 100644
 --- a/Source/WebCore/platform/network/curl/CurlContext.h
 +++ b/Source/WebCore/platform/network/curl/CurlContext.h
 @@ -132,7 +132,7 @@ public:
@@ -2383,14 +2383,14 @@ index e673140e1d..26a38daa3e 100644
      void enableStdErrIfUsed();
  #endif
 diff --git a/Source/WebCore/platform/network/curl/CurlRequest.cpp b/Source/WebCore/platform/network/curl/CurlRequest.cpp
-index d867e52909..ef71bd5e2e 100644
+index d867e529097..153cc574f5a 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequest.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequest.cpp
 @@ -173,7 +173,16 @@ void CurlRequest::callClient(Function<void(CurlRequest&, CurlRequestClient&)>&&
  
  void CurlRequest::runOnMainThread(Function<void()>&& task)
  {
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // Single-threaded wasm: transfer callbacks already run on the main
 +    // thread, inside curl_multi_perform. ensureOnMainThread would run the
 +    // client task inline — re-entering WebCore (and possibly curl itself,
@@ -2423,7 +2423,7 @@ index d867e52909..ef71bd5e2e 100644
          String requestHeader(data);
          auto headerFields = requestHeader.split("\r\n"_s);
 diff --git a/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp b/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
-index 43dce2f2ad..66082e9031 100644
+index 43dce2f2ad2..21bb3f7f2c4 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlRequestScheduler.cpp
 @@ -33,6 +33,10 @@
@@ -2442,7 +2442,7 @@ index 43dce2f2ad..66082e9031 100644
  
      cancelTransfer(client);
 +
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // No parked worker thread will notice the queued finalize task; make
 +    // sure the main-thread pump is armed to drain it.
 +    startOrWakeUpThread();
@@ -2454,7 +2454,7 @@ index 43dce2f2ad..66082e9031 100644
  {
      ASSERT(isMainThread());
  
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // Single-threaded wasm: no worker thread exists. Lazily create the
 +    // multi handle, then arm a self-rescheduling RunLoop pump that makes
 +    // one non-blocking pass per cycle while work is pending (the
@@ -2488,7 +2488,7 @@ index 43dce2f2ad..66082e9031 100644
 +#endif
  }
  
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +void CurlRequestScheduler::pumpMainThread()
 +{
 +    ASSERT(isMainThread());
@@ -2569,21 +2569,21 @@ index 43dce2f2ad..66082e9031 100644
  
  void CurlRequestScheduler::executeTasks()
  {
-+#if !defined(__EMSCRIPTEN__)
++#if !defined(__EMSCRIPTEN__) || BIB_REAL_THREADS // upstream threads
      ASSERT(!isMainThread());
 +#endif
  
      Vector<Function<void()>> taskQueue;
  
 diff --git a/Source/WebCore/platform/network/curl/CurlRequestScheduler.h b/Source/WebCore/platform/network/curl/CurlRequestScheduler.h
-index fc5b225a8b..3998a7ee71 100644
+index fc5b225a8b7..73f3904bd79 100644
 --- a/Source/WebCore/platform/network/curl/CurlRequestScheduler.h
 +++ b/Source/WebCore/platform/network/curl/CurlRequestScheduler.h
 @@ -51,6 +51,13 @@ public:
  
      void callOnWorkerThread(Function<void()>&&);
  
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // BIB: host-page poke. The wisp WebSocket shim calls this (through the
 +    // embedder's bib_pump_network export) the moment socket data arrives,
 +    // so reads don't have to wait out the polling re-arm delay below.
@@ -2597,7 +2597,7 @@ index fc5b225a8b..3998a7ee71 100644
  
      void workerThread();
  
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // PORT=Emscripten is single-threaded: the multi handle is pumped from
 +    // the main RunLoop (one non-blocking pass per cycle) instead of a
 +    // dedicated thread parked in poll(). See CurlRequestScheduler.cpp.
@@ -2611,7 +2611,7 @@ index fc5b225a8b..3998a7ee71 100644
      Lock m_multiHandleMutex;
      std::optional<CurlMultiHandle> m_curlMultiHandle;
  
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    bool m_pumpScheduled { false };
 +    // BIB: a delayed re-arm (dispatchAfter) is pending. Kept separate from
 +    // m_pumpScheduled so a new request can still schedule an immediate pass
@@ -2626,7 +2626,7 @@ index fc5b225a8b..3998a7ee71 100644
      long m_maxTotalConnections;
      long m_maxHostConnections;
 diff --git a/Source/WebCore/platform/network/curl/CurlStream.cpp b/Source/WebCore/platform/network/curl/CurlStream.cpp
-index e7708fd8bf..19472b05b7 100644
+index e7708fd8bf2..19472b05b7b 100644
 --- a/Source/WebCore/platform/network/curl/CurlStream.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlStream.cpp
 @@ -41,6 +41,34 @@ CurlStream::CurlStream(CurlStreamScheduler& scheduler, CurlStreamID streamID, UR
@@ -2835,7 +2835,7 @@ index e7708fd8bf..19472b05b7 100644
      destroyHandle();
  
 diff --git a/Source/WebCore/platform/network/curl/CurlStream.h b/Source/WebCore/platform/network/curl/CurlStream.h
-index af04c9f7ac..a2d897c643 100644
+index af04c9f7ac0..a2d897c643c 100644
 --- a/Source/WebCore/platform/network/curl/CurlStream.h
 +++ b/Source/WebCore/platform/network/curl/CurlStream.h
 @@ -77,6 +77,12 @@ private:
@@ -2864,7 +2864,7 @@ index af04c9f7ac..a2d897c643 100644
  
  } // namespace WebCore
 diff --git a/Source/WebCore/platform/network/curl/CurlStreamScheduler.cpp b/Source/WebCore/platform/network/curl/CurlStreamScheduler.cpp
-index 0fdc759290..62bd87067d 100644
+index 0fdc759290b..a4f64ce28fa 100644
 --- a/Source/WebCore/platform/network/curl/CurlStreamScheduler.cpp
 +++ b/Source/WebCore/platform/network/curl/CurlStreamScheduler.cpp
 @@ -27,6 +27,10 @@
@@ -2882,7 +2882,7 @@ index 0fdc759290..62bd87067d 100644
  
  void CurlStreamScheduler::callClientOnMainThread(CurlStreamID streamID, Function<void(CurlStream::Client&)>&& task)
  {
-+#if !defined(__EMSCRIPTEN__)
++#if !defined(__EMSCRIPTEN__) || BIB_REAL_THREADS // upstream threads
 +    // Single-threaded port: the pump runs ON the main thread; the deferred
 +    // callOnMainThread below keeps the upstream async delivery contract.
      ASSERT(!isMainThread());
@@ -2894,7 +2894,7 @@ index 0fdc759290..62bd87067d 100644
  
  void CurlStreamScheduler::startThreadIfNeeded()
  {
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // Single-threaded wasm: no thread — arm a self-rescheduling pump on
 +    // the main RunLoop instead (the CurlRequestScheduler recipe; the
 +    // worker thread here would abort in Thread::create the moment a page
@@ -2916,7 +2916,7 @@ index 0fdc759290..62bd87067d 100644
 +#endif
  }
  
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +void CurlStreamScheduler::pumpMainThread()
 +{
 +    ASSERT(isMainThread());
@@ -2999,21 +2999,21 @@ index 0fdc759290..62bd87067d 100644
  
  void CurlStreamScheduler::executeTasks()
  {
-+#if !defined(__EMSCRIPTEN__)
++#if !defined(__EMSCRIPTEN__) || BIB_REAL_THREADS // upstream threads
      ASSERT(!isMainThread());
 +#endif
  
      Vector<Function<void()>> taskQueue;
  
 diff --git a/Source/WebCore/platform/network/curl/CurlStreamScheduler.h b/Source/WebCore/platform/network/curl/CurlStreamScheduler.h
-index 2d7a77d759..c196005ac6 100644
+index 2d7a77d759a..7b660d86b73 100644
 --- a/Source/WebCore/platform/network/curl/CurlStreamScheduler.h
 +++ b/Source/WebCore/platform/network/curl/CurlStreamScheduler.h
 @@ -54,6 +54,15 @@ private:
  
      void workerThread();
  
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // PORT=Emscripten is single-threaded: the worker thread is replaced by
 +    // a self-rescheduling main-RunLoop pump (same recipe as
 +    // CurlRequestScheduler::pumpMainThread).
@@ -3027,7 +3027,7 @@ index 2d7a77d759..c196005ac6 100644
      bool m_runThread { false };
 diff --git a/Source/WebCore/platform/network/emscripten/CurlSSLHandleEmscripten.cpp b/Source/WebCore/platform/network/emscripten/CurlSSLHandleEmscripten.cpp
 new file mode 100644
-index 0000000000..493312c0cd
+index 00000000000..493312c0cd0
 --- /dev/null
 +++ b/Source/WebCore/platform/network/emscripten/CurlSSLHandleEmscripten.cpp
 @@ -0,0 +1,53 @@
@@ -3086,7 +3086,7 @@ index 0000000000..493312c0cd
 +} // namespace WebCore
 diff --git a/Source/WebCore/platform/network/emscripten/NetworkStateNotifierEmscripten.cpp b/Source/WebCore/platform/network/emscripten/NetworkStateNotifierEmscripten.cpp
 new file mode 100644
-index 0000000000..f66a6fffe7
+index 00000000000..f66a6fffe71
 --- /dev/null
 +++ b/Source/WebCore/platform/network/emscripten/NetworkStateNotifierEmscripten.cpp
 @@ -0,0 +1,22 @@
@@ -3114,7 +3114,7 @@ index 0000000000..f66a6fffe7
 +} // namespace WebCore
 diff --git a/Source/WebCore/rendering/emscripten/RenderThemeEmscripten.cpp b/Source/WebCore/rendering/emscripten/RenderThemeEmscripten.cpp
 new file mode 100644
-index 0000000000..1486ed1c71
+index 00000000000..1486ed1c71a
 --- /dev/null
 +++ b/Source/WebCore/rendering/emscripten/RenderThemeEmscripten.cpp
 @@ -0,0 +1,25 @@
@@ -3144,7 +3144,7 @@ index 0000000000..1486ed1c71
 +
 +} // namespace WebCore
 diff --git a/Source/WebCore/workers/Worker.cpp b/Source/WebCore/workers/Worker.cpp
-index a74247d0ad..1027406e30 100644
+index a74247d0ad2..6443b94af8f 100644
 --- a/Source/WebCore/workers/Worker.cpp
 +++ b/Source/WebCore/workers/Worker.cpp
 @@ -101,6 +101,24 @@ Worker::Worker(ScriptExecutionContext& context, JSC::RuntimeFlags runtimeFlags,
@@ -3158,7 +3158,7 @@ index a74247d0ad..1027406e30 100644
 +    // no pthread. Synchronous worker APIs that would deadlock the shared
 +    // thread (importScripts/sync XHR via WorkerThreadableLoader, crypto key
 +    // wrap/unwrap, in-worker WebSocket) fail fast at their own sites.
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // Module workers stay gated: WorkerThread startup runs
 +    // loadModuleSynchronously -> runInMode spinning until the module graph
 +    // resolves, but the fetches are async and their bytes arrive via host
@@ -3173,14 +3173,14 @@ index a74247d0ad..1027406e30 100644
      if (compliantScriptURLString.hasException())
          return compliantScriptURLString.releaseException();
 diff --git a/Source/WebCore/workers/WorkerGlobalScope.cpp b/Source/WebCore/workers/WorkerGlobalScope.cpp
-index e1a8096208..9b614a4237 100644
+index e1a8096208a..5ce3e0692df 100644
 --- a/Source/WebCore/workers/WorkerGlobalScope.cpp
 +++ b/Source/WebCore/workers/WorkerGlobalScope.cpp
 @@ -511,6 +511,16 @@ void WorkerGlobalScope::addMessage(MessageSource source, MessageLevel level, con
  
  std::optional<Vector<uint8_t>> WorkerGlobalScope::serializeAndWrapCryptoKey(CryptoKeyData&& keyData)
  {
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // PORT=Emscripten Phase W-A (decision-004): workers share the main
 +    // thread, so post-to-loader-then-BinarySemaphore-wait is a same-thread
 +    // deadlock. Unreachable TODAY (WebCrypto is link-stubbed: no algorithms
@@ -3202,7 +3202,7 @@ index e1a8096208..9b614a4237 100644
  
  std::optional<Vector<uint8_t>> WorkerGlobalScope::unwrapCryptoKey(const Vector<uint8_t>& wrappedKey)
  {
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // Same-thread semaphore deadlock — see serializeAndWrapCryptoKey above.
 +    UNUSED_PARAM(wrappedKey);
 +    return std::nullopt;
@@ -3219,7 +3219,7 @@ index e1a8096208..9b614a4237 100644
  
  Crypto& WorkerGlobalScope::crypto()
 diff --git a/Source/WebCore/workers/WorkerMessagingProxy.cpp b/Source/WebCore/workers/WorkerMessagingProxy.cpp
-index 0cade10717..2fcca96c9a 100644
+index 0cade107174..39f5db4260f 100644
 --- a/Source/WebCore/workers/WorkerMessagingProxy.cpp
 +++ b/Source/WebCore/workers/WorkerMessagingProxy.cpp
 @@ -159,7 +159,19 @@ void WorkerMessagingProxy::startWorkerGlobalScope(const URL& scriptURL, PAL::Ses
@@ -3227,7 +3227,7 @@ index 0cade10717..2fcca96c9a 100644
      m_scriptURL = scriptURL;
  
 -    WorkerParameters params { scriptURL, scriptExecutionContext->url(), name, identifier, WTF::move(initializationData.userAgent), isOnline, contentSecurityPolicyResponseHeaders, shouldBypassMainWorldContentSecurityPolicy, crossOriginEmbedderPolicy, timeOrigin, referrerPolicy, workerType, credentials, scriptExecutionContext->settingsValues(), WorkerThreadMode::CreateNewThread, sessionID,
-+#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) && !BIB_REAL_THREADS // single-threaded port only
 +    // PORT=Emscripten Phase W-A (decision-004): no pthreads in this build —
 +    // Thread::create would RELEASE_ASSERT. Run dedicated workers
 +    // cooperatively on the main thread instead: WorkerMainRunLoop + shared
@@ -3244,7 +3244,7 @@ index 0cade10717..2fcca96c9a 100644
          initializationData.clientIdentifier,
          scriptExecutionContext->advancedPrivacyProtections(),
 diff --git a/Source/WebCore/workers/WorkerRunLoop.cpp b/Source/WebCore/workers/WorkerRunLoop.cpp
-index 1b4f47b117..32d0ee3910 100644
+index 1b4f47b117f..32d0ee39100 100644
 --- a/Source/WebCore/workers/WorkerRunLoop.cpp
 +++ b/Source/WebCore/workers/WorkerRunLoop.cpp
 @@ -468,8 +468,21 @@ void WorkerMainRunLoop::postTaskForMode(ScriptExecutionContext::Task&& task, con
@@ -3272,7 +3272,7 @@ index 1b4f47b117..32d0ee3910 100644
      });
 diff --git a/Source/cmake/OptionsEmscripten.cmake b/Source/cmake/OptionsEmscripten.cmake
 new file mode 100644
-index 0000000000..b8c090ce71
+index 00000000000..b8c090ce71f
 --- /dev/null
 +++ b/Source/cmake/OptionsEmscripten.cmake
 @@ -0,0 +1,169 @@
@@ -3446,7 +3446,7 @@ index 0000000000..b8c090ce71
 +    endif ()
 +endif ()
 diff --git a/Source/cmake/WebKitCommon.cmake b/Source/cmake/WebKitCommon.cmake
-index 639b7e5d1e..cda5331506 100644
+index 639b7e5d1ee..cda53315062 100644
 --- a/Source/cmake/WebKitCommon.cmake
 +++ b/Source/cmake/WebKitCommon.cmake
 @@ -43,6 +43,7 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
