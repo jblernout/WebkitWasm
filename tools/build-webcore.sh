@@ -106,6 +106,11 @@ BIB_MINIFY_NAMES="${BIB_MINIFY_NAMES:-1}"
 BIB_MINIFY_NAMES_CMAKE=ON
 [ "$BIB_MINIFY_NAMES" = 1 ] || BIB_MINIFY_NAMES_CMAKE=OFF
 BIB_INITIAL_MEMORY="${BIB_INITIAL_MEMORY:-64MB}"
+# BIB_PROFILING_FUNCS=0 drops the wasm name section (-13 MB wasm, -35 MB of
+# decoded names per Go engine; abort traces lose their symbols).
+BIB_PROFILING_FUNCS="${BIB_PROFILING_FUNCS:-1}"
+BIB_PROFILING_FUNCS_CMAKE=ON
+[ "$BIB_PROFILING_FUNCS" = 1 ] || BIB_PROFILING_FUNCS_CMAKE=OFF
 # BIB_CCACHE=1 (default when ccache is on PATH): compile through ccache so a
 # reconfigure, a patch regeneration or a second build tree does not recompile
 # ~7500 -O3 TUs from scratch. The cache lives in build/ccache (gitignored);
@@ -141,6 +146,7 @@ EMBEDDER_FLAGS=(
   "-DBIB_PROXY_MAIN=$BIB_PROXY_MAIN_CMAKE"
   "-DBIB_MINIFY_NAMES=$BIB_MINIFY_NAMES_CMAKE"
   "-DBIB_INITIAL_MEMORY=$BIB_INITIAL_MEMORY"
+  "-DBIB_PROFILING_FUNCS=$BIB_PROFILING_FUNCS_CMAKE"
   "${CCACHE_FLAGS[@]}"
 )
 
