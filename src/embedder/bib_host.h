@@ -68,6 +68,16 @@ void bib_host_present_hello(int w, int h);
 // source, or nullptr when the host has none.
 char* bib_host_wasm2js(const char* payload, const char* mode);
 
+// Resource cache, host-owned and shared across page loads and engines.
+// bib_host_cache_get: for a GET, a fresh hit fills *status, *headers (a
+// bib_wasm_alloc'd "Name: value\r\n" block of *headersLen bytes) and *body
+// (bib_wasm_alloc'd, *bodyLen bytes) and returns 1; a miss returns 0 with
+// nothing allocated. The caller frees both buffers.
+int bib_host_cache_get(const char* url, int* status, char** headers, int* headersLen, uint8_t** body, int* bodyLen);
+// bib_host_cache_put offers a complete response (raw header lines, decoded
+// body); the host decides cacheability from the headers and copies out.
+void bib_host_cache_put(const char* url, int status, const char* headers, int headersLen, const uint8_t* body, int bodyLen);
+
 // Media bridge (BibMediaPlayer): host-side <audio>/<video> elements.
 int bib_host_media_can_play(const char* contentType);
 void bib_host_media_create(int id);

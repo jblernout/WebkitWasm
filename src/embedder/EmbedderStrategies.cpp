@@ -52,6 +52,7 @@
 #include "StorageSessionProvider.h"
 #include "SubresourceLoader.h"
 #include "UserAgent.h"
+#include "bib_host.h"
 #include <pal/SessionID.h>
 #include <wtf/HashMap.h>
 #include <wtf/NeverDestroyed.h>
@@ -179,9 +180,11 @@ private:
 // recipe against embedderStorageSession().
 class BibResourceLoad final : public RefCounted<BibResourceLoad>, public CurlRequestClient {
 public:
-    static Ref<BibResourceLoad> create(ResourceLoader& loader, Function<void(BibResourceLoad&)>&& doneCallback)
+    // cacheable: subresource GETs may be served from / stored into the host
+    // resource cache (bib_host.h); main documents never are.
+    static Ref<BibResourceLoad> create(ResourceLoader& loader, bool cacheable, Function<void(BibResourceLoad&)>&& doneCallback)
     {
-        return adoptRef(*new BibResourceLoad(loader, WTF::move(doneCallback)));
+        return adoptRef(*new BibResourceLoad(loader, cacheable, WTF::move(doneCallback)));
     }
 
     void ref() const final { RefCounted::ref(); }
@@ -191,8 +194,62 @@ public:
 
     void start()
     {
-        m_curlRequest = createCurlRequest(ResourceRequest { m_loader->request() });
+        startRequest(ResourceRequest { m_loader->request() });
+    }
+
+    // Every hop (initial load and each redirect) comes through here: a fresh
+    // host-cache entry for the URL is delivered without touching the network.
+    void startRequest(ResourceRequest&& request)
+    {
+        if (m_cacheable && request.httpMethod() == "GET"_s && request.url().protocolIsInHTTPFamily() && serveFromHostCache(request))
+            return;
+        m_curlRequest = createCurlRequest(WTF::move(request));
         m_curlRequest->resume();
+    }
+
+    bool serveFromHostCache(const ResourceRequest& request)
+    {
+        CString url = request.url().string().utf8();
+        int status = 0, headersLen = 0, bodyLen = 0;
+        char* headers = nullptr;
+        uint8_t* body = nullptr;
+        if (!bib_host_cache_get(url.data(), &status, &headers, &headersLen, &body, &bodyLen))
+            return false;
+        CurlResponse response;
+        response.url = request.url();
+        response.statusCode = status;
+        response.expectedContentLength = bodyLen;
+        response.httpVersion = CURL_HTTP_VERSION_1_1;
+        response.headers.append(makeString("HTTP/1.1 "_s, status, " OK"_s));
+        String block = String::fromUTF8(std::span(headers, static_cast<size_t>(headersLen)));
+        free(headers);
+        for (auto line : StringView(block).split('\n')) {
+            auto trimmed = line.trim(isASCIIWhitespace<char16_t>);
+            if (!trimmed.isEmpty())
+                response.headers.append(trimmed.toString());
+        }
+        Ref<SharedBuffer> cachedBody = SharedBuffer::create(std::span<const uint8_t>(body, static_cast<size_t>(bodyLen)));
+        free(body);
+        m_fromHostCache = true;
+        // Deliver like ResourceLoader::loadDataURL does: outside the caller's
+        // stack, response then data then completion in one task.
+        callOnMainThread([this, protectedThis = Ref { *this }, cachedResponse = WTF::move(response), cachedBody = WTF::move(cachedBody)]() mutable {
+            if (!m_loader)
+                return;
+            m_response = ResourceResponse(cachedResponse);
+            m_response.setSource(ResourceResponse::Source::DiskCache);
+            Ref<SharedBuffer> data = WTF::move(cachedBody);
+            m_loader->didReceiveResponse(ResourceResponse { m_response }, [this, protectedThis = Ref { *this }, data]() mutable {
+                if (!m_loader)
+                    return;
+                if (data->size())
+                    m_loader->didReceiveBuffer(data.get(), data->size(), DataPayloadBytes);
+                RefPtr loader = m_loader;
+                notifyDone();
+                loader->didFinishLoading(NetworkLoadMetrics { });
+            });
+        });
+        return true;
     }
 
     // Idempotent; also reached re-entrantly via LoaderStrategy::remove()
@@ -207,10 +264,52 @@ public:
     }
 
 private:
-    BibResourceLoad(ResourceLoader& loader, Function<void(BibResourceLoad&)>&& doneCallback)
+    BibResourceLoad(ResourceLoader& loader, bool cacheable, Function<void(BibResourceLoad&)>&& doneCallback)
         : m_loader(&loader)
         , m_doneCallback(WTF::move(doneCallback))
+        , m_cacheable(cacheable)
     {
+    }
+
+    // Host cache feed: a complete 200 GET response is offered to the host at
+    // completion (the host applies the Cache-Control rules and size caps).
+    static constexpr size_t maxCollectBytes = 8 * 1024 * 1024;
+
+    void beginCollect(const CurlRequest& request, const CurlResponse& curlResponse)
+    {
+        m_collect = false;
+        m_collected.clear();
+        if (!m_cacheable || curlResponse.statusCode != 200 || request.resourceRequest().httpMethod() != "GET"_s)
+            return;
+        StringBuilder headers;
+        for (const auto& header : curlResponse.headers) {
+            headers.append(header);
+            headers.append("\r\n"_s);
+        }
+        m_collectURL = request.resourceRequest().url().string().utf8();
+        m_collectHeaders = headers.toString().utf8();
+        m_collect = true;
+    }
+
+    void collect(const SharedBuffer& buffer)
+    {
+        if (!m_collect)
+            return;
+        if (m_collected.size() + buffer.size() > maxCollectBytes) {
+            m_collect = false;
+            m_collected.clear();
+            return;
+        }
+        m_collected.append(buffer.span());
+    }
+
+    void finishCollect()
+    {
+        if (!m_collect)
+            return;
+        m_collect = false;
+        bib_host_cache_put(m_collectURL.data(), 200, m_collectHeaders.data(), static_cast<int>(m_collectHeaders.length()), m_collected.span().data(), static_cast<int>(m_collected.size()));
+        m_collected.clear();
     }
 
     Ref<CurlRequest> createCurlRequest(ResourceRequest&& request)
@@ -342,8 +441,7 @@ private:
                 curlRequest->cancel();
                 curlRequest->invalidateClient();
             }
-            m_curlRequest = createCurlRequest(WTF::move(newRequest));
-            m_curlRequest->resume();
+            startRequest(WTF::move(newRequest));
         });
     }
 
@@ -380,6 +478,7 @@ private:
             return;
         }
 
+        beginCollect(request, curlResponse);
         m_loader->didReceiveResponse(ResourceResponse { m_response }, [this, protectedThis = Ref { *this }] {
             if (m_curlRequest && m_loader)
                 m_curlRequest->completeDidReceiveResponse();
@@ -391,6 +490,7 @@ private:
         Ref protectedThis { *this };
         if (!m_loader || m_curlRequest != &request)
             return;
+        collect(buffer.get());
         long long size = buffer->size();
         m_loader->didReceiveBuffer(buffer.get(), size, DataPayloadBytes);
     }
@@ -400,6 +500,7 @@ private:
         Ref protectedThis { *this };
         if (!m_loader || m_curlRequest != &request)
             return;
+        finishCollect();
         RefPtr loader = m_loader;
         notifyDone();
         loader->didFinishLoading(metrics);
@@ -420,6 +521,12 @@ private:
     Function<void(BibResourceLoad&)> m_doneCallback;
     ResourceResponse m_response;
     int m_redirectCount { 0 };
+    bool m_cacheable { false };
+    bool m_fromHostCache { false };
+    bool m_collect { false };
+    CString m_collectURL;
+    CString m_collectHeaders;
+    Vector<uint8_t> m_collected;
 };
 
 // --- Request blocklist ------------------------------------------------------
@@ -501,7 +608,7 @@ static bool isBlocklistedHost(StringView host)
 
 class EmbedderLoaderStrategy final : public LoaderStrategy {
 public:
-    void scheduleLoad(ResourceLoader& loader)
+    void scheduleLoad(ResourceLoader& loader, bool cacheable = false)
     {
         // ResourceLoader::start() handles data: URLs internally, before the
         // ResourceHandle path (which is unreachable on curl ports). blob:
@@ -514,7 +621,7 @@ public:
             return;
         }
 
-        auto load = BibResourceLoad::create(loader, [this](BibResourceLoad& load) {
+        auto load = BibResourceLoad::create(loader, cacheable, [this](BibResourceLoad& load) {
             if (auto* loader = load.loader())
                 m_loads.remove(loader);
         });
@@ -533,9 +640,10 @@ private:
             return;
         }
 
-        SubresourceLoader::create(frame, resource, WTF::move(request), options, [this, completionHandler = WTF::move(completionHandler)](RefPtr<SubresourceLoader>&& loader) mutable {
+        bool cacheable = resource.type() != CachedResource::Type::MainResource;
+        SubresourceLoader::create(frame, resource, WTF::move(request), options, [this, cacheable, completionHandler = WTF::move(completionHandler)](RefPtr<SubresourceLoader>&& loader) mutable {
             if (loader)
-                scheduleLoad(*loader);
+                scheduleLoad(*loader, cacheable);
             completionHandler(WTF::move(loader));
         });
     }

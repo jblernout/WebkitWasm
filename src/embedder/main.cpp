@@ -114,6 +114,12 @@ HashMap<String, RefPtr<BibStorageArea>>& bibLocalAreaRegistry()
     static NeverDestroyed<HashMap<String, RefPtr<BibStorageArea>>> registry;
     return registry;
 }
+HashSet<BibStorageArea*>& bibAllAreas()
+{
+    static NeverDestroyed<HashSet<BibStorageArea*>> areas;
+    return areas.get();
+}
+
 HashMap<String, HashMap<String, String>>& bibPendingStorageImport()
 {
     static NeverDestroyed<HashMap<String, HashMap<String, String>>> pending;
@@ -1611,6 +1617,31 @@ static void bibRunEval(void* p)
 // Host-triggered persistence flush (visibilitychange/pagehide): skips the
 // 5s throttle but still skips the push when nothing changed.
 static void bibRunPersistNow(void*);
+// Go host: drop the page context so the next load is independent — navigate
+// away, delete cookies, web storage and the memory cache, collect the JS heap.
+// The host-side resource cache (bib_host_cache_*) is deliberately kept.
+static void bibRunReset(void*);
+void bib_load_url(const char* url); // defined below
+EMSCRIPTEN_KEEPALIVE void bib_reset()
+{
+    if (!bibOnEngineThread()) {
+        bibProxyToEngine(bibRunReset, nullptr);
+        return;
+    }
+    if (!g_engine)
+        return;
+    bib_load_url("about:blank");
+    BIB::embedderStorageSession().cookieDatabase().deleteAllCookies();
+    for (auto* area : BIB::bibAllAreas())
+        area->resetContents();
+    BIB::bibPendingStorageImport().clear();
+    WebCore::MemoryCache::singleton().evictResources();
+    WebCore::commonVM().heap.collectNow(JSC::Sync, JSC::CollectionScope::Full);
+    WTF::releaseFastMallocFreeMemory();
+    printf("EMBEDDER: reset\n");
+}
+static void bibRunReset(void*) { bib_reset(); }
+
 EMSCRIPTEN_KEEPALIVE void bib_persist_now()
 {
     if (!bibOnEngineThread()) {

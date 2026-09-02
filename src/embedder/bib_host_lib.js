@@ -149,6 +149,12 @@ addToLibrary({
     return buf;
   },
 
+  // --- resource cache: the browser's own HTTP cache does this job -----------------
+  bib_host_cache_get__sig: 'ipppppp',
+  bib_host_cache_get: (url, status, headers, headersLen, body, bodyLen) => 0,
+  bib_host_cache_put__sig: 'vpipipi',
+  bib_host_cache_put: (url, status, headers, headersLen, body, bodyLen) => {},
+
   // --- media bridge -------------------------------------------------------------
   bib_host_media_can_play__deps: ['$UTF8ToString'],
   bib_host_media_can_play__proxy: 'sync',

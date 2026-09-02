@@ -29,6 +29,7 @@
 #include "StorageType.h"
 #include <pal/SessionID.h>
 #include <wtf/HashMap.h>
+#include <wtf/HashSet.h>
 #include <wtf/text/StringHash.h>
 
 namespace BIB {
@@ -39,6 +40,8 @@ class BibStorageArea;
 // Keyed by SecurityOriginData::toString() (e.g. "https://discord.com").
 HashMap<String, RefPtr<BibStorageArea>>& bibLocalAreaRegistry();
 HashMap<String, HashMap<String, String>>& bibPendingStorageImport();
+// Every live area (local, transient and session), for bib_reset (main.cpp).
+HashSet<BibStorageArea*>& bibAllAreas();
 
 class BibStorageArea final : public WebCore::StorageArea {
 public:
@@ -46,7 +49,13 @@ public:
         : m_type(type)
         , m_map(quota)
     {
+        bibAllAreas().add(this);
     }
+
+    ~BibStorageArea() { bibAllAreas().remove(this); }
+
+    // bib_reset: drop the contents without a frame (clear() needs one).
+    void resetContents() { m_map.clear(); }
 
     // Persistence import: bypasses the LocalFrame-taking setItem (no frame
     // exists at seed time). Quota still enforced; an over-quota seed (only
