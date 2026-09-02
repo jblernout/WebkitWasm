@@ -96,10 +96,13 @@ void bib_host_net_inflight(int delta);
 // are performed by the host (which can present a browser TLS / HTTP2
 // fingerprint) instead of the engine's curl: bib_host_fetch starts request
 // `id` (header block "Name: value\r\n", body bytes) and returns 1 when the
-// host took it, 0 to fall back to curl. The host answers exactly once through
-// the bib_fetch_done export (on the engine thread): status, header block and
-// body bib_wasm_alloc'd for the engine to free, or errno != 0 for a transport
-// failure. Redirects are not followed by the host (3xx come back as is).
+// host took it, 0 to fall back to curl. The host answers through exports, on
+// the engine thread and in order: bib_fetch_head(id, status, headers, len)
+// once, bib_fetch_data(id, bytes, len) per body chunk as it arrives, then
+// bib_fetch_done(id, errno) (errno != 0: transport failure, possibly before
+// any head). Buffers are bib_wasm_alloc'd by the host and freed by the
+// engine. Redirects are not followed by the host (3xx come back as is);
+// bib_host_fetch_cancel stops a stream the engine no longer wants.
 int bib_host_fetch(int id, const char* method, const char* url, const char* headers, int headersLen, const uint8_t* body, int bodyLen);
 void bib_host_fetch_cancel(int id);
 

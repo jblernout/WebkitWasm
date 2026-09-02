@@ -54,6 +54,7 @@
 #include "UserAgent.h"
 #include "bib_host.h"
 #include "bib_ua.h"
+#include <wtf/text/StringToIntegerConversion.h>
 #include "FormData.h"
 #include <emscripten.h>
 #include <pal/SessionID.h>
@@ -267,34 +268,96 @@ public:
         return true;
     }
 
-    // bib_fetch_done for this load: cookies, redirects and delivery follow the
-    // curl path (curlDidReceiveResponse) with a synthetic CurlResponse.
-    void hostFetchDone(int status, String&& headerBlock, Ref<SharedBuffer>&& body, int errnum)
+    // Streamed host transport, mirroring the curl callbacks: bib_fetch_head
+    // = curlDidReceiveResponse (cookies, 304 revalidation, redirects, cache
+    // collection), bib_fetch_data = curlDidReceiveData, bib_fetch_done =
+    // curlDidComplete / curlDidFailWithError. Like curl, data is held back
+    // until the loader's didReceiveResponse completion handler ran.
+    void stopHostFetch()
     {
-        m_hostFetchID = 0;
+        if (int id = std::exchange(m_hostFetchID, 0)) {
+            hostFetchRegistry().remove(id);
+            bib_host_fetch_cancel(id);
+        }
+    }
+
+    void hostFetchHead(int status, const String& headerBlock)
+    {
+        Ref protectedThis { *this };
         if (!m_loader)
             return;
+        long long length = -1;
+        String contentLength = headerValueFromBlock(headerBlock, "Content-Length"_s);
+        if (!contentLength.isEmpty())
+            length = parseInteger<long long>(contentLength).value_or(-1);
+        CurlResponse response = cachedResponseFor(m_hostFetchRequest.url(), status, headerBlock, length);
+        m_response = ResourceResponse(response);
+        storeResponseCookies(m_hostFetchRequest, response);
+        if (serveRevalidated(response)) {
+            stopHostFetch();
+            return;
+        }
+        m_staleBody = nullptr;
+        if (shouldRedirect()) {
+            stopHostFetch();
+            performRedirect();
+            return;
+        }
+        beginCollect(m_hostFetchRequest, response);
+        m_hostPaused = true;
+        m_loader->didReceiveResponse(ResourceResponse { m_response }, [this, protectedThis = Ref { *this }] {
+            m_hostPaused = false;
+            if (!m_loader)
+                return;
+            auto pending = std::exchange(m_hostPending, { });
+            for (auto& chunk : pending) {
+                if (!m_loader)
+                    return;
+                deliverHostChunk(chunk.get());
+            }
+            if (auto done = std::exchange(m_hostDone, std::nullopt))
+                hostFetchDone(*done);
+        });
+    }
+
+    void hostFetchData(Ref<SharedBuffer>&& chunk)
+    {
+        Ref protectedThis { *this };
+        if (!m_loader)
+            return;
+        if (m_hostPaused) {
+            m_hostPending.append(WTF::move(chunk));
+            return;
+        }
+        deliverHostChunk(chunk.get());
+    }
+
+    void deliverHostChunk(const SharedBuffer& buffer)
+    {
+        collect(buffer);
+        long long size = buffer.size();
+        m_loader->didReceiveBuffer(buffer, size, DataPayloadBytes);
+    }
+
+    void hostFetchDone(int errnum)
+    {
+        Ref protectedThis { *this };
+        if (!m_loader)
+            return;
+        if (m_hostPaused) {
+            m_hostDone = errnum;
+            return;
+        }
+        m_hostFetchID = 0;
         if (errnum) {
             WTFLogAlways("BIB: host fetch failed errno=%d %s", errnum, m_hostFetchRequest.url().string().utf8().data());
             didFailInternal(ResourceError(errnum, m_hostFetchRequest.url()));
             return;
         }
-        CurlResponse response = cachedResponseFor(m_hostFetchRequest.url(), status, headerBlock, body->size());
-        m_response = ResourceResponse(response);
-        storeResponseCookies(m_hostFetchRequest, response);
-        if (serveRevalidated(response))
-            return;
-        m_staleBody = nullptr;
-        if (shouldRedirect()) {
-            performRedirect();
-            return;
-        }
-        if (m_cacheable && status == 200 && m_hostFetchRequest.httpMethod() == "GET"_s && body->size() <= maxCollectBytes) {
-            CString url = m_hostFetchRequest.url().string().utf8();
-            CString hdr = headerBlock.utf8();
-            bib_host_cache_put(url.data(), status, hdr.data(), static_cast<int>(hdr.length()), body->span().data(), static_cast<int>(body->size()));
-        }
-        deliverResponse(WTF::move(response), WTF::move(body));
+        finishCollect();
+        RefPtr loader = m_loader;
+        notifyDone();
+        loader->didFinishLoading(NetworkLoadMetrics { });
     }
 
     // Parses a "Name: value\r\n" block into CurlResponse header lines, with a
@@ -428,10 +491,9 @@ public:
             curlRequest->cancel();
             curlRequest->invalidateClient();
         }
-        if (int id = std::exchange(m_hostFetchID, 0)) {
-            hostFetchRegistry().remove(id);
-            bib_host_fetch_cancel(id);
-        }
+        stopHostFetch();
+        m_hostPending.clear();
+        m_hostDone = std::nullopt;
         if (std::exchange(m_counted, false))
             bib_host_net_inflight(-1);
     }
@@ -448,18 +510,20 @@ private:
     // completion (the host applies the Cache-Control rules and size caps).
     static constexpr size_t maxCollectBytes = 8 * 1024 * 1024;
 
-    void beginCollect(const CurlRequest& request, const CurlResponse& curlResponse)
+    void beginCollect(const CurlRequest& request, const CurlResponse& curlResponse) { beginCollect(request.resourceRequest(), curlResponse); }
+
+    void beginCollect(const ResourceRequest& request, const CurlResponse& curlResponse)
     {
         m_collect = false;
         m_collected.clear();
-        if (!m_cacheable || curlResponse.statusCode != 200 || request.resourceRequest().httpMethod() != "GET"_s)
+        if (!m_cacheable || curlResponse.statusCode != 200 || request.httpMethod() != "GET"_s)
             return;
         StringBuilder headers;
         for (const auto& header : curlResponse.headers) {
             headers.append(header);
             headers.append("\r\n"_s);
         }
-        m_collectURL = request.resourceRequest().url().string().utf8();
+        m_collectURL = request.url().string().utf8();
         m_collectHeaders = headers.toString().utf8();
         m_collect = true;
     }
@@ -707,22 +771,39 @@ private:
     RefPtr<SharedBuffer> m_staleBody; // stale host-cache entry awaiting a 304
     int m_hostFetchID { 0 };
     ResourceRequest m_hostFetchRequest;
+    bool m_hostPaused { false }; // until didReceiveResponse's completion handler
+    Vector<Ref<SharedBuffer>> m_hostPending;
+    std::optional<int> m_hostDone;
     bool m_collect { false };
     CString m_collectURL;
     CString m_collectHeaders;
     Vector<uint8_t> m_collected;
 };
 
-// Host transport completion (bib_host.h). Runs on the engine thread; the
-// buffers are bib_wasm_alloc'd by the host and freed here.
-extern "C" EMSCRIPTEN_KEEPALIVE void bib_fetch_done(int id, int status, char* headers, int headersLen, uint8_t* body, int bodyLen, int errnum)
+// Host transport stream (bib_host.h). Runs on the engine thread; the buffers
+// are bib_wasm_alloc'd by the host and freed here whatever happens to them.
+extern "C" EMSCRIPTEN_KEEPALIVE void bib_fetch_head(int id, int status, char* headers, int headersLen)
 {
     String headerBlock = headers ? String::fromUTF8(std::span(headers, static_cast<size_t>(headersLen))) : String();
-    Ref<SharedBuffer> data = body ? SharedBuffer::create(std::span<const uint8_t>(body, static_cast<size_t>(bodyLen))) : SharedBuffer::create();
     free(headers);
+    if (auto load = hostFetchRegistry().get(id))
+        load->hostFetchHead(status, headerBlock);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void bib_fetch_data(int id, uint8_t* body, int bodyLen)
+{
+    if (!body)
+        return;
+    Ref<SharedBuffer> data = SharedBuffer::create(std::span<const uint8_t>(body, static_cast<size_t>(bodyLen)));
     free(body);
+    if (auto load = hostFetchRegistry().get(id))
+        load->hostFetchData(WTF::move(data));
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void bib_fetch_done(int id, int errnum)
+{
     if (auto load = hostFetchRegistry().take(id))
-        load->hostFetchDone(status, WTF::move(headerBlock), WTF::move(data), errnum);
+        load->hostFetchDone(errnum);
 }
 
 // --- Request blocklist ------------------------------------------------------
