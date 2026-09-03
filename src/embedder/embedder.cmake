@@ -66,6 +66,15 @@ option(BIB_PROFILING_FUNCS "Emit the wasm name section (symbolised abort traces)
 # Go/wazero host) pay nothing for growth. Static data (embedded ICU + fonts +
 # CA bundle, ~42 MB) plus the 8 MB stack must fit.
 set(BIB_INITIAL_MEMORY "64MB" CACHE STRING "-sINITIAL_MEMORY for the embedder link")
+# JSC finds GC roots by scanning the C stack conservatively; under wasm the
+# pointers held in wasm locals never reach the shadow stack, so a collection
+# triggered inside an allocation could free cells C++ frames still use.
+# ON: Binaryen spills live pointers around every call (+20 % time, +30 % code).
+# OFF: rely on bib_host_flag("gcdefer") (collections only at RunLoop safepoints).
+set(BIB_SPILL_POINTERS ON CACHE BOOL "Binaryen --spill-pointers on the embedder link")
+if (BIB_SPILL_POINTERS)
+    target_link_options(BibEmbedder PRIVATE "SHELL:-sBINARYEN_EXTRA_PASSES=--spill-pointers")
+endif ()
 set(BIB_MALLOC "dlmalloc" CACHE STRING "-sMALLOC for the embedder link (dlmalloc | mimalloc: freed pages handed back to the host through bib_host_discard)")
 if (BIB_MALLOC STREQUAL "mimalloc")
     target_compile_definitions(BibEmbedder PRIVATE BIB_MIMALLOC=1)
@@ -122,8 +131,7 @@ target_link_options(BibEmbedder PRIVATE
     # as the pre-js: touch main.cpp after editing it.
     "SHELL:--js-library ${BIB_EMBEDDER_DIR}/bib_host_lib.js"
     "SHELL:-sSTACK_SIZE=8MB"
-    # JSC conservative GC roots: spill wasm locals to the shadow stack (see patch_spill.py)
-    "SHELL:-sBINARYEN_EXTRA_PASSES=--spill-pointers"
+    # (Binaryen --spill-pointers: BIB_SPILL_POINTERS below)
     "SHELL:-sINITIAL_MEMORY=${BIB_INITIAL_MEMORY}"
     "SHELL:-sMALLOC=${BIB_MALLOC}"
     "SHELL:-sALLOW_MEMORY_GROWTH=1"

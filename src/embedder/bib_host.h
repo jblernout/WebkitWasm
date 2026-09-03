@@ -119,6 +119,9 @@ int bib_host_allow_request(const char* url, const char* type, int mainFrame);
 // memory it decommits; the host drops their physical pages (they read as
 // zero afterwards). Browsers have no such control: no-op.
 void bib_host_discard(void* addr, size_t size);
+// Same, but never queued (mimalloc memory returned to emmalloc, which may
+// reuse it before the queue is flushed).
+void bib_host_discard_now(void* addr, size_t size);
 
 // JavaScript bytecode cache (bib_host_flag("jsbytecode")): WebCore's script
 // source provider stores JSC's serialized unlinked bytecode per script

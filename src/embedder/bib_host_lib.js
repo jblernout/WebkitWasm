@@ -162,6 +162,8 @@ addToLibrary({
   // --- memory: browsers cannot drop pages of the wasm memory ------------------
   bib_host_discard__sig: 'vpp',
   bib_host_discard: (addr, size) => {},
+  bib_host_discard_now__sig: 'vpp',
+  bib_host_discard_now: (addr, size) => {},
 
   // --- JS bytecode cache: browsers keep JSC's in-memory cache only ----------
   bib_host_bytecode_get__sig: 'ppp',

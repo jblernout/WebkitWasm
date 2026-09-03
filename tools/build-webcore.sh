@@ -126,6 +126,8 @@ BIB_PROFILING_FUNCS="${BIB_PROFILING_FUNCS:-1}"
 # is opt-in: it takes an out-of-bounds trap on some pages with the web-platform
 # preferences enabled (a latent emmalloc/mimalloc bug under this wasm port).
 BIB_MALLOC="${BIB_MALLOC:-dlmalloc}"
+# BIB_SPILL_POINTERS=OFF: no Binaryen --spill-pointers (see embedder.cmake)
+BIB_SPILL_POINTERS="${BIB_SPILL_POINTERS:-ON}"
 BIB_PROFILING_FUNCS_CMAKE=ON
 [ "$BIB_PROFILING_FUNCS" = 1 ] || BIB_PROFILING_FUNCS_CMAKE=OFF
 # BIB_CCACHE=1 (default when ccache is on PATH): compile through ccache so a
@@ -148,6 +150,7 @@ fi
 EMBEDDER_FLAGS=(
   -DEMSCRIPTEN_EMBEDDER_CMAKE="$ROOT/src/embedder/embedder.cmake"
   -DBIB_MALLOC="$BIB_MALLOC"
+  -DBIB_SPILL_POINTERS="$BIB_SPILL_POINTERS"
   -DBIB_FONTCONFIG_ETC_DIR="$FSROOT/etc-fonts"
   -DBIB_FONTS_DIR="$FSROOT/fonts"
   -DBIB_CA_BUNDLE="$FSROOT/ssl/cacert.pem"

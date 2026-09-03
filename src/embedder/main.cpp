@@ -61,6 +61,9 @@ WTF_EXPORT_PRIVATE void setRunLoopArmTimerCallback(Function<void(double)>&&);
 #include "LocalDOMWindow.h"
 #include <malloc.h>
 #include "CommonVM.h" // #77/OOM probe: commonVM().heap.size() for the JS-heap gauge
+#include <JavaScriptCore/DeferGC.h> // bib_host_flag("gcdefer"): collections only at RunLoop safepoints
+#include <optional>
+#include <JavaScriptCore/DeferGC.h> // bib_host_flag("gcdefer"): collections only at RunLoop safepoints
 #include "NetworkStorageSession.h" // persistence: cookieDatabase() dump/seed
 #include "Page.h"
 #include "PageConfiguration.h"
@@ -708,6 +711,26 @@ static void bibPushFrameIfDirty();
 // engine thread; the frame (if any) is PUSHED back via Module.bibBlit.
 static std::atomic<bool> g_tickQueued { false };
 static void bibRunTick(void*);
+// bib_host_flag("gcdefer"): JSC's allocation-driven collections are held by
+// a permanent DeferGC and only happen here, between RunLoop tasks, where the
+// C++ stack is empty: a cell referenced only from a wasm local (invisible to
+// the conservative stack scan) cannot be collected under a live frame.
+static std::optional<JSC::DeferGC> g_deferGC; // DeferGC forbids heap allocation
+static bool bibGCDeferred()
+{
+    static const bool deferred = bib_host_flag("gcdefer") != 0;
+    return deferred;
+}
+static void bibGCSafepoint()
+{
+    if (!bibGCDeferred())
+        return;
+    JSC::VM& vm = WebCore::commonVM();
+    JSC::JSLockHolder lock(vm);
+    g_deferGC.reset(); // ~DeferGC: decrementDeferralDepthAndGCIfNeeded
+    g_deferGC.emplace(vm);
+}
+
 EMSCRIPTEN_KEEPALIVE void bib_tick()
 {
     if (!bibOnEngineThread()) {
@@ -719,6 +742,7 @@ EMSCRIPTEN_KEEPALIVE void bib_tick()
     }
     const double _perfT0 = g_perfLog ? bibNowMs() : 0;
     WTF::RunLoop::cycle();
+    bibGCSafepoint();
     const double _perfT1 = g_perfLog ? bibNowMs() : 0;
     // Drive WebCore's "update the rendering" steps. This port has no
     // DisplayRefreshMonitor, so nothing else ever runs them — guest
@@ -827,10 +851,12 @@ EMSCRIPTEN_KEEPALIVE void bib_pump()
     }
     if (!g_perfLog) {
         WTF::RunLoop::cycle();
+    bibGCSafepoint();
         return;
     }
     const double t0 = bibNowMs();
     WTF::RunLoop::cycle();
+    bibGCSafepoint();
     const double dt = bibNowMs() - t0;
     g_perf.pumpCycle += dt;
     if (dt > g_perf.pumpMax)
