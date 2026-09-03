@@ -163,6 +163,12 @@ addToLibrary({
   bib_host_discard__sig: 'vpp',
   bib_host_discard: (addr, size) => {},
 
+  // --- JS bytecode cache: browsers keep JSC's in-memory cache only ----------
+  bib_host_bytecode_get__sig: 'ppp',
+  bib_host_bytecode_get: (key, outLen) => 0,
+  bib_host_bytecode_put__sig: 'vppi',
+  bib_host_bytecode_put: (key, data, len) => {},
+
   // --- network idle: browsers use Page.lifecycleEvent / IdlenessDetector -------
   bib_host_net_inflight__sig: 'vi',
   bib_host_net_inflight: (delta) => {},

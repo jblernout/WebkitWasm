@@ -54,6 +54,7 @@ WTF_EXPORT_PRIVATE void setRunLoopArmTimerCallback(Function<void(double)>&&);
 #include "LocalFrameInlines.h"
 #include "LocalFrameView.h"
 #include "MemoryCache.h"
+#include "CachedScriptSourceProvider.h"
 #include "Performance.h"
 #include "PerformanceEntry.h"
 #include "LocalDOMWindow.h"
@@ -1709,8 +1710,21 @@ unsigned bib_heap_end();
 int malloc_trim(size_t); // dlmalloc
 #endif
 static RefPtr<BIB::BibDatabaseProvider> g_databaseProvider;
+// Commit the pending bytecode-cache updates: a script's provider commits in
+// its destructor (like jsc's shell), so a full GC after the document went
+// away releases them (bib_reset does this; JSC's CodeCache::write() would be
+// the direct route but its header is private to the prebuilt JSC).
+EMSCRIPTEN_KEEPALIVE void bib_flush_bytecode()
+{
+    if (!bibOnEngineThread() || !g_engine)
+        return;
+    JSC::JSLockHolder lock(WebCore::commonVM());
+    WebCore::bibCommitAllBytecode();
+}
+
 EMSCRIPTEN_KEEPALIVE void bib_reset()
 {
+    bib_flush_bytecode();
     if (!bibOnEngineThread()) {
         bibProxyToEngine(bibRunReset, nullptr);
         return;

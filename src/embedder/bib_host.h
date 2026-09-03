@@ -120,6 +120,14 @@ int bib_host_allow_request(const char* url, const char* type, int mainFrame);
 // zero afterwards). Browsers have no such control: no-op.
 void bib_host_discard(void* addr, size_t size);
 
+// JavaScript bytecode cache (bib_host_flag("jsbytecode")): WebCore's script
+// source provider stores JSC's serialized unlinked bytecode per script
+// (key = source hash, length, URL) and asks for it before parsing. get()
+// returns a malloc'd blob (freed by the engine) or NULL; the engine commits
+// through bib_flush_bytecode() (bib_reset calls it) and at provider teardown.
+char* bib_host_bytecode_get(const char* key, int* outLen);
+void bib_host_bytecode_put(const char* key, const uint8_t* data, int len);
+
 // Media bridge (BibMediaPlayer): host-side <audio>/<video> elements.
 int bib_host_media_can_play(const char* contentType);
 void bib_host_media_create(int id);
