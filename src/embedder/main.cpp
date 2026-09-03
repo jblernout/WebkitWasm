@@ -1744,8 +1744,12 @@ EMSCRIPTEN_KEEPALIVE void bib_reset()
     // Give the freed top of the heap back (sbrk shrinks): the host then
     // discards the pages above bib_heap_end() so they stop being resident.
 #if BIB_MIMALLOC
-    mi_collect(true); // purge freed pages now (bib_host_discard), do not wait for purge_delay
-    emmalloc_trim(0);
+    // purge freed pages now (bib_host_discard), do not wait for purge_delay.
+    // No emmalloc_trim(): it moves the break down but leaves emmalloc's root
+    // region end pointer above it; the host then discards those pages and
+    // emmalloc later walks/allocates into zeroed metadata (out-of-bounds trap
+    // on botify.com, found with EMMALLOC_MEMVALIDATE + VERBOSE).
+    mi_collect(true);
 #else
     malloc_trim(0);
 #endif
