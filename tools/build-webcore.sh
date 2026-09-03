@@ -147,6 +147,7 @@ fi
 
 EMBEDDER_FLAGS=(
   -DEMSCRIPTEN_EMBEDDER_CMAKE="$ROOT/src/embedder/embedder.cmake"
+  -DBIB_MALLOC="$BIB_MALLOC"
   -DBIB_FONTCONFIG_ETC_DIR="$FSROOT/etc-fonts"
   -DBIB_FONTS_DIR="$FSROOT/fonts"
   -DBIB_CA_BUNDLE="$FSROOT/ssl/cacert.pem"
@@ -175,7 +176,6 @@ if [ ! -f "$BUILD/build.ninja" ]; then
     -DENABLE_C_LOOP=ON \
     -DENABLE_STATIC_JSC=ON \
     -DUSE_SYSTEM_MALLOC=ON \
-    -DBIB_MALLOC="$BIB_MALLOC" \
     -DICU_ROOT="$SYSROOT" \
     -DCMAKE_FIND_ROOT_PATH="$SYSROOT" \
     -DJSC_EMBED_ICU_DATA_FILE="$SYSROOT/share/icu/77.1/icudt77l.dat" \
