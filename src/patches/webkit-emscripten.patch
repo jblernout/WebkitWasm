@@ -79,6 +79,81 @@ index 00000000000..0e550c8e67f
 +if (ENABLE_REMOTE_INSPECTOR)
 +    include(inspector/remote/Socket.cmake)
 +endif ()
+diff --git a/Source/JavaScriptCore/heap/GCActivityCallback.cpp b/Source/JavaScriptCore/heap/GCActivityCallback.cpp
+index 7b61b93cc3f..3ea59776003 100644
+--- a/Source/JavaScriptCore/heap/GCActivityCallback.cpp
++++ b/Source/JavaScriptCore/heap/GCActivityCallback.cpp
+@@ -32,6 +32,8 @@
+ #include "HeapInlines.h"
+ #include "VM.h"
+ 
++extern "C" int bib_gc_at_safepoints_only; // BIB (gcdefer), defined in Heap.cpp
++
+ namespace JSC {
+ 
+ bool GCActivityCallback::s_shouldCreateGCTimer = true;
+@@ -58,7 +60,12 @@ void GCActivityCallback::doWork(VM& vm)
+     
+     ASSERT(vm.currentThreadIsHoldingAPILock());
+     JSC::Heap& heap = vm.heap;
+-    if (heap.isDeferred()) {
++    // BIB (gcdefer): the heap is deferred all the time except at the
++    // embedder's safepoints; this timer fires from the RunLoop, on a short
++    // stack, so collecting here is safe — and rescheduling at 0 s would
++    // re-fire on every RunLoop cycle (timer storm, corrupted timer tree on
++    // craigslist.org).
++    if (heap.isDeferred() && !bib_gc_at_safepoints_only) {
+         scheduleTimer(0_s);
+         return;
+     }
+diff --git a/Source/JavaScriptCore/heap/Heap.cpp b/Source/JavaScriptCore/heap/Heap.cpp
+index 3bb976a5dd1..80a04c244b1 100644
+--- a/Source/JavaScriptCore/heap/Heap.cpp
++++ b/Source/JavaScriptCore/heap/Heap.cpp
+@@ -2032,11 +2032,24 @@ NEVER_INLINE void Heap::resumeTheMutator()
+     }
+ }
+ 
++// BIB (bib_host_flag "gcdefer"): the embedder sets this and keeps the heap
++// deferred except at its RunLoop safepoints. A pending collection (async
++// request from the GC timers or WebCore) then waits there instead of running
++// in the mutator's next allocation slow path, where C++ frames hold cells
++// in wasm locals the conservative stack scan cannot see.
++extern "C" int bib_gc_at_safepoints_only = 0;
++
+ void Heap::stopIfNecessarySlow()
+ {
+     if constexpr (validateDFGDoesGC)
+         vm().verifyCanGC();
+ 
++    if (bib_gc_at_safepoints_only && m_deferralDepth) {
++        handleNeedFinalize(); // finalization does not scan the stack
++        m_mutatorDidRun = true;
++        return;
++    }
++
+     while (stopIfNecessarySlow(m_worldState.load())) { }
+     
+     RELEASE_ASSERT(m_worldState.load() & hasAccessBit);
+diff --git a/Source/JavaScriptCore/runtime/CodeCache.cpp b/Source/JavaScriptCore/runtime/CodeCache.cpp
+index f13824d780f..8b27dea4bb4 100644
+--- a/Source/JavaScriptCore/runtime/CodeCache.cpp
++++ b/Source/JavaScriptCore/runtime/CodeCache.cpp
+@@ -312,3 +312,14 @@ RefPtr<CachedBytecode> serializeBytecode(VM& vm, UnlinkedCodeBlock* codeBlock, c
+ }
+ 
+ }
++
++// BIB: the embedder (which cannot include this private header) asks the VM's
++// code cache to commit the bytecode-cache updates of every script it holds
++// (SourceProvider::commitCachedBytecode -> host).
++namespace JSC {
++void bibCodeCacheWrite(VM* vm)
++{
++    if (vm)
++        vm->codeCache()->write();
++}
++}
 diff --git a/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp b/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
 index 26e825ace46..fbb5c47baf4 100644
 --- a/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
@@ -754,6 +829,155 @@ index 00000000000..928271f2db9
 +}
 +
 +} // namespace WebCore
+diff --git a/Source/WebCore/bindings/js/CachedScriptSourceProvider.h b/Source/WebCore/bindings/js/CachedScriptSourceProvider.h
+index 1abc013de97..5432640dd4a 100644
+--- a/Source/WebCore/bindings/js/CachedScriptSourceProvider.h
++++ b/Source/WebCore/bindings/js/CachedScriptSourceProvider.h
+@@ -30,6 +30,33 @@
+ #include "CachedScript.h"
+ #include "CachedScriptFetcher.h"
+ #include <JavaScriptCore/SourceProvider.h>
++#include <JavaScriptCore/BytecodeCacheError.h>
++#include <JavaScriptCore/CachedBytecode.h>
++#include <JavaScriptCore/Completion.h>
++#include <JavaScriptCore/UnlinkedFunctionExecutable.h>
++#include <JavaScriptCore/VM.h>
++#include <wtf/text/MakeString.h>
++#include <wtf/HashSet.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/Vector.h>
++
++// BIB: host-side persistent bytecode cache (see bib_host.h). Returns 1 when
++// the host serves the cache; get() hands back a malloc'd blob the caller frees.
++extern "C" int bib_host_flag(const char* name);
++extern "C" char* bib_host_bytecode_get(const char* key, int* outLen);
++extern "C" void bib_host_bytecode_put(const char* key, const uint8_t* data, int len);
++
++namespace WebCore {
++class CachedScriptSourceProvider;
++// Providers holding uncommitted bytecode-cache updates. JSC's CodeCache keeps
++// providers alive across pages, so commits are driven by the host
++// (bib_flush_bytecode -> bib_commit_all_bytecode) rather than by destructors.
++inline HashSet<const CachedScriptSourceProvider*>& bibPendingBytecodeProviders()
++{
++    static NeverDestroyed<HashSet<const CachedScriptSourceProvider*>> set;
++    return set.get();
++}
++}
+ 
+ namespace WebCore {
+ 
+@@ -40,9 +67,71 @@ public:
+ 
+     virtual ~CachedScriptSourceProvider()
+     {
++        commitCachedBytecode();
+         m_cachedScript->removeClient(*this);
+     }
+ 
++    // BIB: JSC bytecode cache protocol (mirrors jsc's ShellSourceProvider,
++    // with the host instead of a file).
++    static bool bibBytecodeCacheEnabled()
++    {
++        static bool enabled = bib_host_flag("jsbytecode") != 0;
++        return enabled;
++    }
++    RefPtr<JSC::CachedBytecode> cachedBytecode() const final
++    {
++        if (!bibBytecodeCacheEnabled())
++            return nullptr;
++        if (!m_bibBytecodeLoaded) {
++            m_bibBytecodeLoaded = true;
++            bibLoadBytecode();
++        }
++        return m_bibCachedBytecode.copyRef();
++    }
++    void cacheBytecode(const JSC::BytecodeCacheGenerator& generator) const final
++    {
++        if (!bibBytecodeCacheEnabled())
++            return;
++        if (!m_bibCachedBytecode)
++            m_bibCachedBytecode = JSC::CachedBytecode::create();
++        if (auto update = generator()) {
++            m_bibCachedBytecode->addGlobalUpdate(*update);
++            bibPendingBytecodeProviders().add(this);
++        }
++    }
++    void updateCache(const JSC::UnlinkedFunctionExecutable* executable, const JSC::SourceCode&, JSC::CodeSpecializationKind kind, const JSC::UnlinkedFunctionCodeBlock* codeBlock) const final
++    {
++        if (!bibBytecodeCacheEnabled() || !m_bibCachedBytecode)
++            return;
++        JSC::BytecodeCacheError error;
++        RefPtr<JSC::CachedBytecode> cached = JSC::encodeFunctionCodeBlock(executable->vm(), codeBlock, error);
++        if (cached && !error.isValid()) {
++            m_bibCachedBytecode->addFunctionUpdate(executable, kind, *cached);
++            bibPendingBytecodeProviders().add(this);
++        }
++    }
++    void commitCachedBytecode() const final
++    {
++        bibPendingBytecodeProviders().remove(this);
++        if (!bibBytecodeCacheEnabled() || !m_bibCachedBytecode || !m_bibCachedBytecode->hasUpdates())
++            return;
++        // Same layout jsc writes to its file: the existing payload, then the
++        // updates at the offsets commitUpdates reports (sizeForUpdate total).
++        Vector<uint8_t> buffer;
++        buffer.grow(m_bibCachedBytecode->sizeForUpdate());
++        auto payload = m_bibCachedBytecode->span();
++        if (!payload.empty())
++            memcpy(buffer.mutableSpan().data(), payload.data(), payload.size());
++        m_bibCachedBytecode->commitUpdates([&](off_t offset, std::span<const uint8_t> data) {
++            if (static_cast<size_t>(offset) + data.size() <= buffer.size())
++                memcpy(buffer.mutableSpan().data() + offset, data.data(), data.size());
++        });
++        CString key = bibCacheKey().utf8();
++        bib_host_bytecode_put(key.data(), buffer.span().data(), static_cast<int>(buffer.size()));
++        m_bibCachedBytecode = nullptr;
++        m_bibBytecodeLoaded = false; // the next lookup sees the committed blob
++    }
++
+     // CachedResourceClient.
+     void ref() const final { JSC::SourceProvider::ref(); }
+     void deref() const final { JSC::SourceProvider::deref(); }
+@@ -63,9 +152,38 @@ private:
+         m_cachedScript->addClient(*this);
+     }
+ 
++    String bibCacheKey() const
++    {
++        return makeString(hash(), '-', source().length(), '-', sourceOrigin().url().string());
++    }
++    void bibLoadBytecode() const
++    {
++        CString key = bibCacheKey().utf8();
++        int len = 0;
++        char* blob = bib_host_bytecode_get(key.data(), &len);
++        if (!blob)
++            return;
++        if (len > 0) {
++            auto data = MallocSpan<uint8_t, JSC::VMMalloc>::malloc(static_cast<size_t>(len));
++            memcpy(data.mutableSpan().data(), blob, static_cast<size_t>(len));
++            m_bibCachedBytecode = JSC::CachedBytecode::create(WTF::move(data), { });
++        }
++        free(blob);
++    }
++
+     CachedResourceHandle<CachedScript> m_cachedScript;
++    mutable RefPtr<JSC::CachedBytecode> m_bibCachedBytecode;
++    mutable bool m_bibBytecodeLoaded { false };
+ };
+ 
++// Commits every provider with pending updates (host: bib_flush_bytecode).
++inline void bibCommitAllBytecode()
++{
++    auto pending = copyToVector(bibPendingBytecodeProviders());
++    for (auto* provider : pending)
++        provider->commitCachedBytecode();
++}
++
+ inline unsigned CachedScriptSourceProvider::hash() const
+ {
+     // Modules should always be decoded as UTF-8.
 diff --git a/Source/WebCore/bindings/js/IDBBindingUtilities.cpp b/Source/WebCore/bindings/js/IDBBindingUtilities.cpp
 index c6998bf5ceb..138d203a1c2 100644
 --- a/Source/WebCore/bindings/js/IDBBindingUtilities.cpp
