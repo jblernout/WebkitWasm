@@ -147,8 +147,11 @@ public:
     // pages). The next document sees empty, fresh databases either way.
     void resetAll()
     {
+        // Through InProcessIDBServer: it holds m_serverLock (IDBServer's
+        // requestSpace unlocks/relocks it while aborting the transactions
+        // still in progress) and runs on the server queue.
         for (auto& server : m_idbServerMap.values())
-            server->server().closeAndDeleteDatabasesModifiedSince(-WallTime::infinity());
+            server->closeAndDeleteDatabasesModifiedSince(-WallTime::infinity());
     }
 
     WebCore::IDBClient::IDBConnectionToServer& idbConnectionToServerForSession(PAL::SessionID sessionID) final

@@ -38,6 +38,7 @@ WTF_EXPORT_PRIVATE void setRunLoopArmTimerCallback(Function<void(double)>&&);
 #include "CookieJar.h"
 #include "CurlContext.h"
 #include "CurlRequestScheduler.h" // bib_pump_network -> scheduler().hostPump()
+#include "MemoryRelease.h" // bib_reset: releasemem
 #include "Document.h"
 #include "DocumentLoader.h"
 #include "DocumentView.h" // inline LocalFrame::view() lives here, not in LocalFrame.h
@@ -1747,6 +1748,12 @@ EMSCRIPTEN_KEEPALIVE void bib_reset()
         WebCore::MemoryCache::singleton().pruneDeadResources(); // over-capacity dead entries only
     else
         WebCore::MemoryCache::singleton().evictResources();
+    // bib_host_flag("releasemem"): what WebCore does under memory pressure —
+    // font caches, style/layout/glyph caches, back-forward cache, every JS
+    // code block — so the next page starts from a smaller heap.
+    static const bool releaseMemoryOnReset = bib_host_flag("releasemem") != 0;
+    if (releaseMemoryOnReset)
+        WebCore::releaseMemory(WTF::Critical::Yes, WTF::Synchronous::Yes, WebCore::MaintainBackForwardCache::No, keepMemoryCache ? WebCore::MaintainMemoryCache::Yes : WebCore::MaintainMemoryCache::No);
     WebCore::commonVM().heap.collectNow(JSC::Sync, JSC::CollectionScope::Full);
     WTF::releaseFastMallocFreeMemory();
     // Give the freed top of the heap back (sbrk shrinks): the host then
