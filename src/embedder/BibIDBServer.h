@@ -139,13 +139,16 @@ class BibDatabaseProvider final : public WebCore::DatabaseProvider {
 public:
     static Ref<BibDatabaseProvider> create() { return adoptRef(*new BibDatabaseProvider); }
 
-    // bib_reset: delete every in-memory database and drop the servers; the
-    // next document gets fresh ones.
+    // bib_reset: delete every in-memory database but keep the servers and
+    // their IDBConnectionToServer alive: WebCore caches the connection proxy
+    // it hands to documents, and dropping the server here left the next
+    // page's indexedDB.open() on a dead connection (WTFCrashWithInfo in
+    // IDBConnectionProxy::callConnectionOnMainThread — cnn.com after a few
+    // pages). The next document sees empty, fresh databases either way.
     void resetAll()
     {
         for (auto& server : m_idbServerMap.values())
             server->server().closeAndDeleteDatabasesModifiedSince(-WallTime::infinity());
-        m_idbServerMap.clear();
     }
 
     WebCore::IDBClient::IDBConnectionToServer& idbConnectionToServerForSession(PAL::SessionID sessionID) final

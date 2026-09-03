@@ -217,8 +217,18 @@ public:
 
     void start()
     {
-        bib_host_net_inflight(1);
-        m_counted = true;
+        // Favicons never affect the DOM: they do not hold the settle policy
+        // (an icon on an unreachable host would otherwise block "network
+        // idle" for the whole connect timeout).
+        bool icon = false;
+        if (auto* sub = dynamicDowncast<SubresourceLoader>(*m_loader)) {
+            if (auto* resource = sub->cachedResource())
+                icon = resource->type() == CachedResource::Type::Icon;
+        }
+        if (!icon) {
+            bib_host_net_inflight(1);
+            m_counted = true;
+        }
         startRequest(ResourceRequest { m_loader->request() });
     }
 
