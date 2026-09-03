@@ -127,7 +127,7 @@ BIB_PROFILING_FUNCS="${BIB_PROFILING_FUNCS:-1}"
 # preferences enabled (a latent emmalloc/mimalloc bug under this wasm port).
 BIB_MALLOC="${BIB_MALLOC:-mimalloc}"
 # BIB_SPILL_POINTERS=OFF: no Binaryen --spill-pointers (see embedder.cmake)
-BIB_SPILL_POINTERS="${BIB_SPILL_POINTERS:-ON}"
+BIB_SPILL_POINTERS="${BIB_SPILL_POINTERS:-OFF}"
 BIB_PROFILING_FUNCS_CMAKE=ON
 [ "$BIB_PROFILING_FUNCS" = 1 ] || BIB_PROFILING_FUNCS_CMAKE=OFF
 # BIB_CCACHE=1 (default when ccache is on PATH): compile through ccache so a

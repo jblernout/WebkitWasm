@@ -716,19 +716,38 @@ static void bibRunTick(void*);
 // C++ stack is empty: a cell referenced only from a wasm local (invisible to
 // the conservative stack scan) cannot be collected under a live frame.
 static std::optional<JSC::DeferGC> g_deferGC; // DeferGC forbids heap allocation
+extern "C" int bib_gc_at_safepoints_only; // JSC heap/Heap.cpp (BIB patch)
 static bool bibGCDeferred()
 {
-    static const bool deferred = bib_host_flag("gcdefer") != 0;
+    static const bool deferred = [] {
+        bool on = bib_host_flag("gcdefer") != 0;
+        bib_gc_at_safepoints_only = on ? 1 : 0;
+        return on;
+    }();
     return deferred;
 }
-static void bibGCSafepoint()
+static void bibGCSafepointNow()
 {
-    if (!bibGCDeferred())
-        return;
     JSC::VM& vm = WebCore::commonVM();
     JSC::JSLockHolder lock(vm);
     g_deferGC.reset(); // ~DeferGC: decrementDeferralDepthAndGCIfNeeded
+    vm.heap.stopIfNecessary(); // run the collections requested meanwhile, here, on an empty stack
     g_deferGC.emplace(vm);
+}
+// Queued as a RunLoop task rather than run inline between two cycles: the
+// tasks already posted (a request's completion, for one) then run first,
+// so nothing the collection or the delayed wrapper releases tear down is
+// still referenced by a pending task. The stack below it is the RunLoop.
+static bool g_gcSafepointQueued = false;
+static void bibGCSafepoint()
+{
+    if (!bibGCDeferred() || g_gcSafepointQueued)
+        return;
+    g_gcSafepointQueued = true;
+    WTF::RunLoop::mainSingleton().dispatch([] {
+        g_gcSafepointQueued = false;
+        bibGCSafepointNow();
+    });
 }
 
 EMSCRIPTEN_KEEPALIVE void bib_tick()

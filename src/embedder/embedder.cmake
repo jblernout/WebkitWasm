@@ -71,7 +71,7 @@ set(BIB_INITIAL_MEMORY "64MB" CACHE STRING "-sINITIAL_MEMORY for the embedder li
 # triggered inside an allocation could free cells C++ frames still use.
 # ON: Binaryen spills live pointers around every call (+20 % time, +30 % code).
 # OFF: rely on bib_host_flag("gcdefer") (collections only at RunLoop safepoints).
-set(BIB_SPILL_POINTERS ON CACHE BOOL "Binaryen --spill-pointers on the embedder link")
+set(BIB_SPILL_POINTERS OFF CACHE BOOL "Binaryen --spill-pointers on the embedder link")
 if (BIB_SPILL_POINTERS)
     target_link_options(BibEmbedder PRIVATE "SHELL:-sBINARYEN_EXTRA_PASSES=--spill-pointers")
 endif ()
