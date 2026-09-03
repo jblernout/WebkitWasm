@@ -1738,7 +1738,15 @@ EMSCRIPTEN_KEEPALIVE void bib_reset()
     BIB::bibPendingStorageImport().clear();
     if (g_databaseProvider)
         g_databaseProvider->resetAll();
-    WebCore::MemoryCache::singleton().evictResources();
+    // bib_host_flag("keepmemcache"): keep parsed stylesheets, decoded images
+    // and script sources for the next page of the same site (WebKit's own
+    // freshness rules still apply); otherwise drop everything like a new
+    // browser session would.
+    static const bool keepMemoryCache = bib_host_flag("keepmemcache") != 0;
+    if (keepMemoryCache)
+        WebCore::MemoryCache::singleton().pruneDeadResources(); // over-capacity dead entries only
+    else
+        WebCore::MemoryCache::singleton().evictResources();
     WebCore::commonVM().heap.collectNow(JSC::Sync, JSC::CollectionScope::Full);
     WTF::releaseFastMallocFreeMemory();
     // Give the freed top of the heap back (sbrk shrinks): the host then
