@@ -125,7 +125,7 @@ BIB_PROFILING_FUNCS="${BIB_PROFILING_FUNCS:-1}"
 # (bib_host_discard); dlmalloc (default) never returns interior memory. mimalloc
 # is opt-in: it takes an out-of-bounds trap on some pages with the web-platform
 # preferences enabled (a latent emmalloc/mimalloc bug under this wasm port).
-BIB_MALLOC="${BIB_MALLOC:-dlmalloc}"
+BIB_MALLOC="${BIB_MALLOC:-mimalloc}"
 # BIB_SPILL_POINTERS=OFF: no Binaryen --spill-pointers (see embedder.cmake)
 BIB_SPILL_POINTERS="${BIB_SPILL_POINTERS:-ON}"
 BIB_PROFILING_FUNCS_CMAKE=ON

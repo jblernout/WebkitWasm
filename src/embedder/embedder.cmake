@@ -75,7 +75,7 @@ set(BIB_SPILL_POINTERS ON CACHE BOOL "Binaryen --spill-pointers on the embedder 
 if (BIB_SPILL_POINTERS)
     target_link_options(BibEmbedder PRIVATE "SHELL:-sBINARYEN_EXTRA_PASSES=--spill-pointers")
 endif ()
-set(BIB_MALLOC "dlmalloc" CACHE STRING "-sMALLOC for the embedder link (dlmalloc | mimalloc: freed pages handed back to the host through bib_host_discard)")
+set(BIB_MALLOC "mimalloc" CACHE STRING "-sMALLOC for the embedder link (dlmalloc | mimalloc: freed pages handed back to the host through bib_host_discard)")
 if (BIB_MALLOC STREQUAL "mimalloc")
     target_compile_definitions(BibEmbedder PRIVATE BIB_MIMALLOC=1)
 endif ()
