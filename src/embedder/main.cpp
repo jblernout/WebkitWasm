@@ -1758,6 +1758,11 @@ EMSCRIPTEN_KEEPALIVE void bib_reset()
     WTF::releaseFastMallocFreeMemory();
     // Give the freed top of the heap back (sbrk shrinks): the host then
     // discards the pages above bib_heap_end() so they stop being resident.
+    printf("EMBEDDER: reset (heap end %u)\n", bib_heap_end());
+    // Last statement on purpose: the host queues the bib_host_discard calls
+    // made during bib_reset and drops the merged ranges when the export
+    // returns (thousands of 64 KiB purges -> a few dozen syscalls), which is
+    // only safe if nothing allocates (and reuses a purged page) in between.
 #if BIB_MIMALLOC
     // purge freed pages now (bib_host_discard), do not wait for purge_delay.
     // No emmalloc_trim(): it moves the break down but leaves emmalloc's root
@@ -1768,7 +1773,6 @@ EMSCRIPTEN_KEEPALIVE void bib_reset()
 #else
     malloc_trim(0);
 #endif
-    printf("EMBEDDER: reset (heap end %u)\n", bib_heap_end());
 }
 static void bibRunReset(void*) { bib_reset(); }
 
@@ -2026,6 +2030,13 @@ static void bibRunKey(void* p)
 
 int main()
 {
+#if BIB_MIMALLOC
+    // Tuning from the environment (emscripten's mimalloc ignores MIMALLOC_*).
+    if (const char* v = getenv("BIB_MI_ARENA_RESERVE_KB"))
+        mi_option_set(mi_option_arena_reserve, atol(v));
+    if (const char* v = getenv("BIB_MI_PURGE_DELAY_MS"))
+        mi_option_set(mi_option_purge_delay, atol(v));
+#endif
     // W-B1: record the engine thread FIRST — every export's self-proxy
     // check needs it, and the host page starts calling exports the moment
     // onEngineReady fires.

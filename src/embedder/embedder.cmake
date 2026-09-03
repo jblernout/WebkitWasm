@@ -122,6 +122,8 @@ target_link_options(BibEmbedder PRIVATE
     # as the pre-js: touch main.cpp after editing it.
     "SHELL:--js-library ${BIB_EMBEDDER_DIR}/bib_host_lib.js"
     "SHELL:-sSTACK_SIZE=8MB"
+    # JSC conservative GC roots: spill wasm locals to the shadow stack (see patch_spill.py)
+    "SHELL:-sBINARYEN_EXTRA_PASSES=--spill-pointers"
     "SHELL:-sINITIAL_MEMORY=${BIB_INITIAL_MEMORY}"
     "SHELL:-sMALLOC=${BIB_MALLOC}"
     "SHELL:-sALLOW_MEMORY_GROWTH=1"
