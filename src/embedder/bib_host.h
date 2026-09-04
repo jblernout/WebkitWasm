@@ -122,6 +122,9 @@ void bib_host_discard(void* addr, size_t size);
 // Same, but never queued (mimalloc memory returned to emmalloc, which may
 // reuse it before the queue is flushed).
 void bib_host_discard_now(void* addr, size_t size);
+// on=1: queue the following bib_host_discard calls; on=0: drop the merged
+// ranges now. Only around code that cannot allocate (mi_collect).
+void bib_host_discard_batch(int on);
 
 // JavaScript bytecode cache (bib_host_flag("jsbytecode")): WebCore's script
 // source provider stores JSC's serialized unlinked bytecode per script

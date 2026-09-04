@@ -39,6 +39,9 @@ WTF_EXPORT_PRIVATE void setRunLoopArmTimerCallback(Function<void(double)>&&);
 #include "CurlContext.h"
 #include "CurlRequestScheduler.h" // bib_pump_network -> scheduler().hostPump()
 #include "MemoryRelease.h" // bib_reset: releasemem
+#if BIB_MIMALLOC
+extern "C" void emmalloc_for_each_free_region(void (*cb)(void* start, size_t size, void* arg), void* arg);
+#endif
 #include "Document.h"
 #include "DocumentLoader.h"
 #include "DocumentView.h" // inline LocalFrame::view() lives here, not in LocalFrame.h
@@ -1806,17 +1809,32 @@ EMSCRIPTEN_KEEPALIVE void bib_reset()
     // Give the freed top of the heap back (sbrk shrinks): the host then
     // discards the pages above bib_heap_end() so they stop being resident.
     printf("EMBEDDER: reset (heap end %u)\n", bib_heap_end());
-    // Last statement on purpose: the host queues the bib_host_discard calls
-    // made during bib_reset and drops the merged ranges when the export
-    // returns (thousands of 64 KiB purges -> a few dozen syscalls), which is
-    // only safe if nothing allocates (and reuses a purged page) in between.
 #if BIB_MIMALLOC
     // purge freed pages now (bib_host_discard), do not wait for purge_delay.
     // No emmalloc_trim(): it moves the break down but leaves emmalloc's root
     // region end pointer above it; the host then discards those pages and
     // emmalloc later walks/allocates into zeroed metadata (out-of-bounds trap
     // on botify.com, found with EMMALLOC_MEMVALIDATE + VERBOSE).
+    //
+    // bib_host_discard_batch: the host queues the purges made inside
+    // mi_collect and drops the merged ranges when the bracket closes
+    // (thousands of 64-256 KiB purges -> a few dozen syscalls). Safe because
+    // mi_collect never allocates, so no queued page is reused before the
+    // flush; queuing the whole reset was not (releaseMemory allocates and
+    // reused pages that mimalloc's delayed purge had queued).
+    bib_host_discard_batch(1);
     mi_collect(true);
+    // Memory mimalloc returned to emmalloc during the page (singleton pages
+    // of objects > 16 KiB) is not discarded at free time (one syscall each,
+    // thousands per page): whatever is still free now is queued here, merged
+    // with the purges.
+    emmalloc_for_each_free_region([](void* start, size_t size, void*) {
+        uintptr_t lo = (reinterpret_cast<uintptr_t>(start) + 4095) & ~static_cast<uintptr_t>(4095);
+        uintptr_t hi = (reinterpret_cast<uintptr_t>(start) + size) & ~static_cast<uintptr_t>(4095);
+        if (hi > lo)
+            bib_host_discard(reinterpret_cast<void*>(lo), hi - lo);
+    }, nullptr);
+    bib_host_discard_batch(0);
 #else
     malloc_trim(0);
 #endif
@@ -2075,14 +2093,26 @@ static void bibRunKey(void* p)
 
 } // extern "C"
 
+#if BIB_MIMALLOC
+extern "C" int bib_mi_trap_os_align;
+extern "C" void emmalloc_for_each_free_region(void (*cb)(void* start, size_t size, void* arg), void* arg);
+#endif
 int main()
 {
 #if BIB_MIMALLOC
     // Tuning from the environment (emscripten's mimalloc ignores MIMALLOC_*).
     if (const char* v = getenv("BIB_MI_ARENA_RESERVE_KB"))
         mi_option_set(mi_option_arena_reserve, atol(v));
+    // Purge only at reset (mi_collect(true) in bib_reset ignores the delay):
+    // a purge during the load is one host syscall per page, for memory the
+    // page is likely to reuse.
+    mi_option_set(mi_option_purge_delay, 60000);
     if (const char* v = getenv("BIB_MI_PURGE_DELAY_MS"))
         mi_option_set(mi_option_purge_delay, atol(v));
+    if (const char* v = getenv("BIB_MI_TRAP_OS_ALIGN"))
+        bib_mi_trap_os_align = atoi(v);
+    if (const char* v = getenv("BIB_MI_TRAP_OS_ALIGN"))
+        bib_mi_trap_os_align = atoi(v);
 #endif
     // W-B1: record the engine thread FIRST — every export's self-proxy
     // check needs it, and the host page starts calling exports the moment

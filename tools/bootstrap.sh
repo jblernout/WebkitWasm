@@ -59,6 +59,20 @@ fi
 echo "==> installing + activating Emscripten $EMSDK_VERSION"
 ( cd "$TP/emsdk" && ./emsdk install "$EMSDK_VERSION" && ./emsdk activate "$EMSDK_VERSION" )
 
+# --- 2b. our emscripten system-library patch --------------------------
+# mimalloc's emscripten primitives hand the host the pages it purges
+# (bib_host_discard) and emmalloc exposes its free regions for the reset-time
+# discard pass (emmalloc_for_each_free_region); see src/patches.
+EMS="$TP/emsdk/upstream/emscripten"
+if patch -p1 -d "$EMS" --dry-run -N -s < "$ROOT/src/patches/emscripten-system-lib.patch" >/dev/null 2>&1; then
+  patch -p1 -d "$EMS" -N -s < "$ROOT/src/patches/emscripten-system-lib.patch"
+  echo "    emscripten system-lib patch applied"
+  # the compiled system library, if any, predates the patch
+  ( cd "$TP/emsdk" && source ./emsdk_env.sh >/dev/null 2>&1 && embuilder clear libmimalloc libmimalloc-mt >/dev/null 2>&1 ) || true
+else
+  echo "    emscripten system-lib patch already applied"
+fi
+
 # --- 3. wasm dependency tier -> third_party/wasm-sysroot ----------------
 # ORDER IS LOAD-BEARING: harfbuzz/WebCore need ICU; curl-tier's fontconfig
 # needs freetype/libxml2/zlib/icu already in the sysroot (curl-tier.sh:6).

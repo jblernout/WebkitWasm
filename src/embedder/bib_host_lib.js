@@ -164,6 +164,8 @@ addToLibrary({
   bib_host_discard: (addr, size) => {},
   bib_host_discard_now__sig: 'vpp',
   bib_host_discard_now: (addr, size) => {},
+  bib_host_discard_batch__sig: 'vi',
+  bib_host_discard_batch: (on) => {},
 
   // --- JS bytecode cache: browsers keep JSC's in-memory cache only ----------
   bib_host_bytecode_get__sig: 'ppp',
