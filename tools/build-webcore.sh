@@ -84,6 +84,8 @@ fi
 # Default ON (the daily-driver mode).
 BIB_PTHREAD="${BIB_PTHREAD:-1}"
 WASM_FLAGS="-msimd128"
+# BIB_LTO=thin|full: LLVM LTO (compile + link); separate build tree recommended
+if [ -n "${BIB_LTO:-}" ]; then WASM_FLAGS="$WASM_FLAGS -flto=$BIB_LTO"; fi
 BIB_PTHREAD_CMAKE=OFF
 if [ "$BIB_PTHREAD" = 1 ]; then
   WASM_FLAGS="-msimd128 -pthread"

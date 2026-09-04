@@ -232,6 +232,8 @@ static bool g_gpu = false;
 // the host); crawlers only need the final frame, and layout, rAF and
 // observers are driven by the rendering update, not by painting.
 static bool g_lazyPaint = false;
+// bib_host_flag("nopaint"): no tick paint at all (see bibGCSafepoint's neighbour).
+static bool g_noPaint = false;
 static sk_sp<SkSurface> g_fbo0Surface; // present target, GPU mode only
 // G4 (W-B2): set by the webglcontextlost handler, cleared after the Ganesh
 // world is rebuilt on restore. Atomic: read by bib_render on the engine
@@ -1281,7 +1283,7 @@ static void bibPushFrameIfDirty()
     // contentful paint (Paint Timing is the one page-visible effect of
     // painting: PerformanceObserver "paint" entries); after that nothing is
     // painted until the host asks for the frame.
-    if (g_lazyPaint && bibFirstContentfulPaintReported())
+    if (g_noPaint || (g_lazyPaint && bibFirstContentfulPaintReported()))
         return;
     const uint8_t* pixels = bib_render(firstFramePushed ? 0 : 1);
     if (!pixels)
@@ -2115,6 +2117,11 @@ int main()
     // default. See PerfAccum / bib_tick.
     g_perfLog = bib_host_flag("perflog");
     g_lazyPaint = bib_host_flag("lazypaint") != 0;
+    g_noPaint = bib_host_flag("nopaint") != 0;
+    // bib_host_flag("reqtimeout") seconds: a request that receives nothing
+    // for that long fails (curl LOW_SPEED_TIME) instead of holding the page.
+    if (int reqTimeout = bib_host_flag("reqtimeout"); reqTimeout > 0)
+        WebCore::ResourceRequestBase::setDefaultTimeoutInterval(reqTimeout);
     printf("EMBEDDER: perflog=%s\n", g_perfLog ? "on" : "off");
 
     // Go host: runtime viewport (Module.bibWidth/bibHeight), default 800x600.
