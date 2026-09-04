@@ -180,9 +180,15 @@ if (NOT BIB_MINIFY_NAMES)
     target_link_options(BibEmbedder PRIVATE "SHELL:-lexports.js")
 endif ()
 
+# BIB_HOST_FS: a non-browser host serves these files itself at the same
+# virtual paths (from the assets directory, shared by its engines) instead
+# of the wasm carrying them as data segments (46 MB copied into every
+# engine's memory at instantiation).
+set(BIB_HOST_FS OFF CACHE BOOL "ICU data, fonts, fontconfig and CA bundle served by the host, not embedded")
+
 # ICU data archive at the same absolute path ICU compiled in as its default
 # data dir (jsc-shell trick — works in node and browser with no env setup).
-if (JSC_EMBED_ICU_DATA_FILE)
+if (JSC_EMBED_ICU_DATA_FILE AND NOT BIB_HOST_FS)
     target_link_options(BibEmbedder PRIVATE
         "SHELL:--embed-file ${JSC_EMBED_ICU_DATA_FILE}@${JSC_EMBED_ICU_DATA_FILE}")
 endif ()
@@ -190,18 +196,18 @@ endif ()
 # Fonts are load-bearing: fontconfig config tree at /etc/fonts (compiled-in
 # --sysconfdir) and at least one real TTF at /usr/share/fonts (compiled-in
 # --with-default-fonts). Without both, text paints nothing.
-if (BIB_FONTCONFIG_ETC_DIR)
+if (BIB_FONTCONFIG_ETC_DIR AND NOT BIB_HOST_FS)
     target_link_options(BibEmbedder PRIVATE
         "SHELL:--embed-file ${BIB_FONTCONFIG_ETC_DIR}@/etc/fonts")
 endif ()
-if (BIB_FONTS_DIR)
+if (BIB_FONTS_DIR AND NOT BIB_HOST_FS)
     target_link_options(BibEmbedder PRIVATE
         "SHELL:--embed-file ${BIB_FONTS_DIR}@/usr/share/fonts")
 endif ()
 
 # CA bundle for in-engine TLS verification (Phase 4) — the path is
 # compiled into CurlSSLHandleEmscripten.cpp.
-if (BIB_CA_BUNDLE)
+if (BIB_CA_BUNDLE AND NOT BIB_HOST_FS)
     target_link_options(BibEmbedder PRIVATE
         "SHELL:--embed-file ${BIB_CA_BUNDLE}@/etc/ssl/cacert.pem")
 endif ()

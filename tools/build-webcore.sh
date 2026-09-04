@@ -128,6 +128,8 @@ BIB_PROFILING_FUNCS="${BIB_PROFILING_FUNCS:-1}"
 # is opt-in: it takes an out-of-bounds trap on some pages with the web-platform
 # preferences enabled (a latent emmalloc/mimalloc bug under this wasm port).
 BIB_MALLOC="${BIB_MALLOC:-mimalloc}"
+# BIB_HOST_FS=1: ICU data, fonts, fontconfig, CA bundle served by the host (see embedder.cmake)
+BIB_HOST_FS="${BIB_HOST_FS:-0}"
 # BIB_SPILL_POINTERS=OFF: no Binaryen --spill-pointers (see embedder.cmake)
 BIB_SPILL_POINTERS="${BIB_SPILL_POINTERS:-OFF}"
 BIB_PROFILING_FUNCS_CMAKE=ON
@@ -152,6 +154,7 @@ fi
 EMBEDDER_FLAGS=(
   -DEMSCRIPTEN_EMBEDDER_CMAKE="$ROOT/src/embedder/embedder.cmake"
   -DBIB_MALLOC="$BIB_MALLOC"
+  -DBIB_HOST_FS="$( [ "$BIB_HOST_FS" = 1 ] && echo ON || echo OFF )"
   -DBIB_SPILL_POINTERS="$BIB_SPILL_POINTERS"
   -DBIB_FONTCONFIG_ETC_DIR="$FSROOT/etc-fonts"
   -DBIB_FONTS_DIR="$FSROOT/fonts"
@@ -245,9 +248,32 @@ m = {
     "real_threads": "$BIB_REAL_THREADS" == "1",
     "proxy_main": "$BIB_PROXY_MAIN" == "1",
     "host_hooks": sorted(set(hooks)),
+    "host_fs": "$BIB_HOST_FS" == "1",
+    # virtual path -> source on this machine; the host copies them next to
+    # webkit.wasm when host_fs is set (webkitwasm prepare)
+    "host_files": [
+        {"path": "$SYSROOT/share/icu/77.1/icudt77l.dat", "source": "$SYSROOT/share/icu/77.1/icudt77l.dat"},
+        {"path": "/etc/fonts", "source": "$FSROOT/etc-fonts"},
+        {"path": "/usr/share/fonts", "source": "$FSROOT/fonts"},
+        {"path": "/etc/ssl/cacert.pem", "source": "$FSROOT/ssl/cacert.pem"},
+    ],
 }
 json.dump(m, open(sys.argv[1], "w"), indent=1)
 print("MANIFEST:", sys.argv[1])
+if m["host_fs"]:
+    # stage the host-served files under bin/hostfs/<virtual path> so that
+    # `webkitwasm prepare` finds them next to the wasm on any machine
+    import shutil
+    root = os.path.join(os.path.dirname(sys.argv[1]), "hostfs")
+    shutil.rmtree(root, ignore_errors=True)
+    for hf in m["host_files"]:
+        dst = os.path.join(root, hf["path"].lstrip("/"))
+        if os.path.isdir(hf["source"]):
+            shutil.copytree(hf["source"], dst)
+        else:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(hf["source"], dst)
+    print("HOSTFS staged:", root)
 EOF
 # The project package.json is "type":"module"; node must treat the
 # non-modularized Emscripten output as CommonJS (tools/run-embedder.cjs).
